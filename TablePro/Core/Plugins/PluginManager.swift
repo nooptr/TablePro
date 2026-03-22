@@ -400,6 +400,16 @@ final class PluginManager {
         }
 
         let bundleId = bundle.bundleIdentifier ?? url.lastPathComponent
+
+        // Skip user-installed plugin if a built-in version already exists
+        if source == .userInstalled,
+           let existing = plugins.first(where: { $0.id == bundleId }),
+           existing.source == .builtIn
+        {
+            Self.logger.info("Skipping user-installed '\(bundleId)' — built-in version already loaded")
+            return existing
+        }
+
         let disabled = disabledPluginIds
 
         let driverType = principalClass as? any DriverPlugin.Type
@@ -633,6 +643,14 @@ final class PluginManager {
             for additionalId in entry.additionalTypeIds {
                 types.append(DatabaseType(rawValue: additionalId))
             }
+        }
+        return types.sorted { $0.rawValue < $1.rawValue }
+    }
+
+    var allAvailableDatabaseTypes: [DatabaseType] {
+        var types = Set(availableDatabaseTypes)
+        for type in DatabaseType.allKnownTypes {
+            types.insert(type)
         }
         return types.sorted { $0.rawValue < $1.rawValue }
     }

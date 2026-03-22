@@ -27,7 +27,7 @@ struct ConnectionFormView: View { // swiftlint:disable:this type_body_length
     private var isNew: Bool { connectionId == nil }
 
     private var availableDatabaseTypes: [DatabaseType] {
-        PluginManager.shared.availableDatabaseTypes
+        PluginManager.shared.allAvailableDatabaseTypes
     }
 
     private var additionalConnectionFields: [ConnectionField] {
@@ -126,6 +126,8 @@ struct ConnectionFormView: View { // swiftlint:disable:this type_body_length
     @State private var testSucceeded: Bool = false
 
     @State private var pluginInstallConnection: DatabaseConnection?
+    @State private var isInstallingPlugin: Bool = false
+    @State private var pluginInstallError: String?
 
     // Tab selection
     @State private var selectedTab: FormTab = .general
@@ -185,6 +187,8 @@ struct ConnectionFormView: View { // swiftlint:disable:this type_body_length
             if !visibleTabs.contains(selectedTab) {
                 selectedTab = .general
             }
+            isInstallingPlugin = false
+            pluginInstallError = nil
         }
         .pluginInstallPrompt(connection: $pluginInstallConnection) { connection in
             connectAfterInstall(connection)
@@ -237,9 +241,12 @@ struct ConnectionFormView: View { // swiftlint:disable:this type_body_length
                             HStack {
                                 Text(t.rawValue)
                                 if t.isDownloadablePlugin && !PluginManager.shared.isDriverLoaded(for: t) {
-                                    Image(systemName: "arrow.down.circle")
-                                        .foregroundStyle(.secondary)
+                                    Text("Not Installed")
                                         .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 1)
+                                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 3))
                                 }
                             }
                         } icon: {
@@ -251,6 +258,7 @@ struct ConnectionFormView: View { // swiftlint:disable:this type_body_length
                         .tag(t)
                     }
                 }
+                .disabled(isInstallingPlugin)
                 TextField(
                     String(localized: "Name"),
                     text: $name,
@@ -263,7 +271,41 @@ struct ConnectionFormView: View { // swiftlint:disable:this type_body_length
                 }
             }
 
-            if PluginManager.shared.connectionMode(for: type) == .fileBased {
+            if type.isDownloadablePlugin && !PluginManager.shared.isDriverLoaded(for: type) {
+                Section {
+                    LabeledContent(String(localized: "Plugin")) {
+                        if isInstallingPlugin {
+                            HStack(spacing: 6) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Installing…")
+                                    .foregroundStyle(.secondary)
+                            }
+                        } else if let error = pluginInstallError {
+                            HStack(spacing: 6) {
+                                Text(error)
+                                    .foregroundStyle(.red)
+                                    .font(.caption)
+                                    .lineLimit(2)
+                                Button("Retry") {
+                                    pluginInstallError = nil
+                                    installPlugin(for: type)
+                                }
+                                .controlSize(.small)
+                            }
+                        } else {
+                            HStack(spacing: 6) {
+                                Text("Not Installed")
+                                    .foregroundStyle(.secondary)
+                                Button("Install") {
+                                    installPlugin(for: type)
+                                }
+                                .controlSize(.small)
+                            }
+                        }
+                    }
+                }
+            } else if PluginManager.shared.connectionMode(for: type) == .fileBased {
                 Section(String(localized: "Database File")) {
                     HStack {
                         TextField(
@@ -920,7 +962,7 @@ struct ConnectionFormView: View { // swiftlint:disable:this type_body_length
                         Text("Test Connection")
                     }
                 }
-                .disabled(isTesting || !isValid)
+                .disabled(isTesting || isInstallingPlugin || !isValid)
 
                 Spacer()
 
@@ -952,7 +994,7 @@ struct ConnectionFormView: View { // swiftlint:disable:this type_body_length
                 }
                 .keyboardShortcut(.return)
                 .buttonStyle(.borderedProminent)
-                .disabled(!isValid)
+                .disabled(isInstallingPlugin || !isValid)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
@@ -1454,6 +1496,25 @@ struct ConnectionFormView: View { // swiftlint:disable:this type_body_length
         }
     }
 
+    private func installPlugin(for databaseType: DatabaseType) {
+        isInstallingPlugin = true
+        Task {
+            do {
+                try await PluginManager.shared.installMissingPlugin(for: databaseType) { _ in }
+                if type == databaseType {
+                    for field in PluginManager.shared.additionalConnectionFields(for: databaseType) {
+                        if additionalFieldValues[field.id] == nil, let defaultValue = field.defaultValue {
+                            additionalFieldValues[field.id] = defaultValue
+                        }
+                    }
+                }
+            } catch {
+                pluginInstallError = error.localizedDescription
+            }
+            isInstallingPlugin = false
+        }
+    }
+
     private func cleanupTestSecrets(for testId: UUID) {
         ConnectionStorage.shared.deletePassword(for: testId)
         ConnectionStorage.shared.deleteSSHPassword(for: testId)
@@ -1542,8 +1603,31 @@ struct ConnectionFormView: View { // swiftlint:disable:this type_body_length
                     applySSHAgentSocketPath(parsed.agentSocket ?? "")
                 }
             }
+            // Clear stale MongoDB fields before applying new import
+            let mongoKeys = additionalFieldValues.keys.filter {
+                $0.hasPrefix("mongo") || $0.hasPrefix("mongoParam_")
+            }
+            for key in mongoKeys {
+                additionalFieldValues.removeValue(forKey: key)
+            }
             if let authSourceValue = parsed.authSource, !authSourceValue.isEmpty {
                 additionalFieldValues["mongoAuthSource"] = authSourceValue
+            }
+            if parsed.useSrv {
+                additionalFieldValues["mongoUseSrv"] = "true"
+                if sslMode == .disabled {
+                    sslMode = .required
+                }
+            }
+            for (key, value) in parsed.mongoQueryParams where !value.isEmpty {
+                switch key {
+                case "authMechanism":
+                    additionalFieldValues["mongoAuthMechanism"] = value
+                case "replicaSet":
+                    additionalFieldValues["mongoReplicaSet"] = value
+                default:
+                    additionalFieldValues["mongoParam_\(key)"] = value
+                }
             }
             if parsed.type.pluginTypeId == "Redis", !parsed.database.isEmpty {
                 additionalFieldValues["redisDatabase"] = parsed.database
