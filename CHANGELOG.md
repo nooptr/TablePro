@@ -7,8 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-03-22
+
 ### Added
 
+- Redis key namespace tree view with collapse/expand grouping in sidebar (#418)
 - Keyboard focus navigation (Tab, Ctrl+J/K/N/P, arrow keys) for connection list, quick switcher, and database switcher
 - MongoDB `mongodb+srv://` URI support with SRV toggle, Auth Mechanism dropdown, and Replica Set field (#419)
 - Show all available database types in connection form with install status badge (#418)
@@ -992,7 +995,8 @@ TablePro is a native macOS database client built with SwiftUI and AppKit, design
     - Custom SQL query templates
     - Performance optimized for large datasets
 
-[Unreleased]: https://github.com/datlechin/tablepro/compare/v0.22.1...HEAD
+[Unreleased]: https://github.com/datlechin/tablepro/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/datlechin/tablepro/compare/v0.22.1...v0.23.0
 [0.22.1]: https://github.com/datlechin/tablepro/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/datlechin/tablepro/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/datlechin/tablepro/compare/v0.20.4...v0.21.0
