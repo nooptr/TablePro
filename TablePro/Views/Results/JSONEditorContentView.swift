@@ -110,7 +110,7 @@ private struct JSONSyntaxTextView: NSViewRepresentable {
 
         textView.isEditable = true
         textView.isSelectable = true
-        textView.font = NSFont.monospacedSystemFont(ofSize: DesignConstants.FontSize.medium, weight: .regular)
+        textView.font = NSFont.monospacedSystemFont(ofSize: ThemeEngine.shared.activeTheme.typography.medium, weight: .regular)
         textView.textContainerInset = NSSize(width: 8, height: 8)
         textView.backgroundColor = NSColor.textBackgroundColor
         textView.textColor = NSColor.labelColor
@@ -147,7 +147,7 @@ private struct JSONSyntaxTextView: NSViewRepresentable {
         guard length > 0 else { return }
 
         let fullRange = NSRange(location: 0, length: length)
-        let font = textView.font ?? NSFont.monospacedSystemFont(ofSize: DesignConstants.FontSize.medium, weight: .regular)
+        let font = textView.font ?? NSFont.monospacedSystemFont(ofSize: ThemeEngine.shared.activeTheme.typography.medium, weight: .regular)
         let content = textStorage.string
         let maxHighlightLength = 10_000
         let highlightRange: NSRange
@@ -195,17 +195,30 @@ private struct JSONSyntaxTextView: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: JSONSyntaxTextView
         var isUpdating = false
+        private var highlightWorkItem: DispatchWorkItem?
 
         init(_ parent: JSONSyntaxTextView) {
             self.parent = parent
+        }
+
+        deinit {
+            highlightWorkItem?.cancel()
         }
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             isUpdating = true
             parent.text = textView.string
-            JSONSyntaxTextView.applyHighlighting(to: textView)
             isUpdating = false
+
+            // Debounce syntax highlighting to avoid 4 regex passes per keystroke
+            highlightWorkItem?.cancel()
+            let workItem = DispatchWorkItem { [weak textView] in
+                guard let textView else { return }
+                JSONSyntaxTextView.applyHighlighting(to: textView)
+            }
+            highlightWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: workItem)
         }
     }
 }

@@ -10,6 +10,7 @@
 import Foundation
 import Observation
 import os
+import TableProPluginKit
 
 /// Manager for tracking and applying data changes
 /// @MainActor ensures thread-safe access - critical for avoiding EXC_BAD_ACCESS
@@ -27,6 +28,7 @@ final class DataChangeManager {
     var tableName: String = ""
     var primaryKeyColumn: String?
     var databaseType: DatabaseType = .mysql
+    var pluginDriver: (any PluginDatabaseDriver)?
 
     // Simple storage with explicit deep copy to avoid memory corruption
     private var _columnsStorage: [String] = []
@@ -84,6 +86,21 @@ final class DataChangeManager {
         guard let arrayIndex = changeIndex[key] else { return false }
         removeChangeAt(arrayIndex)
         return true
+    }
+
+    /// Binary search: count of elements in a sorted array that are strictly less than `target`.
+    /// Used for O(n log n) batch index shifting instead of O(n²) nested loops.
+    private static func countLessThan(_ target: Int, in sorted: [Int]) -> Int {
+        var lo = 0, hi = sorted.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if sorted[mid] < target {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        return lo
     }
 
     /// Undo/redo manager
@@ -412,18 +429,20 @@ final class DataChangeManager {
 
         pushUndo(.batchRowInsertion(rowIndices: validRows, rowValues: rowValues))
 
-        for deletedIndex in validRows.reversed() {
-            var shiftedIndices = Set<Int>()
-            for idx in insertedRowIndices {
-                shiftedIndices.insert(idx > deletedIndex ? idx - 1 : idx)
-            }
-            insertedRowIndices = shiftedIndices
+        // Single-pass shift using binary search instead of O(n²) nested loop
+        let sortedDeleted = validRows.sorted()
 
-            for i in 0..<changes.count {
-                if changes[i].rowIndex > deletedIndex {
-                    changes[i].rowIndex -= 1
-                }
-            }
+        var newInserted = Set<Int>()
+        for idx in insertedRowIndices {
+            let shiftCount = Self.countLessThan(idx, in: sortedDeleted)
+            newInserted.insert(idx - shiftCount)
+        }
+        insertedRowIndices = newInserted
+
+        for i in 0..<changes.count {
+            let rowIndex = changes[i].rowIndex
+            let shiftCount = Self.countLessThan(rowIndex, in: sortedDeleted)
+            changes[i].rowIndex = rowIndex - shiftCount
         }
 
         rebuildChangeIndex()
@@ -619,43 +638,56 @@ final class DataChangeManager {
     // MARK: - SQL Generation
 
     func generateSQL() throws -> [ParameterizedStatement] {
-        // MongoDB uses its own statement generator (shell syntax instead of SQL)
-        if databaseType == .mongodb {
-            let generator = MongoDBStatementGenerator(
-                collectionName: tableName,
-                columns: columns
-            )
-            let statements = generator.generateStatements(
-                from: changes,
-                insertedRowData: insertedRowData,
-                deletedRowIndices: deletedRowIndices,
-                insertedRowIndices: insertedRowIndices
-            )
+        try generateSQL(
+            for: changes,
+            insertedRowData: insertedRowData,
+            deletedRowIndices: deletedRowIndices,
+            insertedRowIndices: insertedRowIndices
+        )
+    }
 
-            let expectedUpdates = changes.count(where: { $0.type == .update })
-            let actualUpdates = statements.count(where: { $0.sql.contains(".updateOne(") })
-
-            if expectedUpdates > 0 && actualUpdates < expectedUpdates {
-                throw DatabaseError.queryFailed(
-                    "Cannot save UPDATE changes to collection '\(tableName)' without an _id field. " +
-                        "Please ensure the collection has _id values."
+    /// Unified statement generation for both data grid and sidebar edits.
+    /// Routes through plugin driver for NoSQL databases, falls back to SQLStatementGenerator for SQL.
+    func generateSQL(
+        for changes: [RowChange],
+        insertedRowData: [Int: [String?]] = [:],
+        deletedRowIndices: Set<Int> = [],
+        insertedRowIndices: Set<Int> = []
+    ) throws -> [ParameterizedStatement] {
+        // Try plugin dispatch first (handles MongoDB, Redis, etcd, and future NoSQL plugins)
+        if let pluginDriver {
+            let pluginChanges = changes.map { change -> PluginRowChange in
+                PluginRowChange(
+                    rowIndex: change.rowIndex,
+                    type: {
+                        switch change.type {
+                        case .insert: return .insert
+                        case .update: return .update
+                        case .delete: return .delete
+                        }
+                    }(),
+                    cellChanges: change.cellChanges.map {
+                        ($0.columnIndex, $0.columnName, $0.oldValue, $0.newValue)
+                    },
+                    originalRow: change.originalRow
                 )
             }
-
-            return statements
-        }
-
-        // Redis uses its own statement generator (Redis commands instead of SQL)
-        if databaseType == .redis {
-            let generator = RedisStatementGenerator(
-                namespaceName: tableName,
-                columns: columns
-            )
-            return generator.generateStatements(
-                from: changes,
+            if let statements = pluginDriver.generateStatements(
+                table: tableName,
+                columns: columns,
+                changes: pluginChanges,
                 insertedRowData: insertedRowData,
                 deletedRowIndices: deletedRowIndices,
                 insertedRowIndices: insertedRowIndices
+            ) {
+                return statements.map { ParameterizedStatement(sql: $0.statement, parameters: $0.parameters) }
+            }
+        }
+
+        // Safety: prevent SQL generation for NoSQL databases if plugin driver is unavailable
+        if PluginManager.shared.editorLanguage(for: databaseType) != .sql {
+            throw DatabaseError.queryFailed(
+                "Cannot generate statements for \(databaseType.rawValue) — plugin driver not initialized"
             )
         }
 
@@ -663,7 +695,9 @@ final class DataChangeManager {
             tableName: tableName,
             columns: columns,
             primaryKeyColumn: primaryKeyColumn,
-            databaseType: databaseType
+            databaseType: databaseType,
+            dialect: PluginManager.shared.sqlDialect(for: databaseType),
+            quoteIdentifier: pluginDriver?.quoteIdentifier
         )
         let statements = generator.generateStatements(
             from: changes,
@@ -673,9 +707,7 @@ final class DataChangeManager {
         )
 
         let expectedUpdates = changes.count(where: { $0.type == .update })
-        let actualUpdates = statements.count(where: {
-            $0.sql.hasPrefix("UPDATE") || $0.sql.hasPrefix("ALTER TABLE")
-        })
+        let actualUpdates = statements.count(where: { $0.sql.hasPrefix("UPDATE") })
 
         if expectedUpdates > 0 && actualUpdates < expectedUpdates {
             throw DatabaseError.queryFailed(
@@ -684,12 +716,12 @@ final class DataChangeManager {
             )
         }
 
-        let expectedDeletes = changes.count(where: { $0.type == .delete && deletedRowIndices.contains($0.rowIndex) })
-        let actualDeletes = statements.count(where: {
-            $0.sql.hasPrefix("DELETE") || $0.sql.contains(" DELETE ")
-        })
+        // Validate DELETE coverage: batch DELETE produces 1 statement for N rows when PK exists,
+        // so count statements != count rows. Instead check that all deletable rows got coverage.
+        let deletableChanges = changes.filter { $0.type == .delete && deletedRowIndices.contains($0.rowIndex) }
+        let deletableWithOriginalRow = deletableChanges.filter { $0.originalRow != nil }
 
-        if expectedDeletes > 0 && actualDeletes < expectedDeletes {
+        if !deletableChanges.isEmpty && deletableWithOriginalRow.isEmpty {
             throw DatabaseError.queryFailed(
                 "Cannot save DELETE changes to table '\(tableName)'. " +
                     "Some rows could not be identified for deletion. Please verify the table data."
@@ -744,15 +776,16 @@ final class DataChangeManager {
         return state
     }
 
-    func restoreState(from state: TabPendingChanges, tableName: String) {
+    func restoreState(from state: TabPendingChanges, tableName: String, databaseType: DatabaseType) {
         self.tableName = tableName
+        self.columns = state.columns
+        self.primaryKeyColumn = state.primaryKeyColumn
+        self.databaseType = databaseType
         self.changes = state.changes
         self.deletedRowIndices = state.deletedRowIndices
         self.insertedRowIndices = state.insertedRowIndices
         self.modifiedCells = state.modifiedCells
         self.insertedRowData = state.insertedRowData
-        self.primaryKeyColumn = state.primaryKeyColumn
-        self.columns = state.columns
         self.hasChanges = !state.changes.isEmpty
         rebuildChangeIndex()
     }

@@ -13,6 +13,10 @@ struct ConnectionURLFormatter {
             return formatSQLite(connection.database)
         }
 
+        if connection.type == .duckdb {
+            return formatDuckDB(connection.database)
+        }
+
         if connection.sshConfig.enabled {
             return formatSSH(connection, scheme: scheme, password: password)
         }
@@ -23,18 +27,8 @@ struct ConnectionURLFormatter {
     // MARK: - Private
 
     private static func urlScheme(for type: DatabaseType) -> String {
-        switch type {
-        case .mysql: return "mysql"
-        case .mariadb: return "mariadb"
-        case .postgresql: return "postgresql"
-        case .redshift: return "redshift"
-        case .sqlite: return "sqlite"
-        case .mongodb: return "mongodb"
-        case .redis: return "redis"
-        case .mssql: return "sqlserver"
-        case .oracle: return "oracle"
-        case .clickhouse: return "clickhouse"
-        }
+        PluginMetadataRegistry.shared.snapshot(forTypeId: type.pluginTypeId)?.primaryUrlScheme
+            ?? type.rawValue.lowercased()
     }
 
     private static func formatSQLite(_ database: String) -> String {
@@ -42,6 +36,13 @@ struct ConnectionURLFormatter {
             return "sqlite:///\(database.dropFirst())"
         }
         return "sqlite://\(database)"
+    }
+
+    private static func formatDuckDB(_ database: String) -> String {
+        if database.hasPrefix("/") {
+            return "duckdb:///\(database.dropFirst())"
+        }
+        return "duckdb://\(database)"
     }
 
     private static func formatSSH(

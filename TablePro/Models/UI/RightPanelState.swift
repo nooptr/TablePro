@@ -12,8 +12,13 @@ import os
 
 @MainActor @Observable final class RightPanelState {
     private static let isPresentedKey = "com.TablePro.rightPanel.isPresented"
+    private static let panelWidthKey = "com.TablePro.rightPanel.width"
     private static let isPresentedChangedNotification = Notification.Name("com.TablePro.rightPanel.isPresentedChanged")
     private var isSyncing = false
+
+    static let minWidth: CGFloat = 280
+    static let maxWidth: CGFloat = 500
+    static let defaultWidth: CGFloat = 320
     @ObservationIgnored private let _didTeardown = OSAllocatedUnfairLock(initialState: false)
 
     var isPresented: Bool {
@@ -26,6 +31,14 @@ import os
         }
     }
 
+    var panelWidth: CGFloat {
+        didSet {
+            let clamped = min(max(panelWidth, Self.minWidth), Self.maxWidth)
+            if panelWidth != clamped { panelWidth = clamped }
+            UserDefaults.standard.set(Double(clamped), forKey: Self.panelWidthKey)
+        }
+    }
+
     var activeTab: RightPanelTab = .details
 
     // Save closure — set by MainContentCommandActions, called by UnifiedRightPanelView
@@ -33,10 +46,18 @@ import os
 
     // Owned objects — lifted from MainContentView @StateObject
     let editState = MultiRowEditState()
-    let aiViewModel = AIChatViewModel()
+    private var _aiViewModel: AIChatViewModel?
+    var aiViewModel: AIChatViewModel {
+        if _aiViewModel == nil {
+            _aiViewModel = AIChatViewModel()
+        }
+        return _aiViewModel! // swiftlint:disable:this force_unwrapping
+    }
 
     init() {
         self.isPresented = UserDefaults.standard.bool(forKey: Self.isPresentedKey)
+        let savedWidth = UserDefaults.standard.double(forKey: Self.panelWidthKey)
+        self.panelWidth = savedWidth > 0 ? min(max(savedWidth, Self.minWidth), Self.maxWidth) : Self.defaultWidth
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleIsPresentedChanged(_:)),
@@ -51,9 +72,9 @@ import os
         guard !_didTeardown.withLock({ $0 }) else { return }
         _didTeardown.withLock { $0 = true }
         onSave = nil
-        aiViewModel.clearSessionData()
+        _aiViewModel?.clearSessionData()
         editState.releaseData()
-        NotificationCenter.default.removeObserver(self)
+        NotificationCenter.default.removeObserver(self) // swiftlint:disable:this notification_center_detachment
     }
 
     deinit {

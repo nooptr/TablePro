@@ -15,8 +15,96 @@ final class ClickHousePlugin: NSObject, TableProPlugin, DriverPlugin {
 
     static let databaseTypeId = "ClickHouse"
     static let databaseDisplayName = "ClickHouse"
-    static let iconName = "bolt.fill"
+    static let iconName = "clickhouse-icon"
     static let defaultPort = 8123
+
+    // MARK: - UI/Capability Metadata
+
+    static let isDownloadable = true
+    static let explainVariants: [ExplainVariant] = [
+        ExplainVariant(id: "plan", label: "Plan", sqlPrefix: "EXPLAIN"),
+        ExplainVariant(id: "pipeline", label: "Pipeline", sqlPrefix: "EXPLAIN PIPELINE"),
+        ExplainVariant(id: "ast", label: "AST", sqlPrefix: "EXPLAIN AST"),
+        ExplainVariant(id: "syntax", label: "Syntax", sqlPrefix: "EXPLAIN SYNTAX"),
+        ExplainVariant(id: "estimate", label: "Estimate", sqlPrefix: "EXPLAIN ESTIMATE"),
+    ]
+    static let brandColorHex = "#FFD100"
+    static let supportsForeignKeys = false
+    static let systemDatabaseNames: [String] = ["information_schema", "INFORMATION_SCHEMA", "system"]
+    static let columnTypesByCategory: [String: [String]] = [
+        "Integer": [
+            "UInt8", "UInt16", "UInt32", "UInt64", "UInt128", "UInt256",
+            "Int8", "Int16", "Int32", "Int64", "Int128", "Int256"
+        ],
+        "Float": ["Float32", "Float64", "Decimal", "Decimal32", "Decimal64", "Decimal128", "Decimal256"],
+        "String": ["String", "FixedString", "Enum8", "Enum16"],
+        "Date": ["Date", "Date32", "DateTime", "DateTime64"],
+        "Binary": [],
+        "Boolean": ["Bool"],
+        "JSON": ["JSON"],
+        "UUID": ["UUID"],
+        "Array": ["Array"],
+        "Map": ["Map"],
+        "Tuple": ["Tuple"],
+        "IP": ["IPv4", "IPv6"],
+        "Geo": ["Point", "Ring", "Polygon", "MultiPolygon"]
+    ]
+
+    static let structureColumnFields: [StructureColumnField] = [.name, .type, .nullable, .defaultValue, .comment]
+    static let supportsQueryProgress = true
+
+    static let sqlDialect: SQLDialectDescriptor? = SQLDialectDescriptor(
+        identifierQuote: "`",
+        keywords: [
+            "SELECT", "FROM", "WHERE", "JOIN", "INNER", "LEFT", "RIGHT", "OUTER", "CROSS", "FULL",
+            "ON", "USING", "AND", "OR", "NOT", "IN", "LIKE", "BETWEEN", "AS",
+            "ORDER", "BY", "GROUP", "HAVING", "LIMIT", "OFFSET",
+            "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE",
+            "CREATE", "ALTER", "DROP", "TABLE", "INDEX", "VIEW", "DATABASE", "SCHEMA",
+            "PRIMARY", "KEY", "FOREIGN", "REFERENCES", "UNIQUE", "CONSTRAINT",
+            "ADD", "MODIFY", "COLUMN", "RENAME",
+            "NULL", "IS", "ASC", "DESC", "DISTINCT", "ALL", "ANY", "SOME",
+            "CASE", "WHEN", "THEN", "ELSE", "END", "COALESCE",
+            "UNION", "INTERSECT", "EXCEPT",
+            "FINAL", "SAMPLE", "PREWHERE", "GLOBAL", "FORMAT", "SETTINGS",
+            "OPTIMIZE", "SYSTEM", "PARTITION", "TTL", "ENGINE", "CODEC",
+            "MATERIALIZED", "WITH"
+        ],
+        functions: [
+            "COUNT", "SUM", "AVG", "MAX", "MIN",
+            "CONCAT", "SUBSTRING", "LEFT", "RIGHT", "LENGTH", "LOWER", "UPPER",
+            "TRIM", "LTRIM", "RTRIM", "REPLACE",
+            "NOW", "TODAY", "YESTERDAY",
+            "CAST",
+            "UNIQ", "UNIQEXACT", "ARGMIN", "ARGMAX", "GROUPARRAY",
+            "TOSTRING", "TOINT32", "FORMATDATETIME",
+            "IF", "MULTIIF",
+            "ARRAYMAP", "ARRAYJOIN",
+            "MATCH", "CURRENTDATABASE", "VERSION",
+            "QUANTILE", "TOPK"
+        ],
+        dataTypes: [
+            "INT8", "INT16", "INT32", "INT64", "INT128", "INT256",
+            "UINT8", "UINT16", "UINT32", "UINT64", "UINT128", "UINT256",
+            "FLOAT32", "FLOAT64",
+            "DECIMAL", "DECIMAL32", "DECIMAL64", "DECIMAL128", "DECIMAL256",
+            "STRING", "FIXEDSTRING", "UUID",
+            "DATE", "DATE32", "DATETIME", "DATETIME64",
+            "ARRAY", "TUPLE", "MAP",
+            "NULLABLE", "LOWCARDINALITY",
+            "ENUM8", "ENUM16",
+            "IPV4", "IPV6",
+            "JSON", "BOOL"
+        ],
+        tableOptions: [
+            "ENGINE=MergeTree()", "ORDER BY", "PARTITION BY", "SETTINGS"
+        ],
+        regexSyntax: .match,
+        booleanLiteralStyle: .numeric,
+        likeEscapeStyle: .implicit,
+        paginationStyle: .limit,
+        requiresBackslashEscaping: true
+    )
 
     func createDriver(config: DriverConnectionConfig) -> any PluginDatabaseDriver {
         ClickHousePluginDriver(config: config)
@@ -25,13 +113,13 @@ final class ClickHousePlugin: NSObject, TableProPlugin, DriverPlugin {
 
 // MARK: - Error Types
 
-private struct ClickHouseError: Error, LocalizedError {
+private struct ClickHouseError: Error, PluginDriverError {
     let message: String
 
-    var errorDescription: String? { "ClickHouse Error: \(message)" }
+    var pluginErrorMessage: String { message }
 
-    static let notConnected = ClickHouseError(message: "Not connected to database")
-    static let connectionFailed = ClickHouseError(message: "Failed to establish connection")
+    static let notConnected = ClickHouseError(message: String(localized: "Not connected to database"))
+    static let connectionFailed = ClickHouseError(message: String(localized: "Failed to establish connection"))
 }
 
 // MARK: - Internal Query Result
@@ -41,6 +129,7 @@ private struct CHQueryResult {
     let columnTypeNames: [String]
     let rows: [[String?]]
     let affectedRows: Int
+    let isTruncated: Bool
 }
 
 // MARK: - Plugin Driver
@@ -64,6 +153,25 @@ final class ClickHousePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     var serverVersion: String? { _serverVersion }
     var supportsSchemas: Bool { false }
     var supportsTransactions: Bool { false }
+
+    func quoteIdentifier(_ name: String) -> String {
+        let escaped = name.replacingOccurrences(of: "`", with: "``")
+        return "`\(escaped)`"
+    }
+
+    func escapeStringLiteral(_ value: String) -> String {
+        var result = value
+        result = result.replacingOccurrences(of: "\\", with: "\\\\")
+        result = result.replacingOccurrences(of: "'", with: "''")
+        result = result.replacingOccurrences(of: "\n", with: "\\n")
+        result = result.replacingOccurrences(of: "\r", with: "\\r")
+        result = result.replacingOccurrences(of: "\t", with: "\\t")
+        result = result.replacingOccurrences(of: "\0", with: "\\0")
+        result = result.replacingOccurrences(of: "\u{08}", with: "\\b")
+        result = result.replacingOccurrences(of: "\u{0C}", with: "\\f")
+        result = result.replacingOccurrences(of: "\u{1A}", with: "\\Z")
+        return result
+    }
     func beginTransaction() async throws {}
     func commitTransaction() async throws {}
     func rollbackTransaction() async throws {}
@@ -78,8 +186,8 @@ final class ClickHousePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
 
     func connect() async throws {
         let useTLS = config.additionalFields["sslMode"] != nil
-            && config.additionalFields["sslMode"] != "disable"
-        let skipVerification = config.additionalFields["sslMode"] == "required"
+            && config.additionalFields["sslMode"] != "Disabled"
+        let skipVerification = config.additionalFields["sslMode"] == "Required"
 
         let urlConfig = URLSessionConfiguration.default
         urlConfig.timeoutIntervalForRequest = 30
@@ -138,7 +246,29 @@ final class ClickHousePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             columnTypeNames: result.columnTypeNames,
             rows: result.rows,
             rowsAffected: result.affectedRows,
-            executionTime: executionTime
+            executionTime: executionTime,
+            isTruncated: result.isTruncated
+        )
+    }
+
+    func executeParameterized(query: String, parameters: [String?]) async throws -> PluginQueryResult {
+        guard !parameters.isEmpty else {
+            return try await execute(query: query)
+        }
+
+        let startTime = Date()
+        let queryId = UUID().uuidString
+        let (convertedQuery, paramMap) = Self.buildClickHouseParams(query: query, parameters: parameters)
+        let result = try await executeRawWithParams(convertedQuery, params: paramMap, queryId: queryId)
+        let executionTime = Date().timeIntervalSince(startTime)
+
+        return PluginQueryResult(
+            columns: result.columns,
+            columnTypeNames: result.columnTypeNames,
+            rows: result.rows,
+            rowsAffected: result.affectedRows,
+            executionTime: executionTime,
+            isTruncated: result.isTruncated
         )
     }
 
@@ -233,6 +363,25 @@ final class ClickHousePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     }
 
     func fetchAllColumns(schema: String?) async throws -> [String: [PluginColumnInfo]] {
+        // Pre-fetch PK columns for all tables. Falls back to sorting_key when
+        // primary_key is empty (MergeTree without explicit PRIMARY KEY clause).
+        // Note: expression-based keys like toDate(col) won't match bare column names.
+        let pkSql = """
+            SELECT name, primary_key, sorting_key FROM system.tables
+            WHERE database = currentDatabase()
+            """
+        let pkResult = try await execute(query: pkSql)
+        var pkLookup: [String: Set<String>] = [:]
+        for row in pkResult.rows {
+            guard let tableName = row[safe: 0] ?? nil else { continue }
+            let primaryKey = (row[safe: 1] ?? nil) ?? ""
+            let sortingKey = (row[safe: 2] ?? nil) ?? ""
+            let keyString = primaryKey.isEmpty ? sortingKey : primaryKey
+            guard !keyString.isEmpty else { continue }
+            let cols = Set(keyString.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) })
+            pkLookup[tableName] = cols
+        }
+
         let sql = """
             SELECT table, name, type, default_kind, default_expression, comment
             FROM system.columns
@@ -265,7 +414,7 @@ final class ClickHousePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 name: colName,
                 dataType: dataType,
                 isNullable: isNullable,
-                isPrimaryKey: false,
+                isPrimaryKey: pkLookup[tableName]?.contains(colName) == true,
                 defaultValue: defaultValue,
                 extra: extra,
                 comment: (comment?.isEmpty == false) ? comment : nil
@@ -412,9 +561,164 @@ final class ClickHousePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         return PluginDatabaseMetadata(name: database)
     }
 
+    func fetchAllDatabaseMetadata() async throws -> [PluginDatabaseMetadata] {
+        let sql = """
+            SELECT database, count() AS table_count, sum(total_bytes) AS size_bytes
+            FROM system.tables
+            GROUP BY database
+            ORDER BY database
+            """
+        let result = try await execute(query: sql)
+        return result.rows.compactMap { row -> PluginDatabaseMetadata? in
+            guard let name = row[safe: 0] ?? nil else { return nil }
+            let tableCount = (row[safe: 1] ?? nil).flatMap { Int($0) } ?? 0
+            let sizeBytes = (row[safe: 2] ?? nil).flatMap { Int64($0) }
+            return PluginDatabaseMetadata(name: name, tableCount: tableCount, sizeBytes: sizeBytes)
+        }
+    }
+
     func createDatabase(name: String, charset: String, collation: String?) async throws {
         let escapedName = name.replacingOccurrences(of: "`", with: "``")
         _ = try await execute(query: "CREATE DATABASE `\(escapedName)`")
+    }
+
+    // MARK: - All Tables Metadata
+
+    func allTablesMetadataSQL(schema: String?) -> String? {
+        """
+        SELECT
+            database as `schema`,
+            name,
+            engine as kind,
+            total_rows as estimated_rows,
+            formatReadableSize(total_bytes) as total_size,
+            comment
+        FROM system.tables
+        WHERE database = currentDatabase()
+        ORDER BY name
+        """
+    }
+
+    // MARK: - DML Statement Generation
+
+    func generateStatements(
+        table: String,
+        columns: [String],
+        changes: [PluginRowChange],
+        insertedRowData: [Int: [String?]],
+        deletedRowIndices: Set<Int>,
+        insertedRowIndices: Set<Int>
+    ) -> [(statement: String, parameters: [String?])]? {
+        var statements: [(statement: String, parameters: [String?])] = []
+
+        for change in changes {
+            switch change.type {
+            case .insert:
+                guard insertedRowIndices.contains(change.rowIndex) else { continue }
+                if let values = insertedRowData[change.rowIndex] {
+                    if let stmt = generateClickHouseInsert(table: table, columns: columns, values: values) {
+                        statements.append(stmt)
+                    }
+                }
+            case .update:
+                if let stmt = generateClickHouseUpdate(table: table, columns: columns, change: change) {
+                    statements.append(stmt)
+                }
+            case .delete:
+                guard deletedRowIndices.contains(change.rowIndex) else { continue }
+                if let stmt = generateClickHouseDelete(table: table, columns: columns, change: change) {
+                    statements.append(stmt)
+                }
+            }
+        }
+
+        return statements.isEmpty ? nil : statements
+    }
+
+    private func generateClickHouseInsert(
+        table: String,
+        columns: [String],
+        values: [String?]
+    ) -> (statement: String, parameters: [String?])? {
+        var nonDefaultColumns: [String] = []
+        var parameters: [String?] = []
+
+        for (index, value) in values.enumerated() {
+            if value == "__DEFAULT__" { continue }
+            guard index < columns.count else { continue }
+            nonDefaultColumns.append("`\(columns[index].replacingOccurrences(of: "`", with: "``"))`")
+            parameters.append(value)
+        }
+
+        guard !nonDefaultColumns.isEmpty else { return nil }
+
+        let columnList = nonDefaultColumns.joined(separator: ", ")
+        let placeholders = parameters.map { _ in "?" }.joined(separator: ", ")
+        let sql = "INSERT INTO `\(table.replacingOccurrences(of: "`", with: "``"))` (\(columnList)) VALUES (\(placeholders))"
+        return (statement: sql, parameters: parameters)
+    }
+
+    private func generateClickHouseUpdate(
+        table: String,
+        columns: [String],
+        change: PluginRowChange
+    ) -> (statement: String, parameters: [String?])? {
+        guard !change.cellChanges.isEmpty else { return nil }
+
+        let escapedTable = "`\(table.replacingOccurrences(of: "`", with: "``"))`"
+        var parameters: [String?] = []
+
+        let setClauses = change.cellChanges.map { cellChange -> String in
+            let col = "`\(cellChange.columnName.replacingOccurrences(of: "`", with: "``"))`"
+            parameters.append(cellChange.newValue)
+            return "\(col) = ?"
+        }.joined(separator: ", ")
+
+        guard let whereClause = buildWhereClause(
+            columns: columns, change: change, parameters: &parameters
+        ) else { return nil }
+
+        let sql = "ALTER TABLE \(escapedTable) UPDATE \(setClauses) WHERE \(whereClause)"
+        return (statement: sql, parameters: parameters)
+    }
+
+    private func generateClickHouseDelete(
+        table: String,
+        columns: [String],
+        change: PluginRowChange
+    ) -> (statement: String, parameters: [String?])? {
+        let escapedTable = "`\(table.replacingOccurrences(of: "`", with: "``"))`"
+        var parameters: [String?] = []
+
+        guard let whereClause = buildWhereClause(
+            columns: columns, change: change, parameters: &parameters
+        ) else { return nil }
+
+        let sql = "ALTER TABLE \(escapedTable) DELETE WHERE \(whereClause)"
+        return (statement: sql, parameters: parameters)
+    }
+
+    private func buildWhereClause(
+        columns: [String],
+        change: PluginRowChange,
+        parameters: inout [String?]
+    ) -> String? {
+        guard let originalRow = change.originalRow else { return nil }
+
+        var conditions: [String] = []
+        for (index, columnName) in columns.enumerated() {
+            guard index < originalRow.count else { continue }
+            let col = "`\(columnName.replacingOccurrences(of: "`", with: "``"))`"
+            if let value = originalRow[index] {
+                parameters.append(value)
+                conditions.append("\(col) = ?")
+            } else {
+                conditions.append("\(col) IS NULL")
+            }
+        }
+
+        guard !conditions.isEmpty else { return nil }
+        return conditions.joined(separator: " AND ")
     }
 
     func cancelQuery() throws {
@@ -441,6 +745,23 @@ final class ClickHousePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         lock.lock()
         _currentDatabase = database
         lock.unlock()
+    }
+
+    // MARK: - EXPLAIN
+
+    func buildExplainQuery(_ sql: String) -> String? {
+        "EXPLAIN \(sql)"
+    }
+
+    // MARK: - View Templates
+
+    func createViewTemplate() -> String? {
+        "CREATE VIEW view_name AS\nSELECT column1, column2\nFROM table_name\nWHERE condition;"
+    }
+
+    func editViewFallbackTemplate(viewName: String) -> String? {
+        let quoted = quoteIdentifier(viewName)
+        return "CREATE OR REPLACE VIEW \(quoted) AS\nSELECT * FROM table_name;"
     }
 
     // MARK: - Kill Query
@@ -528,12 +849,69 @@ final class ClickHousePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             return parseTabSeparatedResponse(data)
         }
 
-        return CHQueryResult(columns: [], columnTypeNames: [], rows: [], affectedRows: 0)
+        return CHQueryResult(columns: [], columnTypeNames: [], rows: [], affectedRows: 0, isTruncated: false)
     }
 
-    private func buildRequest(query: String, database: String, queryId: String? = nil) throws -> URLRequest {
+    private func executeRawWithParams(_ query: String, params: [String: String?], queryId: String? = nil) async throws -> CHQueryResult {
+        lock.lock()
+        guard let session = self.session else {
+            lock.unlock()
+            throw ClickHouseError.notConnected
+        }
+        let database = _currentDatabase
+        if let queryId {
+            _lastQueryId = queryId
+        }
+        lock.unlock()
+
+        let request = try buildRequest(query: query, database: database, queryId: queryId, params: params)
+        let isSelect = Self.isSelectLikeQuery(query)
+
+        let (data, response) = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(Data, URLResponse), Error>) in
+                let task = session.dataTask(with: request) { data, response, error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                        return
+                    }
+                    guard let data, let response else {
+                        continuation.resume(throwing: ClickHouseError(message: "Empty response from server"))
+                        return
+                    }
+                    continuation.resume(returning: (data, response))
+                }
+                self.lock.lock()
+                self.currentTask = task
+                self.lock.unlock()
+                task.resume()
+            }
+        } onCancel: {
+            self.lock.lock()
+            self.currentTask?.cancel()
+            self.currentTask = nil
+            self.lock.unlock()
+        }
+
+        lock.lock()
+        currentTask = nil
+        lock.unlock()
+
+        if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode >= 400 {
+            let body = String(data: data, encoding: .utf8) ?? "Unknown error"
+            Self.logger.error("ClickHouse HTTP \(httpResponse.statusCode): \(body)")
+            throw ClickHouseError(message: body.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+
+        if isSelect {
+            return parseTabSeparatedResponse(data)
+        }
+
+        return CHQueryResult(columns: [], columnTypeNames: [], rows: [], affectedRows: 0, isTruncated: false)
+    }
+
+    private func buildRequest(query: String, database: String, queryId: String? = nil, params: [String: String?]? = nil) throws -> URLRequest {
         let useTLS = config.additionalFields["sslMode"] != nil
-            && config.additionalFields["sslMode"] != "disable"
+            && config.additionalFields["sslMode"] != "Disabled"
 
         var components = URLComponents()
         components.scheme = useTLS ? "https" : "http"
@@ -549,6 +927,11 @@ final class ClickHousePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             queryItems.append(URLQueryItem(name: "query_id", value: queryId))
         }
         queryItems.append(URLQueryItem(name: "send_progress_in_http_headers", value: "1"))
+        if let params {
+            for (key, value) in params.sorted(by: { $0.key < $1.key }) {
+                queryItems.append(URLQueryItem(name: "param_\(key)", value: value))
+            }
+        }
         if !queryItems.isEmpty {
             components.queryItems = queryItems
         }
@@ -587,19 +970,20 @@ final class ClickHousePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
 
     private func parseTabSeparatedResponse(_ data: Data) -> CHQueryResult {
         guard let text = String(data: data, encoding: .utf8), !text.isEmpty else {
-            return CHQueryResult(columns: [], columnTypeNames: [], rows: [], affectedRows: 0)
+            return CHQueryResult(columns: [], columnTypeNames: [], rows: [], affectedRows: 0, isTruncated: false)
         }
 
         let lines = text.components(separatedBy: "\n")
 
         guard lines.count >= 2 else {
-            return CHQueryResult(columns: [], columnTypeNames: [], rows: [], affectedRows: 0)
+            return CHQueryResult(columns: [], columnTypeNames: [], rows: [], affectedRows: 0, isTruncated: false)
         }
 
         let columns = lines[0].components(separatedBy: "\t")
         let columnTypes = lines[1].components(separatedBy: "\t")
 
         var rows: [[String?]] = []
+        var truncated = false
         for i in 2..<lines.count {
             let line = lines[i]
             if line.isEmpty { continue }
@@ -612,13 +996,18 @@ final class ClickHousePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 return Self.unescapeTsvField(field)
             }
             rows.append(row)
+            if rows.count >= PluginRowLimits.defaultMax {
+                truncated = true
+                break
+            }
         }
 
         return CHQueryResult(
             columns: columns,
             columnTypeNames: columnTypes,
             rows: rows,
-            affectedRows: rows.count
+            affectedRows: rows.count,
+            isTruncated: truncated
         )
     }
 
@@ -678,6 +1067,49 @@ final class ClickHousePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             i -= 1
         }
         return query
+    }
+
+    /// Convert `?` placeholders to `{p1:String}` and build parameter map for ClickHouse HTTP params.
+    private static func buildClickHouseParams(
+        query: String,
+        parameters: [String?]
+    ) -> (String, [String: String?]) {
+        var converted = ""
+        var paramIndex = 0
+        var inSingleQuote = false
+        var inDoubleQuote = false
+        var isEscaped = false
+
+        for char in query {
+            if isEscaped {
+                isEscaped = false
+                converted.append(char)
+                continue
+            }
+            if char == "\\" && (inSingleQuote || inDoubleQuote) {
+                isEscaped = true
+                converted.append(char)
+                continue
+            }
+            if char == "'" && !inDoubleQuote {
+                inSingleQuote.toggle()
+            } else if char == "\"" && !inSingleQuote {
+                inDoubleQuote.toggle()
+            }
+            if char == "?" && !inSingleQuote && !inDoubleQuote && paramIndex < parameters.count {
+                paramIndex += 1
+                converted.append("{p\(paramIndex):String}")
+            } else {
+                converted.append(char)
+            }
+        }
+
+        var paramMap: [String: String?] = [:]
+        for i in 0..<paramIndex where i < parameters.count {
+            paramMap["p\(i + 1)"] = parameters[i]
+        }
+
+        return (converted, paramMap)
     }
 
     // MARK: - TLS Delegate

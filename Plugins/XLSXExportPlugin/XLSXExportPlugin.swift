@@ -8,7 +8,7 @@ import SwiftUI
 import TableProPluginKit
 
 @Observable
-final class XLSXExportPlugin: ExportFormatPlugin {
+final class XLSXExportPlugin: ExportFormatPlugin, SettablePlugin {
     static let pluginName = "XLSX Export"
     static let pluginVersion = "1.0.0"
     static let pluginDescription = "Export data to Excel format"
@@ -17,11 +17,16 @@ final class XLSXExportPlugin: ExportFormatPlugin {
     static let defaultFileExtension = "xlsx"
     static let iconName = "tablecells"
 
-    var options = XLSXExportOptions()
+    typealias Settings = XLSXExportOptions
+    static let settingsStorageId = "xlsx"
 
-    required init() {}
+    var settings = XLSXExportOptions() {
+        didSet { saveSettings() }
+    }
 
-    func optionsView() -> AnyView? {
+    required init() { loadSettings() }
+
+    func settingsView() -> AnyView? {
         AnyView(XLSXExportOptionsView(plugin: self))
     }
 
@@ -60,14 +65,14 @@ final class XLSXExportPlugin: ExportFormatPlugin {
                     writer.beginSheet(
                         name: table.name,
                         columns: columns,
-                        includeHeader: options.includeHeaderRow,
-                        convertNullToEmpty: options.convertNullToEmpty
+                        includeHeader: settings.includeHeaderRow,
+                        convertNullToEmpty: settings.convertNullToEmpty
                     )
                     isFirstBatch = false
                 }
 
                 autoreleasepool {
-                    writer.addRows(result.rows, convertNullToEmpty: options.convertNullToEmpty)
+                    writer.addRows(result.rows, convertNullToEmpty: settings.convertNullToEmpty)
                 }
 
                 for _ in result.rows {
@@ -84,7 +89,7 @@ final class XLSXExportPlugin: ExportFormatPlugin {
                     name: table.name,
                     columns: [],
                     includeHeader: false,
-                    convertNullToEmpty: options.convertNullToEmpty
+                    convertNullToEmpty: settings.convertNullToEmpty
                 )
                 writer.finishSheet()
             }

@@ -8,7 +8,7 @@ import SwiftUI
 import TableProPluginKit
 
 @Observable
-final class JSONExportPlugin: ExportFormatPlugin {
+final class JSONExportPlugin: ExportFormatPlugin, SettablePlugin {
     static let pluginName = "JSON Export"
     static let pluginVersion = "1.0.0"
     static let pluginDescription = "Export data to JSON format"
@@ -17,11 +17,16 @@ final class JSONExportPlugin: ExportFormatPlugin {
     static let defaultFileExtension = "json"
     static let iconName = "curlybraces"
 
-    var options = JSONExportOptions()
+    typealias Settings = JSONExportOptions
+    static let settingsStorageId = "json"
 
-    required init() {}
+    var settings = JSONExportOptions() {
+        didSet { saveSettings() }
+    }
 
-    func optionsView() -> AnyView? {
+    required init() { loadSettings() }
+
+    func settingsView() -> AnyView? {
         AnyView(JSONExportOptionsView(plugin: self))
     }
 
@@ -34,7 +39,7 @@ final class JSONExportPlugin: ExportFormatPlugin {
         let fileHandle = try PluginExportUtilities.createFileHandle(at: destination)
         defer { try? fileHandle.close() }
 
-        let prettyPrint = options.prettyPrint
+        let prettyPrint = settings.prettyPrint
         let indent = prettyPrint ? "  " : ""
         let newline = prettyPrint ? "\n" : ""
 
@@ -87,7 +92,7 @@ final class JSONExportPlugin: ExportFormatPlugin {
                         for (colIndex, column) in columns.enumerated() {
                             if colIndex < row.count {
                                 let value = row[colIndex]
-                                if options.includeNullValues || value != nil {
+                                if settings.includeNullValues || value != nil {
                                     if !isFirstField {
                                         rowString += ", "
                                     }
@@ -96,7 +101,7 @@ final class JSONExportPlugin: ExportFormatPlugin {
                                     let escapedKey = PluginExportUtilities.escapeJSONString(column)
                                     let jsonValue = formatJSONValue(
                                         value,
-                                        preserveAsString: options.preserveAllAsStrings
+                                        preserveAsString: settings.preserveAllAsStrings
                                     )
                                     rowString += "\"\(escapedKey)\": \(jsonValue)"
                                 }
@@ -159,5 +164,4 @@ final class JSONExportPlugin: ExportFormatPlugin {
 
         return "\"\(PluginExportUtilities.escapeJSONString(val))\""
     }
-
 }

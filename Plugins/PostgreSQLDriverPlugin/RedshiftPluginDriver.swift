@@ -23,6 +23,7 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     var supportsSchemas: Bool { true }
     var supportsTransactions: Bool { true }
     var serverVersion: String? { libpqConnection?.serverVersion() }
+    var parameterStyle: ParameterStyle { .dollar }
 
     init(config: DriverConnectionConfig) {
         self.config = config
@@ -91,7 +92,8 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 columnTypeNames: result.columnTypeNames,
                 rows: result.rows,
                 rowsAffected: result.affectedRows,
-                executionTime: Date().timeIntervalSince(startTime)
+                executionTime: Date().timeIntervalSince(startTime),
+                isTruncated: result.isTruncated
             )
         } catch let error as NSError where !isRetry && isConnectionLostError(error) {
             try await reconnect()
@@ -110,7 +112,8 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             columnTypeNames: result.columnTypeNames,
             rows: result.rows,
             rowsAffected: result.affectedRows,
-            executionTime: Date().timeIntervalSince(startTime)
+            executionTime: Date().timeIntervalSince(startTime),
+            isTruncated: result.isTruncated
         )
     }
 
@@ -156,6 +159,12 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         _ = try await execute(query: "SET statement_timeout = '\(ms)'")
     }
 
+    // MARK: - EXPLAIN
+
+    func buildExplainQuery(_ sql: String) -> String? {
+        "EXPLAIN \(sql)"
+    }
+
     // MARK: - Schema
 
     func fetchTables(schema: String?) async throws -> [PluginTableInfo] {
@@ -184,7 +193,8 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 c.column_default,
                 c.collation_name,
                 pgd.description,
-                c.udt_name
+                c.udt_name,
+                CASE WHEN pk.column_name IS NOT NULL THEN 'YES' ELSE 'NO' END AS is_pk
             FROM information_schema.columns c
             LEFT JOIN pg_catalog.pg_class cls
                 ON cls.relname = c.table_name
@@ -192,6 +202,16 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             LEFT JOIN pg_catalog.pg_description pgd
                 ON pgd.objoid = cls.oid
                 AND pgd.objsubid = c.ordinal_position
+            LEFT JOIN (
+                SELECT DISTINCT kcu.column_name
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                    ON tc.constraint_name = kcu.constraint_name
+                    AND tc.table_schema = kcu.table_schema
+                WHERE tc.constraint_type = 'PRIMARY KEY'
+                    AND tc.table_schema = '\(escapedSchema)'
+                    AND tc.table_name = '\(safeTable)'
+            ) pk ON c.column_name = pk.column_name
             WHERE c.table_schema = '\(escapedSchema)' AND c.table_name = '\(safeTable)'
             ORDER BY c.ordinal_position
             """
@@ -214,6 +234,7 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             let defaultValue = row[3]
             let collation = row.count > 4 ? row[4] : nil
             let comment = row.count > 5 ? row[5] : nil
+            let isPk = row.count > 7 && row[7] == "YES"
 
             let charset: String? = {
                 guard let coll = collation else { return nil }
@@ -227,7 +248,7 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 name: name,
                 dataType: dataType,
                 isNullable: isNullable,
-                isPrimaryKey: false,
+                isPrimaryKey: isPk,
                 defaultValue: defaultValue,
                 charset: charset,
                 collation: collation,
@@ -246,7 +267,8 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 c.column_default,
                 c.collation_name,
                 pgd.description,
-                c.udt_name
+                c.udt_name,
+                CASE WHEN pk.column_name IS NOT NULL THEN 'YES' ELSE 'NO' END AS is_pk
             FROM information_schema.columns c
             LEFT JOIN pg_catalog.pg_class cls
                 ON cls.relname = c.table_name
@@ -254,6 +276,15 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             LEFT JOIN pg_catalog.pg_description pgd
                 ON pgd.objoid = cls.oid
                 AND pgd.objsubid = c.ordinal_position
+            LEFT JOIN (
+                SELECT DISTINCT kcu.table_name, kcu.column_name
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                    ON tc.constraint_name = kcu.constraint_name
+                    AND tc.table_schema = kcu.table_schema
+                WHERE tc.constraint_type = 'PRIMARY KEY'
+                    AND tc.table_schema = '\(escapedSchema)'
+            ) pk ON c.table_name = pk.table_name AND c.column_name = pk.column_name
             WHERE c.table_schema = '\(escapedSchema)'
             ORDER BY c.table_name, c.ordinal_position
             """
@@ -278,6 +309,7 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             let defaultValue = row[4]
             let collation = row.count > 5 ? row[5] : nil
             let comment = row.count > 6 ? row[6] : nil
+            let isPk = row.count > 8 && row[8] == "YES"
 
             let charset: String? = {
                 guard let coll = collation else { return nil }
@@ -291,7 +323,7 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 name: name,
                 dataType: dataType,
                 isNullable: isNullable,
-                isPrimaryKey: false,
+                isPrimaryKey: isPk,
                 defaultValue: defaultValue,
                 charset: charset,
                 collation: collation,
@@ -608,6 +640,26 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             query += " LC_COLLATE '\(escapedCollation)'"
         }
         _ = try await execute(query: query)
+    }
+
+    // MARK: - All Tables Metadata
+
+    func allTablesMetadataSQL(schema: String?) -> String? {
+        let s = schema ?? currentSchema ?? "public"
+        return """
+        SELECT
+            schema,
+            "table" as name,
+            'TABLE' as kind,
+            tbl_rows as estimated_rows,
+            size as size_mb,
+            pct_used,
+            unsorted,
+            stats_off
+        FROM svv_table_info
+        WHERE schema = '\(s)'
+        ORDER BY "table"
+        """
     }
 
     // MARK: - Helpers

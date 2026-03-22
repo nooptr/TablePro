@@ -28,7 +28,7 @@ Mở cài đặt qua **TablePro** > **Settings** hoặc `Cmd+,`.
     Ngôn ngữ, hành vi khởi động, cập nhật phần mềm và tùy chọn cơ bản
   </Card>
   <Card title="Giao diện" icon="palette" href="/vi/customization/appearance">
-    Chủ đề, màu sắc và tùy chọn trực quan
+    Theme engine với 9 preset, theme tùy chỉnh, màu sắc và phông chữ
   </Card>
   <Card title="Trình soạn thảo" icon="code" href="/vi/customization/editor-settings">
     Font, kích thước và hành vi SQL editor
@@ -65,6 +65,7 @@ Mở cài đặt qua **TablePro** > **Settings** hoặc `Cmd+,`.
 | **Hệ thống** | Theo ngôn ngữ macOS (mặc định) |
 | **English** | Tiếng Anh |
 | **Tiếng Việt** | Tiếng Việt |
+| **Türkçe** | Tiếng Thổ Nhĩ Kỳ |
 
 <Note>
 Đổi ngôn ngữ cần khởi động lại TablePro.
@@ -145,6 +146,19 @@ Hoàn toàn ẩn danh: không gửi thông tin cá nhân, truy vấn hay nội d
 
 ## Cài đặt Bảng Dữ liệu
 
+### Phông chữ
+
+| Cài đặt | Mặc định | Phạm vi | Mô tả |
+|---------|---------|-------|-------------|
+| **Phông chữ** | System Mono | System Mono, SF Mono, Menlo, Monaco, Courier New | Phông chữ đơn cách cho ô bảng dữ liệu |
+| **Cỡ chữ** | 13 pt | 10-18 pt | Cỡ chữ trong ô bảng dữ liệu |
+
+Cài đặt phông chữ ảnh hưởng đến tất cả ô bảng dữ liệu, bao gồm placeholder NULL và overlay chỉnh sửa ô. Bản xem trước trực tiếp được hiển thị trong bảng cài đặt.
+
+<Tip>
+Phông chữ bảng dữ liệu độc lập với phông chữ SQL editor. Bạn có thể dùng phông chữ và cỡ chữ khác nhau cho mỗi loại.
+</Tip>
+
 ### Chiều cao Hàng
 
 | Tùy chọn | Chiều cao | Phù hợp |
@@ -204,6 +218,13 @@ Trang lớn hơn dùng nhiều bộ nhớ hơn nhưng hiện nhiều dữ liệu
 | **On** | Kẻ sọc zebra để quét dễ hơn |
 | **Off** | Màu nền đồng nhất |
 
+### Số thứ tự hàng
+
+| Tùy chọn | Mô tả |
+|-----------|-------|
+| **Bật** | Hiển thị cột số thứ tự (`#`) làm cột đầu tiên |
+| **Tắt** | Ẩn cột số thứ tự |
+
 ### Tự động Hiện Inspector
 
 | Cài đặt | Mặc định | Mô tả |
@@ -258,6 +279,16 @@ Bật nếu thích duyệt bảng một tab, giống hành vi mặc định củ
     alt="Cài đặt Tab"
   />
 </Frame>
+
+### Tab Xem Trước
+
+| Cài đặt | Mặc định | Mô tả |
+|---------|---------|-------------|
+| **Enable preview tabs** | Bật | Click đơn bảng mở tab tạm thời, bị thay thế khi click bảng khác |
+
+Khi bật, click đơn bảng trong sidebar mở tab xem trước. Tab xem trước bị thay thế khi click bảng khác. Click đúp bảng hoặc tương tác với tab (sắp xếp, lọc, chỉnh sửa) biến nó thành tab cố định.
+
+Tab xem trước hiển thị "Preview" trong subtitle cửa sổ và không được lưu qua các lần khởi động lại.
 
 ## Cài đặt Bàn phím
 
@@ -347,30 +378,39 @@ Quản lý plugin driver database từ tab **Plugins** trong Settings.
 
 ### Plugin Đã cài
 
-TablePro đi kèm 8 plugin driver database tích hợp sẵn:
+Tab **Installed** hiển thị plugin theo bố cục chia đôi: danh sách bên trái, chi tiết bên phải. Mỗi dòng cho thấy phiên bản, khả năng và nguồn gốc (tích hợp sẵn hay do người dùng cài). Lọc theo tên bằng ô tìm kiếm phía trên danh sách.
 
-| Plugin | Loại Database | Cổng Mặc định |
-|--------|---------------|----------------|
-| MySQL | MySQL, MariaDB | 3306 |
-| PostgreSQL | PostgreSQL, Redshift | 5432 |
-| SQLite | SQLite | -- |
-| ClickHouse | ClickHouse | 8123 |
-| SQL Server | SQL Server | 1433 |
-| MongoDB | MongoDB | 27017 |
-| Redis | Redis | 6379 |
-| Oracle | Oracle | 1521 |
+TablePro đi kèm 3 plugin driver database tích hợp sẵn (MySQL, PostgreSQL, SQLite) và 3 plugin export tích hợp sẵn (CSV, JSON, SQL). Các plugin bổ sung có sẵn trên registry và có thể cài từ tab Browse hoặc tự động tải khi bạn chọn loại database:
 
-Mỗi plugin có nút bật/tắt. Plugin bị tắt sẽ ẩn loại database khỏi hộp thoại kết nối và ngăn kết nối đến loại database đó.
+| Plugin | Loại Database | Cổng Mặc định | Phân phối |
+|--------|---------------|----------------|-----------|
+| MySQL | MySQL, MariaDB | 3306 | Tích hợp sẵn |
+| PostgreSQL | PostgreSQL, Redshift | 5432 | Tích hợp sẵn |
+| SQLite | SQLite | -- | Tích hợp sẵn |
+| ClickHouse | ClickHouse | 8123 | Registry |
+| SQL Server | SQL Server | 1433 | Registry |
+| MongoDB | MongoDB | 27017 | Registry |
+| Redis | Redis | 6379 | Registry |
+| DuckDB | DuckDB | -- | Registry |
+| Oracle | Oracle | 1521 | Registry |
+
+Chọn plugin để bật/tắt bằng công tắc trong khung chi tiết. Plugin bị tắt sẽ ẩn loại database khỏi hộp thoại kết nối và ngăn kết nối đến loại database đó.
 
 ### Chi tiết Plugin
 
-Click vào plugin để xem chi tiết: phiên bản, bundle ID, khả năng hỗ trợ, loại database và cổng mặc định.
+Chọn plugin trong danh sách để xem chi tiết ở khung bên phải: phiên bản, bundle ID, khả năng hỗ trợ, loại database và cổng mặc định. Driver plugin có thể cung cấp panel cài đặt tùy chỉnh riêng, hiển thị trong phần chi tiết plugin.
+
+### Duyệt plugin
+
+Tab **Browse** cũng dùng bố cục chia đôi. Mỗi dòng cho thấy phiên bản, tác giả, lượt tải và trạng thái cài đặt. Lọc theo tên hoặc danh mục bằng các điều khiển phía trên. Nhấn vào plugin để xem chi tiết, hoặc bấm Install ngay từ danh sách.
 
 ### Cài đặt Plugin Bên thứ ba
 
-1. Nhấp **Install from File...**
+1. Nhấp nút **+** bên dưới danh sách plugin
 2. Chọn file `.zip` chứa bundle `.tableplugin`
 3. TablePro xác minh chữ ký mã và cài đặt plugin
+
+Bạn cũng có thể kéo thả file `.tableplugin` hoặc `.zip` vào cửa sổ cài đặt Plugins để cài đặt.
 
 <Warning>
 Chỉ cài plugin từ nguồn đáng tin cậy. TablePro kiểm tra chữ ký mã của plugin sideload nhưng không đảm bảo hành vi của chúng.
@@ -378,7 +418,16 @@ Chỉ cài plugin từ nguồn đáng tin cậy. TablePro kiểm tra chữ ký m
 
 ### Gỡ cài đặt Plugin
 
-Plugin do người dùng cài hiện nút **Uninstall** trong chi tiết plugin. Plugin tích hợp sẵn không thể gỡ, chỉ có thể tắt.
+Chọn plugin do người dùng cài và nhấp nút **-** bên dưới danh sách, hoặc dùng nút **Uninstall** trong khung chi tiết. Plugin tích hợp sẵn không thể gỡ, chỉ có thể tắt.
+
+### Cài Đặt Nâng Cao
+
+Một số cài đặt có sẵn qua `defaults write` cho người dùng nâng cao:
+
+| Cài đặt | Lệnh | Mô tả |
+|---------|------|-------|
+| Registry plugin tùy chỉnh | `defaults write com.TablePro com.TablePro.customRegistryURL <url>` | Sử dụng registry plugin riêng |
+| Xóa registry tùy chỉnh | `defaults delete com.TablePro com.TablePro.customRegistryURL` | Quay lại registry mặc định |
 
 ## Cài đặt Giấy phép
 
@@ -454,6 +503,7 @@ Khởi động lại TablePro.
 | Tự động kiểm tra cập nhật | General | Kiểm tra bản cập nhật tự động |
 | Chia sẻ phân tích | General | Chia sẻ dữ liệu ẩn danh |
 | Tự động kết nối lại | Connections | Kết nối lại khi ngắt |
+| Safe Mode | Kết nối | Kiểm soát thực thi query theo kết nối |
 
 ### Liên quan đến Editor
 
@@ -472,10 +522,13 @@ Xem [Cài đặt Editor](/vi/customization/editor-settings).
 
 | Cài đặt | Vị trí | Mô tả |
 |---------|----------|-------------|
-| Chủ đề | Appearance | Light/Dark/System |
-| Màu nhấn | Appearance | Màu nhấn UI |
+| Chủ đề | Appearance | 9 preset có sẵn + theme tùy chỉnh |
+| Màu theme | Appearance | Màu cú pháp editor, bảng dữ liệu, UI, sidebar, toolbar |
+| Phông chữ theme | Appearance | Họ font và cỡ chữ editor/bảng dữ liệu (chuyển từ tab Editor/Data Grid) |
 | Chiều cao hàng | Data Grid | Chiều cao hàng bảng |
 | Định dạng ngày | Data Grid | Định dạng hiển thị ngày |
+| Phông chữ | Data Grid | Phông chữ đơn cách cho ô dữ liệu |
+| Cỡ chữ | Data Grid | Cỡ chữ ô dữ liệu (10-18 pt) |
 
 Xem [Giao diện](/vi/customization/appearance).
 

@@ -17,6 +17,7 @@ TablePro is keyboard-driven. Most actions have shortcuts, and most menu shortcut
 | New connection | `Cmd+N` |
 | Open history | `Cmd+Y` |
 | Settings | `Cmd+,` |
+| Quick Switcher | `Cmd+P` |
 | Close window | `Cmd+W` |
 | Quit | `Cmd+Q` |
 
@@ -51,7 +52,6 @@ TablePro is keyboard-driven. Most actions have shortcuts, and most menu shortcut
 
 | Action | Shortcut |
 |--------|----------|
-| Go to line | `Cmd+Shift+L` |
 | Go to beginning | `Cmd+Up` |
 | Go to end | `Cmd+Down` |
 | Move line up | `Option+Up` |
@@ -125,7 +125,7 @@ TablePro is keyboard-driven. Most actions have shortcuts, and most menu shortcut
 |--------|----------|
 | Copy selection | `Cmd+C` |
 | Copy as CSV | `Cmd+Shift+C` |
-| Copy as JSON | `Cmd+Option+C` |
+| Copy as JSON | `Cmd+Option+J` |
 | Copy as TSV | Available from context menu |
 
 ## Application
@@ -176,6 +176,19 @@ TablePro is keyboard-driven. Most actions have shortcuts, and most menu shortcut
 | Toggle AI Chat | `Cmd+Shift+L` | Open or close the AI chat panel |
 | Explain with AI | `Cmd+L` | Send selected SQL (or current query) to AI for explanation |
 | Optimize with AI | `Cmd+Option+L` | Send selected SQL (or current query) to AI for optimization |
+
+## Alternative navigation (Ctrl+HJKL)
+
+For keyboards without dedicated arrow keys (e.g., HHKB), Ctrl+HJKL works as arrow key alternatives throughout the app. These work alongside arrow keys, not as replacements.
+
+| Shortcut | Action | Where |
+|----------|--------|-------|
+| `Ctrl+J` | Move down / Next item | Data grid, connection list, quick switcher, database switcher |
+| `Ctrl+K` | Move up / Previous item | Data grid, connection list, quick switcher, database switcher |
+| `Ctrl+H` | Move left / Collapse group | Data grid (column left), welcome panel (collapse group), onboarding (previous page) |
+| `Ctrl+L` | Move right / Expand group | Data grid (column right), welcome panel (expand group), onboarding (next page) |
+| `Ctrl+Shift+J` | Extend selection down | Data grid |
+| `Ctrl+Shift+K` | Extend selection up | Data grid |
 
 ## Vim Mode Keybindings
 
@@ -264,6 +277,19 @@ Vim mode keybindings only apply in the SQL editor. They don't affect the data gr
 |--------|----------|
 | Export data | `Cmd+Shift+E` |
 | Import data | `Cmd+Shift+I` |
+
+## Quick switcher
+
+The Quick Switcher (`Cmd+P`) lets you search and jump to any table, view, database, schema, or recent query. It uses fuzzy matching, so typing `usr` finds `users`, `user_settings`, etc.
+
+| Action | Shortcut |
+|--------|----------|
+| Open Quick Switcher | `Cmd+P` |
+| Navigate results | `Up` / `Down` arrows |
+| Open selected item | `Return` |
+| Dismiss | `Escape` |
+
+Results are grouped by type (tables, views, system tables, databases, schemas, recent queries) and ranked by match quality when searching.
 
 ## Global Shortcuts
 
@@ -439,6 +465,7 @@ Cmd+Shift+L    Toggle AI Chat
 Cmd+L          Explain with AI
 Cmd+Opt+L      Optimize with AI
 Cmd+,          Settings
+Cmd+P          Quick Switcher
 Cmd+W          Close window
 Cmd+Q          Quit
 ```

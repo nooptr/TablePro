@@ -137,6 +137,22 @@ protocol DatabaseDriver: AnyObject {
 
     /// Rollback the current transaction
     func rollbackTransaction() async throws
+
+    /// Access to the underlying plugin driver for query building dispatch
+    var queryBuildingPluginDriver: (any PluginDatabaseDriver)? { get }
+
+    /// Quote an identifier (table or column name) using the driver's quoting style
+    func quoteIdentifier(_ name: String) -> String
+
+    /// Escape a string value for safe use in SQL string literals
+    func escapeStringLiteral(_ value: String) -> String
+
+    func createViewTemplate() -> String?
+    func editViewFallbackTemplate(viewName: String) -> String?
+    func castColumnToText(_ column: String) -> String
+
+    func foreignKeyDisableStatements() -> [String]?
+    func foreignKeyEnableStatements() -> [String]?
 }
 
 // MARK: - Schema Switching
@@ -154,6 +170,28 @@ extension DatabaseDriver {
     /// Default implementation returns nil
     /// Override in drivers that support version querying
     var serverVersion: String? { nil }
+
+    var queryBuildingPluginDriver: (any PluginDatabaseDriver)? { nil }
+
+    func quoteIdentifier(_ name: String) -> String {
+        let q = "\""
+        let escaped = name.replacingOccurrences(of: q, with: q + q)
+        return "\(q)\(escaped)\(q)"
+    }
+
+    func escapeStringLiteral(_ value: String) -> String {
+        var result = value
+        result = result.replacingOccurrences(of: "'", with: "''")
+        result = result.replacingOccurrences(of: "\0", with: "")
+        return result
+    }
+
+    func createViewTemplate() -> String? { nil }
+    func editViewFallbackTemplate(viewName: String) -> String? { nil }
+    func castColumnToText(_ column: String) -> String { column }
+
+    func foreignKeyDisableStatements() -> [String]? { nil }
+    func foreignKeyEnableStatements() -> [String]? { nil }
 
     func testConnection() async throws -> Bool {
         try await connect()
@@ -193,17 +231,23 @@ extension DatabaseDriver {
     }
 
     func fetchForeignKeys(forTables tableNames: [String]) async throws -> [String: [ForeignKeyInfo]] {
-        var result: [String: [ForeignKeyInfo]] = [:]
-        for name in tableNames {
-            do {
-                let fks = try await fetchForeignKeys(table: name)
-                if !fks.isEmpty { result[name] = fks }
-            } catch {
-                Logger(subsystem: "com.TablePro", category: "DatabaseDriver")
-                    .debug("Failed to fetch foreign keys for \(name): \(error.localizedDescription)")
+        // For small subsets, per-table fetch avoids scanning the entire schema
+        if tableNames.count <= 5 {
+            var result: [String: [ForeignKeyInfo]] = [:]
+            for tableName in tableNames {
+                do {
+                    let fks = try await fetchForeignKeys(table: tableName)
+                    if !fks.isEmpty { result[tableName] = fks }
+                } catch {
+                    Logger(subsystem: "com.TablePro", category: "DatabaseDriver")
+                        .debug("Failed to fetch foreign keys for \(tableName): \(error.localizedDescription)")
+                }
             }
+            return result
         }
-        return result
+        let all = try await fetchAllForeignKeys()
+        let nameSet = Set(tableNames)
+        return all.filter { nameSet.contains($0.key) }
     }
 
     /// Default fetchAllColumns: falls back to per-table fetchColumns (N+1).
@@ -260,35 +304,11 @@ extension DatabaseDriver {
         // No-op by default
     }
 
-    /// Default timeout implementation using database-specific session variables
+    /// Default timeout implementation — delegates to each plugin's PluginDatabaseDriver.
+    /// The PluginDriverAdapter bridges this call to the plugin.
     func applyQueryTimeout(_ seconds: Int) async throws {
-        guard seconds > 0 else { return }
-        let ms = seconds * 1_000
-        do {
-            switch connection.type {
-            case .mysql:
-                _ = try await execute(query: "SET SESSION max_execution_time = \(ms)")
-            case .mariadb:
-                _ = try await execute(query: "SET SESSION max_statement_time = \(seconds)")
-            case .postgresql, .redshift:
-                _ = try await execute(query: "SET statement_timeout = '\(ms)'")
-            case .sqlite:
-                break  // SQLite busy_timeout handled by driver directly
-            case .mongodb:
-                break  // MongoDB timeout handled per-operation by MongoDBDriver
-            case .redis:
-                break  // Redis does not support session-level query timeouts
-            case .mssql:
-                _ = try await execute(query: "SET LOCK_TIMEOUT \(ms)")
-            case .oracle:
-                break  // Oracle timeout handled per-statement by OracleDriver
-            case .clickhouse:
-                _ = try await execute(query: "SET max_execution_time = \(seconds)")
-            }
-        } catch {
-            Logger(subsystem: "com.TablePro", category: "DatabaseDriver")
-                .warning("Failed to set query timeout: \(error.localizedDescription)")
-        }
+        // No-op: each plugin's PluginDatabaseDriver implements its own timeout command.
+        // The PluginDriverAdapter bridges this call to the plugin.
     }
 }
 
@@ -297,7 +317,16 @@ extension DatabaseDriver {
 enum DatabaseDriverFactory {
     static func createDriver(for connection: DatabaseConnection) throws -> DatabaseDriver {
         let pluginId = connection.type.pluginTypeId
+        // If the plugin isn't registered yet and background loading hasn't finished,
+        // fall back to synchronous loading for this critical code path.
+        if PluginManager.shared.driverPlugins[pluginId] == nil,
+           !PluginManager.shared.hasFinishedInitialLoad {
+            PluginManager.shared.loadPendingPlugins()
+        }
         guard let plugin = PluginManager.shared.driverPlugins[pluginId] else {
+            if connection.type.isDownloadablePlugin {
+                throw PluginError.pluginNotInstalled(connection.type.rawValue)
+            }
             throw DatabaseError.connectionFailed(
                 "\(pluginId) driver plugin not loaded. The plugin may be disabled or missing from the PlugIns directory."
             )
@@ -306,32 +335,63 @@ enum DatabaseDriverFactory {
             host: connection.host,
             port: connection.port,
             username: connection.username,
-            password: ConnectionStorage.shared.loadPassword(for: connection.id) ?? "",
+            password: resolvePassword(for: connection),
             database: connection.database,
-            additionalFields: buildAdditionalFields(for: connection)
+            additionalFields: buildAdditionalFields(for: connection, plugin: plugin)
         )
         let pluginDriver = plugin.createDriver(config: config)
         return PluginDriverAdapter(connection: connection, pluginDriver: pluginDriver)
     }
 
-    private static func buildAdditionalFields(for connection: DatabaseConnection) -> [String: String] {
+    private static func resolvePassword(for connection: DatabaseConnection) -> String {
+        if connection.usePgpass {
+            let pgpassHost = connection.additionalFields["pgpassOriginalHost"] ?? connection.host
+            let pgpassPort = connection.additionalFields["pgpassOriginalPort"]
+                .flatMap(Int.init) ?? connection.port
+            return PgpassReader.resolve(
+                host: pgpassHost.isEmpty ? "localhost" : pgpassHost,
+                port: pgpassPort,
+                database: connection.database,
+                username: connection.username
+            ) ?? ""
+        }
+        return ConnectionStorage.shared.loadPassword(for: connection.id) ?? ""
+    }
+
+    private static func buildAdditionalFields(
+        for connection: DatabaseConnection,
+        plugin: any DriverPlugin
+    ) -> [String: String] {
         var fields: [String: String] = [:]
 
-        // SSL fields (shared by most drivers)
         let ssl = connection.sslConfig
         fields["sslMode"] = ssl.mode.rawValue
         fields["sslCaCertPath"] = ssl.caCertificatePath
         fields["sslClientCertPath"] = ssl.clientCertificatePath
         fields["sslClientKeyPath"] = ssl.clientKeyPath
 
-        // Driver-specific fields
+        if let variant = type(of: plugin).driverVariant(for: connection.type.rawValue) {
+            fields["driverVariant"] = variant
+        }
+
+        for (key, value) in connection.additionalFields {
+            fields[key] = value
+        }
+
+        let secureFields = PluginManager.shared.additionalConnectionFields(for: connection.type)
+            .filter(\.isSecure)
+        for field in secureFields {
+            if fields[field.id] == nil || fields[field.id]?.isEmpty == true {
+                if let secureValue = ConnectionStorage.shared.loadPluginSecureField(
+                    fieldId: field.id, for: connection.id
+                ) {
+                    fields[field.id] = secureValue
+                }
+            }
+        }
+
         switch connection.type {
-        case .postgresql:
-            fields["driverVariant"] = "PostgreSQL"
-        case .redshift:
-            fields["driverVariant"] = "Redshift"
         case .mongodb:
-            // MongoDB uses "sslCACertPath" (capital A) — match plugin expectation
             fields["sslCACertPath"] = ssl.caCertificatePath
             fields["mongoReadPreference"] = connection.mongoReadPreference ?? ""
             fields["mongoWriteConcern"] = connection.mongoWriteConcern ?? ""
@@ -341,7 +401,7 @@ enum DatabaseDriverFactory {
             fields["mssqlSchema"] = connection.mssqlSchema ?? "dbo"
         case .oracle:
             fields["oracleServiceName"] = connection.oracleServiceName ?? ""
-        case .mysql, .mariadb, .sqlite, .clickhouse:
+        default:
             break
         }
 

@@ -9,6 +9,7 @@
 import AppKit
 import Observation
 import SwiftUI
+import TableProPluginKit
 
 // MARK: - Connection Environment
 
@@ -165,8 +166,10 @@ final class ConnectionToolbarState {
 
     // MARK: - Future Expansion
 
-    /// Whether the connection is read-only
-    var isReadOnly: Bool = false
+    /// Safe mode level for this connection
+    var safeModeLevel: SafeModeLevel = .silent
+
+    var isReadOnly: Bool { safeModeLevel == .readOnly }
 
     /// Whether the current tab is a table tab (enables filter/sort actions)
     var isTableTab: Bool = false
@@ -210,9 +213,7 @@ final class ConnectionToolbarState {
             parts.append(String(localized: "Replication lag: \(lag)s"))
         }
 
-        if isReadOnly {
-            parts.append(String(localized: "Read-only"))
-        }
+        parts.append(safeModeLevel.displayName)
 
         return parts.joined(separator: " • ")
     }
@@ -231,22 +232,18 @@ final class ConnectionToolbarState {
     /// Update state from a DatabaseConnection model
     func update(from connection: DatabaseConnection) {
         connectionName = connection.name
-        if connection.type == .sqlite {
+        if PluginManager.shared.connectionMode(for: connection.type) == .fileBased {
             databaseName = (connection.database as NSString).lastPathComponent
-        } else if connection.type == .postgresql {
-            if let session = DatabaseManager.shared.session(for: connection.id),
-               let database = session.currentDatabase {
-                databaseName = database
-            } else {
-                databaseName = connection.database
-            }
+        } else if let session = DatabaseManager.shared.session(for: connection.id),
+                  let database = session.currentDatabase {
+            databaseName = database
         } else {
             databaseName = connection.database
         }
         databaseType = connection.type
         displayColor = connection.displayColor
         tagId = connection.tagId
-        isReadOnly = connection.isReadOnly
+        safeModeLevel = connection.safeModeLevel
     }
 
     /// Update connection state from ConnectionStatus
@@ -276,7 +273,7 @@ final class ConnectionToolbarState {
         lastQueryDuration = nil
         clickHouseProgress = nil
         lastClickHouseProgress = nil
-        isReadOnly = false
+        safeModeLevel = .silent
         isTableTab = false
         latencyMs = nil
         replicationLagSeconds = nil

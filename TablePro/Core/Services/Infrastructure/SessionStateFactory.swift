@@ -14,6 +14,7 @@ enum SessionStateFactory {
         let tabManager: QueryTabManager
         let changeManager: DataChangeManager
         let filterStateManager: FilterStateManager
+        let columnVisibilityManager: ColumnVisibilityManager
         let toolbarState: ConnectionToolbarState
         let coordinator: MainContentCoordinator
     }
@@ -24,7 +25,9 @@ enum SessionStateFactory {
     ) -> SessionState {
         let tabMgr = QueryTabManager()
         let changeMgr = DataChangeManager()
+        changeMgr.databaseType = connection.type
         let filterMgr = FilterStateManager()
+        let colVisMgr = ColumnVisibilityManager()
         let toolbarSt = ConnectionToolbarState(connection: connection)
 
         // Eagerly populate version + state from existing session to avoid flash
@@ -40,7 +43,7 @@ enum SessionStateFactory {
         toolbarSt.hasCompletedSetup = true
 
         // Redis: set initial database name eagerly to avoid toolbar flash
-        if connection.type == .redis {
+        if connection.type.pluginTypeId == "Redis" {
             let dbIndex = connection.redisDatabase ?? Int(connection.database) ?? 0
             toolbarSt.databaseName = String(dbIndex)
         }
@@ -50,16 +53,28 @@ enum SessionStateFactory {
             switch payload.tabType {
             case .table:
                 if let tableName = payload.tableName {
-                    tabMgr.addTableTab(
-                        tableName: tableName,
-                        databaseType: connection.type,
-                        databaseName: payload.databaseName ?? connection.database
-                    )
+                    if payload.isPreview {
+                        tabMgr.addPreviewTableTab(
+                            tableName: tableName,
+                            databaseType: connection.type,
+                            databaseName: payload.databaseName ?? connection.database
+                        )
+                    } else {
+                        tabMgr.addTableTab(
+                            tableName: tableName,
+                            databaseType: connection.type,
+                            databaseName: payload.databaseName ?? connection.database
+                        )
+                    }
                     if let index = tabMgr.selectedTabIndex {
                         tabMgr.tabs[index].isView = payload.isView
                         tabMgr.tabs[index].isEditable = !payload.isView
                         if payload.showStructure {
                             tabMgr.tabs[index].showStructure = true
+                        }
+                        if let initialFilter = payload.initialFilterState {
+                            tabMgr.tabs[index].filterState = initialFilter
+                            filterMgr.restoreFromTabState(initialFilter)
                         }
                     }
                 } else {
@@ -78,6 +93,7 @@ enum SessionStateFactory {
             tabManager: tabMgr,
             changeManager: changeMgr,
             filterStateManager: filterMgr,
+            columnVisibilityManager: colVisMgr,
             toolbarState: toolbarSt
         )
 
@@ -85,6 +101,7 @@ enum SessionStateFactory {
             tabManager: tabMgr,
             changeManager: changeMgr,
             filterStateManager: filterMgr,
+            columnVisibilityManager: colVisMgr,
             toolbarState: toolbarSt,
             coordinator: coord
         )

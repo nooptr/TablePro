@@ -16,6 +16,7 @@ enum SSHAuthMethod: String, CaseIterable, Identifiable, Codable {
     case password = "Password"
     case privateKey = "Private Key"
     case sshAgent = "SSH Agent"
+    case keyboardInteractive = "Keyboard Interactive"
 
     var id: String { rawValue }
 
@@ -24,6 +25,7 @@ enum SSHAuthMethod: String, CaseIterable, Identifiable, Codable {
         case .password: return String(localized: "Password")
         case .privateKey: return String(localized: "Private Key")
         case .sshAgent: return String(localized: "SSH Agent")
+        case .keyboardInteractive: return String(localized: "Keyboard Interactive")
         }
     }
 
@@ -32,6 +34,7 @@ enum SSHAuthMethod: String, CaseIterable, Identifiable, Codable {
         case .password: return "key.fill"
         case .privateKey: return "doc.text.fill"
         case .sshAgent: return "person.badge.key.fill"
+        case .keyboardInteractive: return "lock.rotation"
         }
     }
 }
@@ -118,6 +121,10 @@ struct SSHConfiguration: Codable, Hashable {
     var useSSHConfig: Bool = true  // Auto-fill from ~/.ssh/config when selecting host
     var agentSocketPath: String = ""  // Custom SSH_AUTH_SOCK path (empty = use system default)
     var jumpHosts: [SSHJumpHost] = []
+    var totpMode: TOTPMode = .none
+    var totpAlgorithm: TOTPAlgorithm = .sha1
+    var totpDigits: Int = 6
+    var totpPeriod: Int = 30
 
     /// Check if SSH configuration is complete enough for connection
     var isValid: Bool {
@@ -132,6 +139,8 @@ struct SSHConfiguration: Codable, Hashable {
             authValid = !privateKeyPath.isEmpty
         case .sshAgent:
             authValid = true
+        case .keyboardInteractive:
+            authValid = true
         }
 
         return authValid && jumpHosts.allSatisfy(\.isValid)
@@ -141,6 +150,7 @@ struct SSHConfiguration: Codable, Hashable {
 extension SSHConfiguration {
     enum CodingKeys: String, CodingKey {
         case enabled, host, port, username, authMethod, privateKeyPath, useSSHConfig, agentSocketPath, jumpHosts
+        case totpMode, totpAlgorithm, totpDigits, totpPeriod
     }
 
     init(from decoder: Decoder) throws {
@@ -154,6 +164,10 @@ extension SSHConfiguration {
         useSSHConfig = try container.decode(Bool.self, forKey: .useSSHConfig)
         agentSocketPath = try container.decode(String.self, forKey: .agentSocketPath)
         jumpHosts = try container.decodeIfPresent([SSHJumpHost].self, forKey: .jumpHosts) ?? []
+        totpMode = try container.decodeIfPresent(TOTPMode.self, forKey: .totpMode) ?? .none
+        totpAlgorithm = try container.decodeIfPresent(TOTPAlgorithm.self, forKey: .totpAlgorithm) ?? .sha1
+        totpDigits = try container.decodeIfPresent(Int.self, forKey: .totpDigits) ?? 6
+        totpPeriod = try container.decodeIfPresent(Int.self, forKey: .totpPeriod) ?? 30
     }
 }
 
@@ -197,132 +211,103 @@ struct SSLConfiguration: Codable, Hashable {
 // MARK: - Database Type
 
 /// Represents the type of database
-enum DatabaseType: String, CaseIterable, Identifiable, Codable {
-    case mysql = "MySQL"
-    case mariadb = "MariaDB"
-    case postgresql = "PostgreSQL"
-    case sqlite = "SQLite"
-    case redshift = "Redshift"
-    case mongodb = "MongoDB"
-    case redis = "Redis"
-    case mssql = "SQL Server"
-    case oracle = "Oracle"
-    case clickhouse = "ClickHouse"
-
+struct DatabaseType: Hashable, Identifiable, Sendable {
+    let rawValue: String
+    init(rawValue: String) { self.rawValue = rawValue }
     var id: String { rawValue }
+    var displayName: String { rawValue }
+}
 
-    /// Plugin type ID used for PluginManager lookup.
-    /// Maps database types that share a plugin (e.g., MySQL/MariaDB, PostgreSQL/Redshift).
+extension DatabaseType {
+    // Built-in types (bundled plugins)
+    static let mysql = DatabaseType(rawValue: "MySQL")
+    static let mariadb = DatabaseType(rawValue: "MariaDB")
+    static let postgresql = DatabaseType(rawValue: "PostgreSQL")
+    static let sqlite = DatabaseType(rawValue: "SQLite")
+    static let redshift = DatabaseType(rawValue: "Redshift")
+
+    // Registry-distributed types (known plugins, downloadable separately)
+    static let mongodb = DatabaseType(rawValue: "MongoDB")
+    static let redis = DatabaseType(rawValue: "Redis")
+    static let mssql = DatabaseType(rawValue: "SQL Server")
+    static let oracle = DatabaseType(rawValue: "Oracle")
+    static let clickhouse = DatabaseType(rawValue: "ClickHouse")
+    static let duckdb = DatabaseType(rawValue: "DuckDB")
+    static let cassandra = DatabaseType(rawValue: "Cassandra")
+    static let scylladb = DatabaseType(rawValue: "ScyllaDB")
+    static let etcd = DatabaseType(rawValue: "etcd")
+    static let cloudflareD1 = DatabaseType(rawValue: "Cloudflare D1")
+    static let dynamodb = DatabaseType(rawValue: "DynamoDB")
+}
+
+extension DatabaseType: Codable {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        self.rawValue = try container.decode(String.self)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
+extension DatabaseType {
+    /// All registered database types, derived dynamically from the plugin metadata registry.
+    static var allKnownTypes: [DatabaseType] {
+        PluginMetadataRegistry.shared.allRegisteredTypeIds().map { DatabaseType(rawValue: $0) }
+    }
+
+    /// Compatibility shim for CaseIterable call sites.
+    static var allCases: [DatabaseType] { allKnownTypes }
+}
+
+extension DatabaseType {
+    /// Returns nil if rawValue doesn't match any registered type.
+    init?(validating rawValue: String) {
+        guard PluginMetadataRegistry.shared.hasType(rawValue) else { return nil }
+        self.rawValue = rawValue
+    }
+}
+
+extension DatabaseType {
+    /// Plugin type ID used for PluginManager lookup, resolved via the registry.
     var pluginTypeId: String {
-        switch self {
-        case .mysql, .mariadb: return "MySQL"
-        case .postgresql, .redshift: return "PostgreSQL"
-        case .mssql: return "SQL Server"
-        case .sqlite: return "SQLite"
-        case .mongodb: return "MongoDB"
-        case .redis: return "Redis"
-        case .oracle: return "Oracle"
-        case .clickhouse: return "ClickHouse"
-        }
+        PluginMetadataRegistry.shared.pluginTypeId(for: rawValue)
     }
 
-    /// Asset name for each database type icon
+    var isDownloadablePlugin: Bool {
+        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.isDownloadable ?? false
+    }
+
     var iconName: String {
-        switch self {
-        case .mysql:
-            return "mysql-icon"
-        case .mariadb:
-            return "mariadb-icon"
-        case .postgresql:
-            return "postgresql-icon"
-        case .sqlite:
-            return "sqlite-icon"
-        case .redshift:
-            return "redshift-icon"
-        case .mongodb:
-            return "mongodb-icon"
-        case .redis:
-            return "redis-icon"
-        case .mssql:
-            return "mssql-icon"
-        case .oracle:
-            return "oracle-icon"
-        case .clickhouse:
-            return "clickhouse-icon"
-        }
+        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.iconName ?? "database-icon"
     }
 
-    /// Default port for each database type
+    /// Returns the correct SwiftUI Image for this database type, handling both
+    /// SF Symbol names (e.g. "cylinder.fill") and asset catalog names (e.g. "mysql-icon").
+    var iconImage: Image {
+        let name = iconName
+        if NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil {
+            return Image(systemName: name)
+        }
+        return Image(name).resizable()
+    }
+
     var defaultPort: Int {
-        switch self {
-        case .mysql, .mariadb: return 3_306
-        case .postgresql: return 5_432
-        case .sqlite: return 0
-        case .redshift: return 5_439
-        case .mongodb: return 27_017
-        case .redis: return 6_379
-        case .mssql: return 1_433
-        case .oracle: return 1_521
-        case .clickhouse: return 8_123
-        }
+        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.defaultPort ?? 0
     }
 
-    /// Whether this database type typically requires authentication credentials.
-    /// MySQL, MariaDB, and PostgreSQL default to "root" when no username is provided;
-    /// MongoDB and SQLite commonly run without authentication.
     var requiresAuthentication: Bool {
-        switch self {
-        case .mysql, .mariadb, .postgresql, .redshift, .mssql, .oracle, .clickhouse: return true
-        case .sqlite, .mongodb, .redis: return false
-        }
+        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.requiresAuthentication ?? true
     }
 
-    /// Whether this database type supports foreign key constraints
     var supportsForeignKeys: Bool {
-        switch self {
-        case .mysql, .mariadb, .postgresql, .sqlite, .redshift, .mssql, .oracle:
-            return true
-        case .mongodb, .redis, .clickhouse:
-            return false
-        }
+        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.supportsForeignKeys ?? true
     }
 
-    /// Whether this database type supports SQL-based schema editing (ALTER TABLE etc.)
     var supportsSchemaEditing: Bool {
-        switch self {
-        case .mysql, .mariadb, .postgresql, .sqlite, .mssql, .oracle, .clickhouse:
-            return true
-        case .redshift, .mongodb, .redis:
-            return false
-        }
-    }
-
-    /// Quote character for identifiers (table/column names)
-    /// MySQL/MariaDB/SQLite use backticks, PostgreSQL uses double quotes
-    var identifierQuote: String {
-        switch self {
-        case .mysql, .mariadb, .sqlite, .clickhouse:
-            return "`"
-        case .postgresql, .redshift, .mongodb, .redis, .oracle:
-            return "\""
-        case .mssql:
-            return "["
-        }
-    }
-
-    /// Quote an identifier (table or column name) for this database type.
-    /// Escapes embedded quote characters to prevent SQL injection.
-    func quoteIdentifier(_ name: String) -> String {
-        switch self {
-        case .mongodb, .redis:
-            return name
-        case .mssql:
-            return "[\(name.replacingOccurrences(of: "]", with: "]]"))]"
-        default:
-            let q = identifierQuote
-            let escaped = name.replacingOccurrences(of: q, with: q + q)
-            return "\(q)\(escaped)\(q)"
-        }
+        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.supportsSchemaEditing ?? true
     }
 }
 
@@ -391,14 +376,47 @@ struct DatabaseConnection: Identifiable, Hashable {
     var color: ConnectionColor
     var tagId: UUID?
     var groupId: UUID?
-    var isReadOnly: Bool
+    var sshProfileId: UUID?
+    var safeModeLevel: SafeModeLevel
     var aiPolicy: AIConnectionPolicy?
-    var mongoReadPreference: String?
-    var mongoWriteConcern: String?
+    var additionalFields: [String: String] = [:]
     var redisDatabase: Int?
-    var mssqlSchema: String?
-    var oracleServiceName: String?
     var startupCommands: String?
+
+    var mongoAuthSource: String? {
+        get { additionalFields["mongoAuthSource"]?.nilIfEmpty }
+        set { additionalFields["mongoAuthSource"] = newValue ?? "" }
+    }
+
+    var mongoReadPreference: String? {
+        get { additionalFields["mongoReadPreference"]?.nilIfEmpty }
+        set { additionalFields["mongoReadPreference"] = newValue ?? "" }
+    }
+
+    var mongoWriteConcern: String? {
+        get { additionalFields["mongoWriteConcern"]?.nilIfEmpty }
+        set { additionalFields["mongoWriteConcern"] = newValue ?? "" }
+    }
+
+    var mssqlSchema: String? {
+        get { additionalFields["mssqlSchema"]?.nilIfEmpty }
+        set { additionalFields["mssqlSchema"] = newValue ?? "" }
+    }
+
+    var oracleServiceName: String? {
+        get { additionalFields["oracleServiceName"]?.nilIfEmpty }
+        set { additionalFields["oracleServiceName"] = newValue ?? "" }
+    }
+
+    var usePgpass: Bool {
+        get { additionalFields["usePgpass"] == "true" }
+        set { additionalFields["usePgpass"] = newValue ? "true" : "" }
+    }
+
+    var preConnectScript: String? {
+        get { additionalFields["preConnectScript"]?.nilIfEmpty }
+        set { additionalFields["preConnectScript"] = newValue ?? "" }
+    }
 
     init(
         id: UUID = UUID(),
@@ -413,14 +431,17 @@ struct DatabaseConnection: Identifiable, Hashable {
         color: ConnectionColor = .none,
         tagId: UUID? = nil,
         groupId: UUID? = nil,
-        isReadOnly: Bool = false,
+        sshProfileId: UUID? = nil,
+        safeModeLevel: SafeModeLevel = .silent,
         aiPolicy: AIConnectionPolicy? = nil,
+        mongoAuthSource: String? = nil,
         mongoReadPreference: String? = nil,
         mongoWriteConcern: String? = nil,
         redisDatabase: Int? = nil,
         mssqlSchema: String? = nil,
         oracleServiceName: String? = nil,
-        startupCommands: String? = nil
+        startupCommands: String? = nil,
+        additionalFields: [String: String]? = nil
     ) {
         self.id = id
         self.name = name
@@ -434,18 +455,26 @@ struct DatabaseConnection: Identifiable, Hashable {
         self.color = color
         self.tagId = tagId
         self.groupId = groupId
-        self.isReadOnly = isReadOnly
+        self.sshProfileId = sshProfileId
+        self.safeModeLevel = safeModeLevel
         self.aiPolicy = aiPolicy
-        self.mongoReadPreference = mongoReadPreference
-        self.mongoWriteConcern = mongoWriteConcern
         self.redisDatabase = redisDatabase
-        self.mssqlSchema = mssqlSchema
-        self.oracleServiceName = oracleServiceName
         self.startupCommands = startupCommands
+        if let additionalFields {
+            self.additionalFields = additionalFields
+        } else {
+            var fields: [String: String] = [:]
+            if let v = mongoAuthSource { fields["mongoAuthSource"] = v }
+            if let v = mongoReadPreference { fields["mongoReadPreference"] = v }
+            if let v = mongoWriteConcern { fields["mongoWriteConcern"] = v }
+            if let v = mssqlSchema { fields["mssqlSchema"] = v }
+            if let v = oracleServiceName { fields["oracleServiceName"] = v }
+            self.additionalFields = fields
+        }
     }
 
     /// Returns the display color (custom color or database type color)
-    var displayColor: Color {
+    @MainActor var displayColor: Color {
         color.isDefault ? type.themeColor : color.color
     }
 }
@@ -459,3 +488,11 @@ extension DatabaseConnection {
 // MARK: - Codable Conformance
 
 extension DatabaseConnection: Codable {}
+
+// MARK: - String Helpers
+
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
+    }
+}

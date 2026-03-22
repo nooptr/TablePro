@@ -26,7 +26,9 @@ extension PluginManager {
             throw PluginError.pluginConflict(existingName: registryPlugin.name)
         }
 
-        guard let downloadURL = URL(string: registryPlugin.downloadURL) else {
+        let resolved = try registryPlugin.resolvedBinary()
+
+        guard let downloadURL = URL(string: resolved.url) else {
             throw PluginError.downloadFailed("Invalid download URL")
         }
 
@@ -40,7 +42,7 @@ extension PluginManager {
         }
 
         // Use the registry client's configured session for consistent timeouts
-        let session = await RegistryClient.shared.session
+        let session = RegistryClient.shared.session
 
         let (tempDownloadURL, response) = try await session.download(from: downloadURL)
 
@@ -50,22 +52,32 @@ extension PluginManager {
             throw PluginError.downloadFailed("HTTP \(statusCode)")
         }
 
-        await progress(0.5)
+        progress(0.5)
 
         // Verify SHA-256 checksum
         let downloadedData = try Data(contentsOf: tempDownloadURL)
         let digest = SHA256.hash(data: downloadedData)
         let hexChecksum = digest.map { String(format: "%02x", $0) }.joined()
 
-        if hexChecksum != registryPlugin.sha256.lowercased() {
+        if hexChecksum != resolved.sha256.lowercased() {
             throw PluginError.checksumMismatch
         }
 
-        await progress(1.0)
+        progress(1.0)
 
         // Move to our temp directory for installPlugin
         try FileManager.default.moveItem(at: tempDownloadURL, to: tempZipURL)
 
-        return try await installPlugin(from: tempZipURL)
+        var entry = try await installPlugin(from: tempZipURL)
+
+        saveRegistryMetadata(
+            version: registryPlugin.version,
+            pluginId: registryPlugin.id,
+            pluginURL: entry.url
+        )
+        entry.version = registryPlugin.version
+        updatePluginVersion(id: entry.id, version: registryPlugin.version)
+
+        return entry
     }
 }

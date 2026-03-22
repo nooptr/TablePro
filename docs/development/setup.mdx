@@ -22,30 +22,45 @@ description: Clone, build, and run TablePro locally with Xcode 15+, SwiftLint, a
 | **SwiftLint** | Code linting |
 | **SwiftFormat** | Code formatting |
 | **Homebrew** | Package management |
+| **GitHub CLI (`gh`)** | Downloads pre-built native libraries from GitHub Releases |
 
 ## Getting Started
 
-### Step 1: Clone the Repository
+### Step 1: Clone and Bootstrap
 
 ```bash
 git clone https://github.com/datlechin/tablepro.git
 cd tablepro
-```
 
-### Step 2: Install Development Tools
+# Download pre-built native libraries from GitHub Releases
+scripts/download-libs.sh
 
-```bash
-# Using Homebrew
+# Create required build config (empty is fine for development)
+touch Secrets.xcconfig
+
+# Install linting/formatting tools
 brew install swiftlint swiftformat
 ```
 
-### Step 3: Open in Xcode
+<Warning>
+Skipping `scripts/download-libs.sh` leaves `Libs/` without binaries, causing linker errors.
+</Warning>
+
+### Step 2: Open in Xcode
 
 ```bash
 open TablePro.xcodeproj
 ```
 
-Or open Xcode manually: **File** > **Open** > navigate to `TablePro.xcodeproj`.
+### Step 3: Configure Signing
+
+1. Select the **TablePro** target in the project navigator
+2. Go to **Signing & Capabilities**
+3. Change **Team** to your own Apple Developer account
+
+<Info>
+The project ships with the maintainer's team ID. You must switch it to your own to build locally. A free Apple Developer account works for development builds.
+</Info>
 
 ### Step 4: Build and Run
 
@@ -72,43 +87,38 @@ Or open Xcode manually: **File** > **Open** > navigate to `TablePro.xcodeproj`.
 <Tree>
   <Tree.Folder name="tablepro" defaultOpen>
     <Tree.Folder name="TablePro" defaultOpen>
-      <Tree.Folder name="Models">
-        <Tree.File name="DatabaseConnection.swift" />
-        <Tree.File name="QueryResult.swift" />
-        <Tree.File name="TableInfo.swift" />
-        <Tree.File name="AppSettings.swift" />
+      <Tree.Folder name="Core" defaultOpen>
+        <Tree.Folder name="Database">
+          <Tree.File name="DatabaseDriver.swift" />
+          <Tree.File name="DatabaseManager.swift" />
+        </Tree.Folder>
+        <Tree.Folder name="Plugins">
+          <Tree.File name="PluginDriverAdapter.swift" />
+          <Tree.File name="PluginManager.swift" />
+        </Tree.Folder>
+        <Tree.Folder name="Services" />
+        <Tree.Folder name="Utilities" />
       </Tree.Folder>
+      <Tree.Folder name="Models" />
       <Tree.Folder name="Views">
         <Tree.Folder name="Connection" />
         <Tree.Folder name="Editor" />
+        <Tree.Folder name="Main" />
         <Tree.Folder name="Results" />
-        <Tree.Folder name="Structure" />
         <Tree.Folder name="Settings" />
       </Tree.Folder>
-      <Tree.Folder name="ViewModels">
-        <Tree.File name="DatabaseManager.swift" />
-      </Tree.Folder>
-      <Tree.Folder name="Core">
-        <Tree.Folder name="Database">
-          <Tree.File name="DatabaseDriver.swift" />
-          <Tree.File name="MySQLDriver.swift" />
-          <Tree.File name="PostgreSQLDriver.swift" />
-          <Tree.File name="SQLiteDriver.swift" />
-        </Tree.Folder>
-        <Tree.Folder name="Autocomplete">
-          <Tree.File name="CompletionEngine.swift" />
-          <Tree.File name="SQLContextAnalyzer.swift" />
-          <Tree.File name="SQLKeywords.swift" />
-        </Tree.Folder>
-        <Tree.Folder name="SSH">
-          <Tree.File name="SSHTunnelManager.swift" />
-        </Tree.Folder>
-      </Tree.Folder>
+      <Tree.Folder name="ViewModels" />
       <Tree.Folder name="Extensions" />
-      <Tree.Folder name="Theme">
-        <Tree.File name="Theme.swift" />
-      </Tree.Folder>
+      <Tree.Folder name="Theme" />
       <Tree.Folder name="Resources" />
+    </Tree.Folder>
+    <Tree.Folder name="Plugins" defaultOpen>
+      <Tree.Folder name="TableProPluginKit" />
+      <Tree.Folder name="MySQLDriverPlugin" />
+      <Tree.Folder name="PostgreSQLDriverPlugin" />
+      <Tree.Folder name="SQLiteDriverPlugin" />
+      <Tree.Folder name="ClickHouseDriverPlugin" />
+      <Tree.Folder name="..." />
     </Tree.Folder>
     <Tree.Folder name="TableProTests" />
     <Tree.Folder name="Libs" />
@@ -278,10 +288,11 @@ logger.error("Failed to connect: \(error.localizedDescription)")
 
 ### Adding a Database Feature
 
-1. Implement in the appropriate driver (`MySQLDriver.swift`, etc.)
-2. Add to `DatabaseDriver` protocol if generic
-3. Add UI in relevant view components
-4. Add tests
+1. Create a new plugin bundle under `Plugins/`, or modify an existing driver plugin
+2. Implement `PluginDatabaseDriver` protocol methods
+3. Update `PluginDriverAdapter` if bridging new protocol methods
+4. Add UI in relevant view components
+5. Add tests
 
 ### Modifying Settings
 
@@ -308,13 +319,9 @@ logger.error("Failed to connect: \(error.localizedDescription)")
 3. Fix the issue or disable the rule if appropriate
 4. Run `swiftlint --fix` for auto-fixable issues
 
-### Missing Libraries
+### Missing Libraries or Secrets.xcconfig
 
-If native libraries are missing:
-
-1. Check the `Libs/` directory
-2. Verify `libmariadb_universal.a` exists
-3. Run `scripts/build-release.sh` to prepare libraries
+Run `scripts/download-libs.sh` and `touch Secrets.xcconfig` at the repo root. See [Step 1](#step-1-clone-and-bootstrap).
 
 ## Next Steps
 

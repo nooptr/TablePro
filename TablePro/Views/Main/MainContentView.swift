@@ -45,6 +45,7 @@ struct MainContentView: View {
     @State private var queryResultsSummaryCache: (tabId: UUID, version: Int, summary: String?)?
     @State private var inspectorUpdateTask: Task<Void, Never>?
     @State private var pendingTabSwitch: Task<Void, Never>?
+    @State private var evictionTask: Task<Void, Never>?
     /// Stable identifier for this window in WindowLifecycleMonitor
     @State private var windowId = UUID()
     @State private var hasInitialized = false
@@ -124,7 +125,7 @@ struct MainContentView: View {
             let session = DatabaseManager.shared.session(for: connection.id)
             let activeDatabase = session?.currentDatabase ?? connection.database
             let activeSchema = session?.currentSchema
-            let currentSelection = connection.type == .redshift
+            let currentSelection = PluginManager.shared.supportsSchemaSwitching(for: connection.type)
                 ? (activeSchema ?? activeDatabase)
                 : activeDatabase
             DatabaseSwitcherSheet(
@@ -141,14 +142,37 @@ struct MainContentView: View {
         case .exportDialog:
             ExportDialog(
                 isPresented: dismissBinding,
-                connection: connection,
-                preselectedTables: Set(sidebarState.selectedTables.map(\.name))
+                mode: .tables(
+                    connection: connection,
+                    preselectedTables: Set(sidebarState.selectedTables.map(\.name))
+                )
             )
+        case .exportQueryResults:
+            if let tab = coordinator.tabManager.selectedTab {
+                ExportDialog(
+                    isPresented: dismissBinding,
+                    mode: .queryResults(
+                        connection: connection,
+                        rowBuffer: tab.rowBuffer,
+                        suggestedFileName: tab.tableName ?? "query_results"
+                    )
+                )
+            }
         case .importDialog:
             ImportDialog(
                 isPresented: dismissBinding,
                 connection: connection,
                 initialFileURL: coordinator.importFileURL
+            )
+        case .quickSwitcher:
+            QuickSwitcherSheet(
+                isPresented: dismissBinding,
+                schemaProvider: coordinator.schemaProvider,
+                connectionId: connection.id,
+                databaseType: connection.type,
+                onSelect: { item in
+                    coordinator.handleQuickSwitcherSelection(item)
+                }
             )
         }
     }
@@ -188,6 +212,8 @@ struct MainContentView: View {
                 updateToolbarPendingState()
                 updateInspectorContext()
                 rightPanelState.aiViewModel.schemaProvider = coordinator.schemaProvider
+                coordinator.aiViewModel = rightPanelState.aiViewModel
+                coordinator.rightPanelState = rightPanelState
 
                 // Register NSWindow reference and set per-connection tab grouping
                 DispatchQueue.main.async {
@@ -197,14 +223,21 @@ struct MainContentView: View {
                     let window = NSApp.keyWindow
                         ?? NSApp.windows.first { $0.isVisible && $0.title == targetTitle }
                     guard let window else { return }
-                    window.subtitle = connection.name
+                    let isPreview = tabManager.selectedTab?.isPreview ?? payload?.isPreview ?? false
+                    if isPreview {
+                        window.subtitle = "\(connection.name) — Preview"
+                    } else {
+                        window.subtitle = connection.name
+                    }
                     window.tabbingIdentifier = "com.TablePro.main.\(connection.id.uuidString)"
                     window.tabbingMode = .preferred
+                    coordinator.windowId = windowId
 
                     WindowLifecycleMonitor.shared.register(
                         window: window,
                         connectionId: connection.id,
-                        windowId: windowId
+                        windowId: windowId,
+                        isPreview: isPreview
                     )
                     viewWindow = window
                     isKeyWindow = window.isKeyWindow
@@ -242,7 +275,8 @@ struct MainContentView: View {
                     guard !WindowLifecycleMonitor.shared.hasWindows(for: connectionId) else { return }
 
                     let hasVisibleWindow = NSApp.windows.contains { window in
-                        window.isVisible && window.subtitle == connectionName
+                        window.isVisible && (window.subtitle == connectionName
+                            || window.subtitle == "\(connectionName) — Preview")
                     }
                     if !hasVisibleWindow {
                         await DatabaseManager.shared.disconnectSession(connectionId)
@@ -275,24 +309,12 @@ struct MainContentView: View {
             .onChange(of: currentTab?.resultColumns) { _, newColumns in
                 handleColumnsChange(newColumns: newColumns)
             }
-            .onChange(of: DatabaseManager.shared.connectionStatusVersion, initial: true) { _, _ in
-                let sessions = DatabaseManager.shared.activeSessions
-                guard let session = sessions[connection.id] else { return }
-                if session.isConnected && coordinator.needsLazyLoad {
-                    coordinator.needsLazyLoad = false
-                    if let selectedTab = tabManager.selectedTab,
-                       !selectedTab.databaseName.isEmpty,
-                       selectedTab.databaseName != session.activeDatabase
-                    {
-                        Task { await coordinator.switchDatabase(to: selectedTab.databaseName) }
-                    } else {
-                        coordinator.runQuery()
-                    }
-                }
-                let mappedState = mapSessionStatus(session.status)
-                if mappedState != toolbarState.connectionState {
-                    toolbarState.connectionState = mappedState
-                }
+            .task { handleConnectionStatusChange() }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .connectionStatusDidChange)
+                    .filter { ($0.object as? UUID) == connection.id }
+            ) { _ in
+                handleConnectionStatusChange()
             }
 
             .onChange(of: sidebarState.selectedTables) { _, newTables in
@@ -303,16 +325,24 @@ struct MainContentView: View {
                 guard let notificationWindow = notification.object as? NSWindow,
                       notificationWindow === viewWindow else { return }
                 isKeyWindow = true
+                evictionTask?.cancel()
+                evictionTask = nil
                 DispatchQueue.main.async {
                     syncSidebarToCurrentTab()
                 }
-                // Lazy-load: execute query for restored tabs that skipped auto-execute
-                if let tab = tabManager.selectedTab,
-                   tab.tabType == .table,
-                   tab.resultRows.isEmpty,
-                   tab.lastExecutedAt == nil,
-                   !tab.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                {
+                // Lazy-load: execute query for restored tabs that skipped auto-execute,
+                // or re-query tabs whose row data was evicted while inactive.
+                // Skip if the user has unsaved changes (in-memory or tab-level).
+                let hasPendingEdits = changeManager.hasChanges
+                    || (tabManager.selectedTab?.pendingChanges.hasChanges ?? false)
+                let isConnected = DatabaseManager.shared.activeSessions[connection.id]?.isConnected ?? false
+                let needsLazyLoad = tabManager.selectedTab.map { tab in
+                    tab.tabType == .table
+                        && (tab.resultRows.isEmpty || tab.rowBuffer.isEvicted)
+                        && (tab.lastExecutedAt == nil || tab.rowBuffer.isEvicted)
+                        && !tab.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                } ?? false
+                if needsLazyLoad && !hasPendingEdits && isConnected {
                     coordinator.runQuery()
                 }
             }
@@ -320,6 +350,18 @@ struct MainContentView: View {
                 guard let notificationWindow = notification.object as? NSWindow,
                       notificationWindow === viewWindow else { return }
                 isKeyWindow = false
+
+                // Schedule row data eviction for inactive native window-tabs.
+                // 5s delay avoids thrashing when quickly switching between tabs.
+                // Skip eviction entirely if the active tab has unsaved in-memory changes,
+                // since evictInactiveRowData only checks tab-level pendingChanges.
+                evictionTask?.cancel()
+                evictionTask = Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(5))
+                    guard !Task.isCancelled else { return }
+                    guard !changeManager.hasChanges else { return }
+                    coordinator.evictInactiveRowData()
+                }
             }
             .onChange(of: tables) { _, newTables in
                 let syncAction = SidebarSyncAction.resolveOnTablesLoad(
@@ -355,6 +397,7 @@ struct MainContentView: View {
             coordinator: coordinator,
             changeManager: changeManager,
             filterStateManager: filterStateManager,
+            columnVisibilityManager: coordinator.columnVisibilityManager,
             connection: connection,
             windowId: windowId,
             connectionId: connection.id,
@@ -444,6 +487,23 @@ struct MainContentView: View {
                     {
                         Task { await coordinator.switchDatabase(to: selectedTab.databaseName) }
                     } else {
+                        if !selectedTab.filterState.appliedFilters.isEmpty,
+                           let tableName = selectedTab.tableName,
+                           let tabIndex = tabManager.selectedTabIndex
+                        {
+                            // columns is [] on initial load — buildFilteredQuery uses SELECT *
+                            let filteredQuery = coordinator.queryBuilder.buildFilteredQuery(
+                                tableName: tableName,
+                                filters: selectedTab.filterState.appliedFilters,
+                                columns: [],
+                                limit: selectedTab.pagination.pageSize,
+                                offset: selectedTab.pagination.currentOffset
+                            )
+                            tabManager.tabs[tabIndex].query = filteredQuery
+                        }
+                        if let tableName = selectedTab.tableName {
+                            coordinator.restoreColumnLayoutForTable(tableName)
+                        }
                         coordinator.executeTableTabQueryDirectly()
                     }
                 } else {
@@ -465,17 +525,30 @@ struct MainContentView: View {
         // No existing windows -- restore tabs from storage (first window on connection)
         let result = await coordinator.persistence.restoreFromDisk()
         if !result.tabs.isEmpty {
+            // Rebuild base queries for table tabs to strip stale filter/sort WHERE clauses.
+            // Filter state is not persisted, so the stored query may contain orphaned conditions
+            // that reference columns from a different schema — causing errors on restore.
+            var restoredTabs = result.tabs
+            for i in restoredTabs.indices where restoredTabs[i].tabType == .table {
+                if let tableName = restoredTabs[i].tableName {
+                    restoredTabs[i].query = QueryTab.buildBaseTableQuery(
+                        tableName: tableName,
+                        databaseType: connection.type
+                    )
+                }
+            }
+
             // Find the selected tab, or use the first one
             let selectedId = result.selectedTabId
-            let selectedIndex = result.tabs.firstIndex(where: { $0.id == selectedId }) ?? 0
+            let selectedIndex = restoredTabs.firstIndex(where: { $0.id == selectedId }) ?? 0
 
             // Keep only the selected tab for this window
-            let selectedTab = result.tabs[selectedIndex]
+            let selectedTab = restoredTabs[selectedIndex]
             tabManager.tabs = [selectedTab]
             tabManager.selectedTabId = selectedTab.id
 
             // Open remaining tabs as new native window-tabs
-            let remainingTabs = result.tabs.enumerated()
+            let remainingTabs = restoredTabs.enumerated()
                 .filter { $0.offset != selectedIndex }
                 .map(\.element)
 
@@ -507,6 +580,9 @@ struct MainContentView: View {
                     {
                         Task { await coordinator.switchDatabase(to: selectedTab.databaseName) }
                     } else {
+                        if let tableName = selectedTab.tableName {
+                            coordinator.restoreColumnLayoutForTable(tableName)
+                        }
                         coordinator.executeTableTabQueryDirectly()
                     }
                 } else {
@@ -573,7 +649,8 @@ struct MainContentView: View {
         )
 
         // Update window title to reflect selected tab
-        let queryLabel = connection.type == .mongodb ? "MQL Query" : connection.type == .redis ? "Redis Query" : "SQL Query"
+        let langName = PluginManager.shared.queryLanguageName(for: connection.type)
+        let queryLabel = "\(langName) Query"
         windowTitle = tabManager.selectedTab?.tableName
             ?? (tabManager.tabs.isEmpty ? connection.name : queryLabel)
 
@@ -592,21 +669,31 @@ struct MainContentView: View {
 
     private func handleTabsChange(_ newTabs: [QueryTab]) {
         // Always update window title to reflect current tab, even during restoration
-        let queryLabel = connection.type == .mongodb ? "MQL Query" : connection.type == .redis ? "Redis Query" : "SQL Query"
+        let langName = PluginManager.shared.queryLanguageName(for: connection.type)
+        let queryLabel = "\(langName) Query"
         windowTitle = tabManager.selectedTab?.tableName
             ?? (tabManager.tabs.isEmpty ? connection.name : queryLabel)
 
         // Don't persist during teardown — SwiftUI may fire onChange with empty tabs
         // as the view is being deallocated
         guard !coordinator.isTearingDown else { return }
+        guard !coordinator.isUpdatingColumnLayout else { return }
 
-        // Persist tab changes explicitly
-        if newTabs.isEmpty {
+        // Promote preview tab if user has interacted with it
+        if let tab = tabManager.selectedTab, tab.isPreview, tab.hasUserInteraction {
+            coordinator.promotePreviewTab()
+        }
+
+        // Persist tab changes (exclude preview tabs from persistence)
+        let persistableTabs = newTabs.filter { !$0.isPreview }
+        if persistableTabs.isEmpty {
             coordinator.persistence.clearSavedState()
         } else {
+            let normalizedSelectedId = persistableTabs.contains(where: { $0.id == tabManager.selectedTabId })
+                ? tabManager.selectedTabId : persistableTabs.first?.id
             coordinator.persistence.saveNow(
-                tabs: newTabs,
-                selectedTabId: tabManager.selectedTabId
+                tabs: persistableTabs,
+                selectedTabId: normalizedSelectedId
             )
         }
     }
@@ -614,6 +701,11 @@ struct MainContentView: View {
     private func handleColumnsChange(newColumns: [String]?) {
         // Skip during tab switch — handleTabChange already configures the change manager
         guard !coordinator.isHandlingTabSwitch else { return }
+
+        // Prune hidden columns that no longer exist in results
+        if let newColumns = newColumns {
+            coordinator.pruneHiddenColumns(currentColumns: newColumns)
+        }
 
         guard let newColumns = newColumns, !newColumns.isEmpty,
               let tab = tabManager.selectedTab,
@@ -651,10 +743,15 @@ struct MainContentView: View {
             return
         }
 
+        let isPreviewMode = AppSettingsManager.shared.tabs.enablePreviewTabs
+        let hasPreview = WindowLifecycleMonitor.shared.previewWindow(for: connection.id) != nil
+
         let result = SidebarNavigationResult.resolve(
             clickedTableName: tableName,
             currentTabTableName: tabManager.selectedTab?.tableName,
-            hasExistingTabs: !tabManager.tabs.isEmpty
+            hasExistingTabs: !tabManager.tabs.isEmpty,
+            isPreviewTabMode: isPreviewMode,
+            hasPreviewTab: hasPreview
         )
 
         switch result {
@@ -665,6 +762,8 @@ struct MainContentView: View {
             selectedRowIndices = []
             coordinator.openTableTab(tableName, isView: isView)
         case .revertAndOpenNewWindow:
+            coordinator.openTableTab(tableName, isView: isView)
+        case .replacePreviewTab, .openNewPreviewTab:
             coordinator.openTableTab(tableName, isView: isView)
         }
 
@@ -684,6 +783,10 @@ struct MainContentView: View {
             target = []
         }
         if sidebarState.selectedTables != target {
+            // Don't clear sidebar selection while the table list is still loading.
+            // Clearing it prematurely triggers SidebarSyncAction to re-select on
+            // tables load, causing a double-navigation race condition.
+            if target.isEmpty && tables.isEmpty { return }
             sidebarState.selectedTables = target
         }
     }
@@ -695,6 +798,29 @@ struct MainContentView: View {
               coordinator.tableMetadata?.tableName != tableName
         else { return }
         await coordinator.loadTableMetadata(tableName: tableName)
+    }
+
+    private func handleConnectionStatusChange() {
+        let sessions = DatabaseManager.shared.activeSessions
+        guard let session = sessions[connection.id] else { return }
+        if session.isConnected && coordinator.needsLazyLoad {
+            let hasPendingEdits = changeManager.hasChanges
+                || (tabManager.selectedTab?.pendingChanges.hasChanges ?? false)
+            guard !hasPendingEdits else { return }
+            coordinator.needsLazyLoad = false
+            if let selectedTab = tabManager.selectedTab,
+               !selectedTab.databaseName.isEmpty,
+               selectedTab.databaseName != session.activeDatabase
+            {
+                Task { await coordinator.switchDatabase(to: selectedTab.databaseName) }
+            } else {
+                coordinator.runQuery()
+            }
+        }
+        let mappedState = mapSessionStatus(session.status)
+        if mappedState != toolbarState.connectionState {
+            toolbarState.connectionState = mappedState
+        }
     }
 
     private func mapSessionStatus(_ status: ConnectionStatus) -> ToolbarConnectionState {

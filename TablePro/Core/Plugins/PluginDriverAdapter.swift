@@ -11,10 +11,43 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
     let connection: DatabaseConnection
     private(set) var status: ConnectionStatus = .disconnected
     private let pluginDriver: any PluginDatabaseDriver
+    private var columnTypeCache: [String: ColumnType] = [:]
 
     var serverVersion: String? { pluginDriver.serverVersion }
+    var parameterStyle: ParameterStyle { pluginDriver.parameterStyle }
+
+    func pluginGenerateStatements(
+        table: String,
+        columns: [String],
+        changes: [PluginRowChange],
+        insertedRowData: [Int: [String?]],
+        deletedRowIndices: Set<Int>,
+        insertedRowIndices: Set<Int>
+    ) -> [(statement: String, parameters: [String?])]? {
+        pluginDriver.generateStatements(
+            table: table, columns: columns, changes: changes,
+            insertedRowData: insertedRowData,
+            deletedRowIndices: deletedRowIndices,
+            insertedRowIndices: insertedRowIndices
+        )
+    }
+
+    /// The underlying plugin driver, exposed for DDL schema generation delegation.
+    var schemaPluginDriver: any PluginDatabaseDriver { pluginDriver }
+
+    var queryBuildingPluginDriver: (any PluginDatabaseDriver)? {
+        // Expose plugin driver for query building dispatch if it implements the hooks.
+        // SQL drivers without custom pagination (MySQL, PostgreSQL, etc.) return nil
+        // from buildBrowseQuery and use standard SQL query rewriting instead.
+        guard pluginDriver.buildBrowseQuery(
+            table: "_probe", sortColumns: [], columns: [], limit: 1, offset: 0
+        ) != nil else {
+            return nil
+        }
+        return pluginDriver
+    }
     var currentSchema: String { pluginDriver.currentSchema ?? connection.username }
-    var escapedSchema: String { SQLEscaping.escapeStringLiteral(currentSchema, databaseType: connection.type) }
+    var escapedSchema: String { pluginDriver.escapeStringLiteral(currentSchema) }
 
     private static let logger = Logger(subsystem: "com.TablePro", category: "PluginDriverAdapter")
 
@@ -262,11 +295,121 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
         try await pluginDriver.switchDatabase(to: database)
     }
 
+    // MARK: - DDL Schema Generation
+
+    func generateAddColumnSQL(table: String, column: PluginColumnDefinition) -> String? {
+        pluginDriver.generateAddColumnSQL(table: table, column: column)
+    }
+
+    func generateModifyColumnSQL(
+        table: String,
+        oldColumn: PluginColumnDefinition,
+        newColumn: PluginColumnDefinition
+    ) -> String? {
+        pluginDriver.generateModifyColumnSQL(table: table, oldColumn: oldColumn, newColumn: newColumn)
+    }
+
+    func generateDropColumnSQL(table: String, columnName: String) -> String? {
+        pluginDriver.generateDropColumnSQL(table: table, columnName: columnName)
+    }
+
+    func generateAddIndexSQL(table: String, index: PluginIndexDefinition) -> String? {
+        pluginDriver.generateAddIndexSQL(table: table, index: index)
+    }
+
+    func generateDropIndexSQL(table: String, indexName: String) -> String? {
+        pluginDriver.generateDropIndexSQL(table: table, indexName: indexName)
+    }
+
+    func generateAddForeignKeySQL(table: String, fk: PluginForeignKeyDefinition) -> String? {
+        pluginDriver.generateAddForeignKeySQL(table: table, fk: fk)
+    }
+
+    func generateDropForeignKeySQL(table: String, constraintName: String) -> String? {
+        pluginDriver.generateDropForeignKeySQL(table: table, constraintName: constraintName)
+    }
+
+    func generateModifyPrimaryKeySQL(table: String, oldColumns: [String], newColumns: [String], constraintName: String?) -> [String]? {
+        pluginDriver.generateModifyPrimaryKeySQL(table: table, oldColumns: oldColumns, newColumns: newColumns, constraintName: constraintName)
+    }
+
+    // MARK: - Table Operations
+
+    func truncateTableStatements(table: String, schema: String?, cascade: Bool) -> [String] {
+        if let stmts = pluginDriver.truncateTableStatements(table: table, schema: schema, cascade: cascade) {
+            return stmts
+        }
+        let name = qualifiedName(table, schema: schema)
+        let cascadeSuffix = cascade ? " CASCADE" : ""
+        return ["TRUNCATE TABLE \(name)\(cascadeSuffix)"]
+    }
+
+    func dropObjectStatement(name: String, objectType: String, schema: String?, cascade: Bool) -> String {
+        if let stmt = pluginDriver.dropObjectStatement(name: name, objectType: objectType, schema: schema, cascade: cascade) {
+            return stmt
+        }
+        let qualName = qualifiedName(name, schema: schema)
+        let cascadeSuffix = cascade ? " CASCADE" : ""
+        return "DROP \(objectType) \(qualName)\(cascadeSuffix)"
+    }
+
+    func foreignKeyDisableStatements() -> [String]? {
+        pluginDriver.foreignKeyDisableStatements()
+    }
+
+    func foreignKeyEnableStatements() -> [String]? {
+        pluginDriver.foreignKeyEnableStatements()
+    }
+
+    // MARK: - All Tables Metadata SQL
+
+    func allTablesMetadataSQL(schema: String?) -> String? {
+        pluginDriver.allTablesMetadataSQL(schema: schema)
+    }
+
+    // MARK: - EXPLAIN
+
+    func buildExplainQuery(_ sql: String) -> String? {
+        pluginDriver.buildExplainQuery(sql)
+    }
+
+    // MARK: - View Templates
+
+    func createViewTemplate() -> String? {
+        pluginDriver.createViewTemplate()
+    }
+
+    func editViewFallbackTemplate(viewName: String) -> String? {
+        pluginDriver.editViewFallbackTemplate(viewName: viewName)
+    }
+
+    func castColumnToText(_ column: String) -> String {
+        pluginDriver.castColumnToText(column)
+    }
+
+    // MARK: - Identifier Quoting
+
+    func quoteIdentifier(_ name: String) -> String {
+        pluginDriver.quoteIdentifier(name)
+    }
+
+    func escapeStringLiteral(_ value: String) -> String {
+        pluginDriver.escapeStringLiteral(value)
+    }
+
+    // MARK: - Private Helpers
+
+    private func qualifiedName(_ name: String, schema: String?) -> String {
+        let quoted = pluginDriver.quoteIdentifier(name)
+        guard let schema, !schema.isEmpty else { return quoted }
+        return "\(pluginDriver.quoteIdentifier(schema)).\(quoted)"
+    }
+
     // MARK: - Result Mapping
 
     private func mapQueryResult(_ pluginResult: PluginQueryResult) -> QueryResult {
         let columnTypes = pluginResult.columnTypeNames.map { mapColumnType(rawTypeName: $0) }
-        return QueryResult(
+        var result = QueryResult(
             columns: pluginResult.columns,
             columnTypes: columnTypes,
             rows: pluginResult.rows,
@@ -274,9 +417,18 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
             executionTime: pluginResult.executionTime,
             error: nil
         )
+        result.isTruncated = pluginResult.isTruncated
+        return result
     }
 
     private func mapColumnType(rawTypeName: String) -> ColumnType {
+        if let cached = columnTypeCache[rawTypeName] { return cached }
+        let result = classifyColumnType(rawTypeName: rawTypeName)
+        columnTypeCache[rawTypeName] = result
+        return result
+    }
+
+    private func classifyColumnType(rawTypeName: String) -> ColumnType {
         let upper = rawTypeName.uppercased()
 
         if upper.contains("BOOL") {

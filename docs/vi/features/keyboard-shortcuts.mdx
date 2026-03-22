@@ -17,6 +17,7 @@ TablePro thiên về bàn phím. Hầu hết thao tác đều có phím tắt, v
 | Kết nối mới | `Cmd+N` |
 | Mở lịch sử | `Cmd+Y` |
 | Cài đặt | `Cmd+,` |
+| Quick Switcher | `Cmd+P` |
 | Đóng cửa sổ | `Cmd+W` |
 | Thoát | `Cmd+Q` |
 
@@ -51,7 +52,6 @@ TablePro thiên về bàn phím. Hầu hết thao tác đều có phím tắt, v
 
 | Hành động | Phím tắt |
 |--------|----------|
-| Đi đến dòng | `Cmd+Shift+L` |
 | Đi đến đầu | `Cmd+Up` |
 | Đi đến cuối | `Cmd+Down` |
 | Di chuyển dòng lên | `Option+Up` |
@@ -125,7 +125,7 @@ TablePro thiên về bàn phím. Hầu hết thao tác đều có phím tắt, v
 |--------|----------|
 | Sao chép lựa chọn | `Cmd+C` |
 | Sao chép dạng CSV | `Cmd+Shift+C` |
-| Sao chép dạng JSON | `Cmd+Option+C` |
+| Sao chép dạng JSON | `Cmd+Option+J` |
 | Sao chép dạng TSV | Có trong menu ngữ cảnh |
 
 ## Ứng Dụng
@@ -176,6 +176,19 @@ TablePro thiên về bàn phím. Hầu hết thao tác đều có phím tắt, v
 | Bật/tắt AI Chat | `Cmd+Shift+L` | Mở hoặc đóng bảng AI chat |
 | Giải thích với AI | `Cmd+L` | Gửi SQL đã chọn (hoặc query hiện tại) cho AI giải thích |
 | Tối ưu với AI | `Cmd+Option+L` | Gửi SQL đã chọn (hoặc query hiện tại) cho AI tối ưu |
+
+## Điều hướng thay thế (Ctrl+HJKL)
+
+Dành cho bàn phím không có phím mũi tên riêng (ví dụ: HHKB), Ctrl+HJKL hoạt động như phím mũi tên thay thế trong toàn bộ ứng dụng. Các phím này hoạt động song song với phím mũi tên.
+
+| Phím tắt | Hành động | Nơi áp dụng |
+|----------|-----------|-------------|
+| `Ctrl+J` | Di chuyển xuống / Mục tiếp theo | Bảng dữ liệu, danh sách kết nối, quick switcher, database switcher |
+| `Ctrl+K` | Di chuyển lên / Mục trước | Bảng dữ liệu, danh sách kết nối, quick switcher, database switcher |
+| `Ctrl+H` | Di chuyển trái / Thu gọn nhóm | Bảng dữ liệu (cột trái), welcome panel (thu gọn nhóm), onboarding (trang trước) |
+| `Ctrl+L` | Di chuyển phải / Mở rộng nhóm | Bảng dữ liệu (cột phải), welcome panel (mở rộng nhóm), onboarding (trang sau) |
+| `Ctrl+Shift+J` | Mở rộng vùng chọn xuống | Bảng dữ liệu |
+| `Ctrl+Shift+K` | Mở rộng vùng chọn lên | Bảng dữ liệu |
 
 ## Phím Tắt Chế Độ Vim
 
@@ -264,6 +277,19 @@ Phím tắt Vim chỉ áp dụng trong SQL editor. Không ảnh hưởng data gr
 |--------|----------|
 | Export dữ liệu | `Cmd+Shift+E` |
 | Import dữ liệu | `Cmd+Shift+I` |
+
+## Quick switcher
+
+Quick Switcher (`Cmd+P`) cho phép tìm kiếm và chuyển nhanh đến bất kỳ bảng, view, database, schema, hoặc query gần đây. Hỗ trợ fuzzy matching, gõ `usr` sẽ tìm `users`, `user_settings`, v.v.
+
+| Hành động | Phím tắt |
+|--------|----------|
+| Mở Quick Switcher | `Cmd+P` |
+| Di chuyển kết quả | `Up` / `Down` |
+| Mở mục đã chọn | `Return` |
+| Đóng | `Escape` |
+
+Kết quả được nhóm theo loại (bảng, view, bảng hệ thống, database, schema, query gần đây) và xếp hạng theo chất lượng khớp khi tìm kiếm.
 
 ## Phím Tắt Toàn Cục
 
@@ -441,6 +467,7 @@ dd/yy/cc       Xóa/Yank/Thay đổi dòng
 Cmd+N          Kết nối mới
 Cmd+Y          Lịch sử query
 Cmd+,          Cài đặt
+Cmd+P          Quick Switcher
 Cmd+W          Đóng cửa sổ
 Cmd+Q          Thoát
 ```

@@ -80,7 +80,7 @@ struct FilterRowView: View {
             // Action buttons
             actionButtons
         }
-        .padding(.vertical, DesignConstants.Spacing.xs)
+        .padding(.vertical, ThemeEngine.shared.activeTheme.spacing.xs)
         .padding(.horizontal, 8)
         .background(
             RoundedRectangle(cornerRadius: 4)
@@ -97,7 +97,6 @@ struct FilterRowView: View {
                 isHovered = hovering
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: isFocused)
     }
 
     // MARK: - Column Menu

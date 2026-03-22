@@ -13,7 +13,7 @@ struct QueryResultRow: Identifiable, Equatable {
     var values: [String?]
 
     static func == (lhs: QueryResultRow, rhs: QueryResultRow) -> Bool {
-        lhs.id == rhs.id && lhs.values == rhs.values
+        lhs.id == rhs.id && lhs.values.count == rhs.values.count && lhs.values == rhs.values
     }
 }
 
@@ -43,9 +43,12 @@ struct QueryResult {
 
     /// Convert to QueryResultRow format for UI
     func toQueryResultRows() -> [QueryResultRow] {
-        rows.enumerated().map { index, row in
-            QueryResultRow(id: index, values: row)
+        var result = [QueryResultRow]()
+        result.reserveCapacity(rows.count)
+        for (index, row) in rows.enumerated() {
+            result.append(QueryResultRow(id: index, values: row))
         }
+        return result
     }
 
     static let empty = QueryResult(

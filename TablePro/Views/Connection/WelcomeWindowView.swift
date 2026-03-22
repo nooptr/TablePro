@@ -34,6 +34,8 @@ struct WelcomeWindowView: View {
         return Set(strings.compactMap { UUID(uuidString: $0) })
     }()
     @State private var showNewGroupSheet = false
+    @State private var showActivationSheet = false
+    @State private var pluginInstallConnection: DatabaseConnection?
 
     @Environment(\.openWindow) private var openWindow
 
@@ -69,6 +71,14 @@ struct WelcomeWindowView: View {
 
     private func connections(in group: ConnectionGroup) -> [DatabaseConnection] {
         filteredConnections.filter { $0.groupId == group.id }
+    }
+
+    private var flatVisibleConnections: [DatabaseConnection] {
+        var result = ungroupedConnections
+        for group in activeGroups where !collapsedGroupIds.contains(group.id) {
+            result.append(contentsOf: connections(in: group))
+        }
+        return result
     }
 
     var body: some View {
@@ -116,6 +126,12 @@ struct WelcomeWindowView: View {
                 groups = groupStorage.loadGroups()
             }
         }
+        .sheet(isPresented: $showActivationSheet) {
+            LicenseActivationSheet()
+        }
+        .pluginInstallPrompt(connection: $pluginInstallConnection) { connection in
+            connectAfterInstall(connection)
+        }
     }
 
     private var welcomeContent: some View {
@@ -148,12 +164,25 @@ struct WelcomeWindowView: View {
                     Text("TablePro")
                         .font(
                             .system(
-                                size: DesignConstants.IconSize.extraLarge, weight: .semibold,
+                                size: ThemeEngine.shared.activeTheme.iconSizes.extraLarge, weight: .semibold,
                                 design: .rounded))
 
                     Text("Version \(Bundle.main.appVersion)")
-                        .font(.system(size: DesignConstants.FontSize.medium))
+                        .font(.system(size: ThemeEngine.shared.activeTheme.typography.medium))
                         .foregroundStyle(.secondary)
+
+                    if LicenseManager.shared.status.isValid {
+                        Label("Pro", systemImage: "checkmark.seal.fill")
+                            .font(.system(size: ThemeEngine.shared.activeTheme.typography.small, weight: .medium))
+                            .foregroundStyle(.green)
+                    } else {
+                        Button(action: { showActivationSheet = true }) {
+                            Text("Activate License")
+                                .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                    }
                 }
             }
 
@@ -162,6 +191,17 @@ struct WelcomeWindowView: View {
 
             // Action button
             VStack(spacing: 12) {
+                Button {
+                    if let url = URL(string: "https://github.com/sponsors/datlechin") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    Label("Sponsor TablePro", systemImage: "heart")
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
+                .foregroundStyle(.pink)
+
                 Button(action: { openWindow(id: "connection-form") }) {
                     Label("Create connection...", systemImage: "plus.circle")
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -174,12 +214,13 @@ struct WelcomeWindowView: View {
 
             // Footer hints
             HStack(spacing: 16) {
+                SyncStatusIndicator()
                 KeyboardHint(keys: "⌘N", label: "New")
                 KeyboardHint(keys: "⌘,", label: "Settings")
             }
-            .font(.system(size: DesignConstants.FontSize.small))
+            .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
             .foregroundStyle(.tertiary)
-            .padding(.bottom, DesignConstants.Spacing.lg)
+            .padding(.bottom, ThemeEngine.shared.activeTheme.spacing.lg)
         }
         .frame(width: 260)
     }
@@ -192,11 +233,11 @@ struct WelcomeWindowView: View {
             HStack(spacing: 8) {
                 Button(action: { openWindow(id: "connection-form") }) {
                     Image(systemName: "plus")
-                        .font(.system(size: DesignConstants.FontSize.medium, weight: .medium))
+                        .font(.system(size: ThemeEngine.shared.activeTheme.typography.medium, weight: .medium))
                         .foregroundStyle(.secondary)
                         .frame(
-                            width: DesignConstants.IconSize.extraLarge,
-                            height: DesignConstants.IconSize.extraLarge
+                            width: ThemeEngine.shared.activeTheme.iconSizes.extraLarge,
+                            height: ThemeEngine.shared.activeTheme.iconSizes.extraLarge
                         )
                         .background(
                             RoundedRectangle(cornerRadius: 6)
@@ -208,11 +249,11 @@ struct WelcomeWindowView: View {
 
                 Button(action: { showNewGroupSheet = true }) {
                     Image(systemName: "folder.badge.plus")
-                        .font(.system(size: DesignConstants.FontSize.medium, weight: .medium))
+                        .font(.system(size: ThemeEngine.shared.activeTheme.typography.medium, weight: .medium))
                         .foregroundStyle(.secondary)
                         .frame(
-                            width: DesignConstants.IconSize.extraLarge,
-                            height: DesignConstants.IconSize.extraLarge
+                            width: ThemeEngine.shared.activeTheme.iconSizes.extraLarge,
+                            height: ThemeEngine.shared.activeTheme.iconSizes.extraLarge
                         )
                         .background(
                             RoundedRectangle(cornerRadius: 6)
@@ -224,22 +265,22 @@ struct WelcomeWindowView: View {
 
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass")
-                        .font(.system(size: DesignConstants.FontSize.medium))
+                        .font(.system(size: ThemeEngine.shared.activeTheme.typography.medium))
                         .foregroundStyle(.tertiary)
 
                     TextField("Search for connection...", text: $searchText)
                         .textFieldStyle(.plain)
-                        .font(.system(size: DesignConstants.FontSize.body))
+                        .font(.system(size: ThemeEngine.shared.activeTheme.typography.body))
                 }
-                .padding(.horizontal, DesignConstants.Spacing.sm)
+                .padding(.horizontal, ThemeEngine.shared.activeTheme.spacing.sm)
                 .padding(.vertical, 6)
                 .background(
                     RoundedRectangle(cornerRadius: 8)
                         .fill(Color(nsColor: .quaternaryLabelColor))
                 )
             }
-            .padding(.horizontal, DesignConstants.Spacing.md)
-            .padding(.vertical, DesignConstants.Spacing.sm)
+            .padding(.horizontal, ThemeEngine.shared.activeTheme.spacing.md)
+            .padding(.vertical, ThemeEngine.shared.activeTheme.spacing.sm)
 
             Divider()
 
@@ -302,6 +343,26 @@ struct WelcomeWindowView: View {
             }
             return .handled
         }
+        .onKeyPress(characters: .init(charactersIn: "j"), phases: .down) { keyPress in
+            guard keyPress.modifiers.contains(.control) else { return .ignored }
+            moveToNextConnection()
+            return .handled
+        }
+        .onKeyPress(characters: .init(charactersIn: "k"), phases: .down) { keyPress in
+            guard keyPress.modifiers.contains(.control) else { return .ignored }
+            moveToPreviousConnection()
+            return .handled
+        }
+        .onKeyPress(characters: .init(charactersIn: "h"), phases: .down) { keyPress in
+            guard keyPress.modifiers.contains(.control) else { return .ignored }
+            collapseSelectedGroup()
+            return .handled
+        }
+        .onKeyPress(characters: .init(charactersIn: "l"), phases: .down) { keyPress in
+            guard keyPress.modifiers.contains(.control) else { return .ignored }
+            expandSelectedGroup()
+            return .handled
+        }
     }
 
     private func connectionRow(for connection: DatabaseConnection) -> some View {
@@ -327,7 +388,7 @@ struct WelcomeWindowView: View {
             }
         )
         .tag(connection.id)
-        .listRowInsets(DesignConstants.swiftUIListRowInsets)
+        .listRowInsets(ThemeEngine.shared.activeTheme.spacing.listRowInsets.swiftUI)
         .listRowSeparator(.hidden)
     }
 
@@ -347,7 +408,7 @@ struct WelcomeWindowView: View {
         }) {
             HStack(spacing: 6) {
                 Image(systemName: collapsedGroupIds.contains(group.id) ? "chevron.right" : "chevron.down")
-                    .font(.system(size: DesignConstants.FontSize.small, weight: .medium))
+                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.small, weight: .medium))
                     .foregroundStyle(.tertiary)
                     .frame(width: 12)
 
@@ -358,11 +419,11 @@ struct WelcomeWindowView: View {
                 }
 
                 Text(group.name)
-                    .font(.system(size: DesignConstants.FontSize.small, weight: .semibold))
+                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.small, weight: .semibold))
                     .foregroundStyle(.secondary)
 
                 Text("\(connections(in: group).count)")
-                    .font(.system(size: DesignConstants.FontSize.tiny))
+                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.tiny))
                     .foregroundStyle(.tertiary)
 
                 Spacer()
@@ -418,30 +479,30 @@ struct WelcomeWindowView: View {
             Spacer()
 
             Image(systemName: "cylinder.split.1x2")
-                .font(.system(size: DesignConstants.IconSize.huge))
+                .font(.system(size: ThemeEngine.shared.activeTheme.iconSizes.huge))
                 .foregroundStyle(.tertiary)
 
             if searchText.isEmpty {
                 Text("No Connections")
-                    .font(.system(size: DesignConstants.FontSize.title3, weight: .medium))
+                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.title3, weight: .medium))
                     .foregroundStyle(.secondary)
 
                 Text("Create a connection to get started")
-                    .font(.system(size: DesignConstants.FontSize.medium))
+                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.medium))
                     .foregroundStyle(.tertiary)
 
                 Button(action: { openWindow(id: "connection-form") }) {
                     Label("New Connection", systemImage: "plus")
                 }
                 .controlSize(.large)
-                .padding(.top, DesignConstants.Spacing.xxs)
+                .padding(.top, ThemeEngine.shared.activeTheme.spacing.xxs)
             } else {
                 Text("No Matching Connections")
-                    .font(.system(size: DesignConstants.FontSize.title3, weight: .medium))
+                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.title3, weight: .medium))
                     .foregroundStyle(.secondary)
 
                 Text("Try a different search term")
-                    .font(.system(size: DesignConstants.FontSize.medium))
+                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.medium))
                     .foregroundStyle(.tertiary)
             }
 
@@ -468,22 +529,50 @@ struct WelcomeWindowView: View {
         openWindow(id: "main", value: EditorTabPayload(connectionId: connection.id))
         NSApplication.shared.closeWindows(withId: "welcome")
 
-        // Connect in background - main window shows loading state
         Task {
             do {
                 try await dbManager.connectToSession(connection)
             } catch {
-                // Show error to user and re-open welcome window
-                await MainActor.run {
-                    AlertHelper.showErrorSheet(
-                        title: String(localized: "Connection Failed"),
-                        message: error.localizedDescription,
-                        window: nil
-                    )
-                    openWindow(id: "welcome")
+                if case PluginError.pluginNotInstalled = error {
+                    Self.logger.info("Plugin not installed for \(connection.type.rawValue), prompting install")
+                    handleMissingPlugin(connection: connection)
+                } else {
+                    Self.logger.error(
+                        "Failed to connect: \(error.localizedDescription, privacy: .public)")
+                    handleConnectionFailure(error: error)
                 }
+            }
+        }
+    }
+
+    private func handleConnectionFailure(error: Error) {
+        NSApplication.shared.closeWindows(withId: "main")
+        openWindow(id: "welcome")
+
+        AlertHelper.showErrorSheet(
+            title: String(localized: "Connection Failed"),
+            message: error.localizedDescription,
+            window: nil
+        )
+    }
+
+    private func handleMissingPlugin(connection: DatabaseConnection) {
+        NSApplication.shared.closeWindows(withId: "main")
+        openWindow(id: "welcome")
+        pluginInstallConnection = connection
+    }
+
+    private func connectAfterInstall(_ connection: DatabaseConnection) {
+        openWindow(id: "main", value: EditorTabPayload(connectionId: connection.id))
+        NSApplication.shared.closeWindows(withId: "welcome")
+
+        Task {
+            do {
+                try await dbManager.connectToSession(connection)
+            } catch {
                 Self.logger.error(
-                    "Failed to connect: \(error.localizedDescription, privacy: .public)")
+                    "Failed to connect after plugin install: \(error.localizedDescription, privacy: .public)")
+                handleConnectionFailure(error: error)
             }
         }
     }
@@ -541,6 +630,60 @@ struct WelcomeWindowView: View {
             updated.name = newName
             groupStorage.updateGroup(updated)
             groups = groupStorage.loadGroups()
+        }
+    }
+
+    private func moveToNextConnection() {
+        let visible = flatVisibleConnections
+        guard !visible.isEmpty else { return }
+        guard let currentId = selectedConnectionId,
+              let index = visible.firstIndex(where: { $0.id == currentId }) else {
+            selectedConnectionId = visible.first?.id
+            return
+        }
+        let next = min(index + 1, visible.count - 1)
+        selectedConnectionId = visible[next].id
+    }
+
+    private func moveToPreviousConnection() {
+        let visible = flatVisibleConnections
+        guard !visible.isEmpty else { return }
+        guard let currentId = selectedConnectionId,
+              let index = visible.firstIndex(where: { $0.id == currentId }) else {
+            selectedConnectionId = visible.last?.id
+            return
+        }
+        let prev = max(index - 1, 0)
+        selectedConnectionId = visible[prev].id
+    }
+
+    private func collapseSelectedGroup() {
+        guard let id = selectedConnectionId,
+              let connection = connections.first(where: { $0.id == id }),
+              let groupId = connection.groupId,
+              !collapsedGroupIds.contains(groupId) else { return }
+        withAnimation(.easeInOut(duration: 0.2)) {
+            collapsedGroupIds.insert(groupId)
+            // Keep selectedConnectionId so Ctrl+L can derive the groupId to expand.
+            // The List won't show a highlight for the hidden row.
+            UserDefaults.standard.set(
+                Array(collapsedGroupIds.map(\.uuidString)),
+                forKey: "com.TablePro.collapsedGroupIds"
+            )
+        }
+    }
+
+    private func expandSelectedGroup() {
+        guard let id = selectedConnectionId,
+              let connection = connections.first(where: { $0.id == id }),
+              let groupId = connection.groupId,
+              collapsedGroupIds.contains(groupId) else { return }
+        withAnimation(.easeInOut(duration: 0.2)) {
+            collapsedGroupIds.remove(groupId)
+            UserDefaults.standard.set(
+                Array(collapsedGroupIds.map(\.uuidString)),
+                forKey: "com.TablePro.collapsedGroupIds"
+            )
         }
     }
 
@@ -605,27 +748,27 @@ private struct ConnectionRow: View {
     var body: some View {
         HStack(spacing: 12) {
             // Database type icon
-            Image(connection.type.iconName)
+            connection.type.iconImage
                 .renderingMode(.template)
-                .font(.system(size: DesignConstants.IconSize.medium))
+                .font(.system(size: ThemeEngine.shared.activeTheme.iconSizes.medium))
                 .foregroundStyle(connection.displayColor)
                 .frame(
-                    width: DesignConstants.IconSize.medium, height: DesignConstants.IconSize.medium)
+                    width: ThemeEngine.shared.activeTheme.iconSizes.medium, height: ThemeEngine.shared.activeTheme.iconSizes.medium)
 
             // Connection info
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(connection.name)
-                        .font(.system(size: DesignConstants.FontSize.body, weight: .medium))
+                        .font(.system(size: ThemeEngine.shared.activeTheme.typography.body, weight: .medium))
                         .foregroundStyle(.primary)
 
                     // Tag (single)
                     if let tag = displayTag {
                         Text(tag.name)
-                            .font(.system(size: DesignConstants.FontSize.tiny))
+                            .font(.system(size: ThemeEngine.shared.activeTheme.typography.tiny))
                             .foregroundStyle(tag.color.color)
-                            .padding(.horizontal, DesignConstants.Spacing.xxs)
-                            .padding(.vertical, DesignConstants.Spacing.xxxs)
+                            .padding(.horizontal, ThemeEngine.shared.activeTheme.spacing.xxs)
+                            .padding(.vertical, ThemeEngine.shared.activeTheme.spacing.xxxs)
                             .background(
                                 RoundedRectangle(cornerRadius: 4).fill(
                                     tag.color.color.opacity(0.15)))
@@ -633,14 +776,14 @@ private struct ConnectionRow: View {
                 }
 
                 Text(connectionSubtitle)
-                    .font(.system(size: DesignConstants.FontSize.small))
+                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
 
             Spacer()
         }
-        .padding(.vertical, DesignConstants.Spacing.xxs)
+        .padding(.vertical, ThemeEngine.shared.activeTheme.spacing.xxs)
         .contentShape(Rectangle())
         .overlay(
             DoubleClickView { onConnect?() }
@@ -711,7 +854,7 @@ private struct EnvironmentBadge: View {
 
     var body: some View {
         Text("(\(environment.rawValue.lowercased()))")
-            .font(.system(size: DesignConstants.FontSize.small))
+            .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
             .foregroundStyle(environment.badgeColor)
     }
 }
@@ -721,10 +864,10 @@ private struct EnvironmentBadge: View {
 private struct WelcomeButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: DesignConstants.FontSize.body))
+            .font(.system(size: ThemeEngine.shared.activeTheme.typography.body))
             .foregroundStyle(.primary)
-            .padding(.horizontal, DesignConstants.Spacing.md)
-            .padding(.vertical, DesignConstants.Spacing.sm)
+            .padding(.horizontal, ThemeEngine.shared.activeTheme.spacing.md)
+            .padding(.vertical, ThemeEngine.shared.activeTheme.spacing.sm)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 8)
@@ -745,9 +888,9 @@ private struct KeyboardHint: View {
     var body: some View {
         HStack(spacing: 4) {
             Text(keys)
-                .font(.system(size: DesignConstants.FontSize.caption, design: .monospaced))
-                .padding(.horizontal, DesignConstants.Spacing.xxs + 1)
-                .padding(.vertical, DesignConstants.Spacing.xxxs)
+                .font(.system(size: ThemeEngine.shared.activeTheme.typography.caption, design: .monospaced))
+                .padding(.horizontal, ThemeEngine.shared.activeTheme.spacing.xxs + 1)
+                .padding(.vertical, ThemeEngine.shared.activeTheme.spacing.xxxs)
                 .background(
                     RoundedRectangle(cornerRadius: 3)
                         .fill(Color(nsColor: .quaternaryLabelColor))

@@ -12,7 +12,6 @@ import Foundation
 import Observation
 import os
 import SwiftUI
-import UniformTypeIdentifiers
 
 /// Provides command actions for MainContentView, accessible via @FocusedValue
 @MainActor
@@ -139,14 +138,11 @@ final class MainContentCommandActions {
 
     private func setupObservers() {
         setupNonMenuNotificationObservers()
-        setupFilterBroadcastObservers()
         setupDataBroadcastObservers()
         setupTabBroadcastObservers()
         setupDatabaseBroadcastObservers()
-        setupUIBroadcastObservers()
         setupWindowObservers()
         setupFileOpenObservers()
-        setupReconnectObservers()
     }
 
     /// Observers for notifications still posted by non-menu views (DataGrid, SidebarView,
@@ -161,6 +157,8 @@ final class MainContentCommandActions {
         }
 
         observeKeyWindowOnly(.duplicateRow) { [weak self] _ in self?.duplicateRow() }
+
+        observeKeyWindowOnly(.exportQueryResults) { [weak self] _ in self?.exportQueryResults() }
 
         // Note: .copySelectedRows and .pasteRows observers call the data-grid
         // path directly (not the public methods) to avoid an infinite loop —
@@ -180,17 +178,6 @@ final class MainContentCommandActions {
             self.editingCell.wrappedValue = cell
         }
 
-        observeKeyWindowOnly(.createView) { [weak self] _ in self?.createView() }
-        observeKeyWindowOnly(.exportTables) { [weak self] _ in self?.exportTables() }
-        observeKeyWindowOnly(.importTables) { [weak self] _ in self?.importTables() }
-        observeKeyWindowOnly(.explainQuery) { [weak self] notification in
-            if let variantRaw = notification.userInfo?["variant"] as? String,
-               let variant = ClickHouseExplainVariant(rawValue: variantRaw) {
-                self?.coordinator?.runClickHouseExplain(variant: variant)
-            } else {
-                self?.explainQuery()
-            }
-        }
         observeKeyWindowOnly(.openDatabaseSwitcher) { [weak self] _ in self?.openDatabaseSwitcher() }
     }
 
@@ -247,7 +234,7 @@ final class MainContentCommandActions {
 
     func copySelectedRows() {
         if coordinator?.tabManager.selectedTab?.showStructure == true {
-            NotificationCenter.default.post(name: .copySelectedRows, object: nil)
+            coordinator?.structureActions?.copyRows?()
         } else {
             let indices = selectedRowIndices.wrappedValue
             coordinator?.copySelectedRowsToClipboard(indices: indices)
@@ -259,9 +246,14 @@ final class MainContentCommandActions {
         coordinator?.copySelectedRowsWithHeaders(indices: indices)
     }
 
+    func copySelectedRowsAsJson() {
+        let indices = selectedRowIndices.wrappedValue
+        coordinator?.copySelectedRowsAsJson(indices: indices)
+    }
+
     func pasteRows() {
         if coordinator?.tabManager.selectedTab?.showStructure == true {
-            NotificationCenter.default.post(name: .pasteRows, object: nil)
+            coordinator?.structureActions?.pasteRows?()
         } else {
             var indices = selectedRowIndices.wrappedValue
             var cell = editingCell.wrappedValue
@@ -279,6 +271,16 @@ final class MainContentCommandActions {
             || !pendingDeletes.wrappedValue.isEmpty
         let hasSidebarEdits = rightPanelState.editState.hasEdits
         return hasEditedCells || hasPendingTableOps || hasSidebarEdits
+    }
+
+    // MARK: - Editor Query Loading (Group A — Called Directly)
+
+    func loadQueryIntoEditor(_ query: String) {
+        coordinator?.loadQueryIntoEditor(query)
+    }
+
+    func insertQueryFromAI(_ query: String) {
+        coordinator?.insertQueryFromAI(query)
     }
 
     // MARK: - Tab Operations (Group A — Called Directly)
@@ -337,6 +339,7 @@ final class MainContentCommandActions {
             coordinator?.tabManager.selectedTabId = nil
             AppState.shared.isCurrentTabEditable = false
             coordinator?.toolbarState.isTableTab = false
+            AppState.shared.isTableTab = false
         }
     }
 
@@ -346,9 +349,9 @@ final class MainContentCommandActions {
             return
         }
 
-        // Structure view saves are notification-based
+        // Structure view saves via direct coordinator call
         if coordinator.tabManager.selectedTab?.showStructure == true {
-            NotificationCenter.default.post(name: .saveStructureChanges, object: nil)
+            coordinator.structureActions?.saveChanges?()
             performClose()
             return
         }
@@ -379,34 +382,17 @@ final class MainContentCommandActions {
         performClose()
     }
 
+    func copyTableNames() {
+        coordinator?.sidebarViewModel?.copySelectedTableNames()
+    }
+
+    func truncateTables() {
+        guard !(selectedTables.wrappedValue.isEmpty) else { return }
+        coordinator?.sidebarViewModel?.batchToggleTruncate()
+    }
+
     func createView() {
-        guard !connection.isReadOnly else { return }
-
-        let template: String
-        switch connection.type {
-        case .postgresql, .redshift:
-            template = "CREATE OR REPLACE VIEW view_name AS\nSELECT column1, column2\nFROM table_name\nWHERE condition;"
-        case .mysql, .mariadb, .clickhouse:
-            template = "CREATE VIEW view_name AS\nSELECT column1, column2\nFROM table_name\nWHERE condition;"
-        case .sqlite:
-            template = "CREATE VIEW IF NOT EXISTS view_name AS\nSELECT column1, column2\nFROM table_name\nWHERE condition;"
-        case .mssql:
-            template = "CREATE OR ALTER VIEW view_name AS\nSELECT column1, column2\nFROM table_name\nWHERE condition;"
-        case .oracle:
-            template = "CREATE OR REPLACE VIEW view_name AS\nSELECT column1, column2\nFROM table_name\nWHERE condition;"
-        case .mongodb:
-            template = "db.createView(\"view_name\", \"source_collection\", [\n  {\"$match\": {}},\n  {\"$project\": {\"_id\": 1}}\n])"
-        case .redis:
-            template = "-- Redis does not support views"
-        }
-
-        let payload = EditorTabPayload(
-            connectionId: connection.id,
-            tabType: .query,
-            databaseName: connection.database,
-            initialQuery: template
-        )
-        WindowOpener.shared.openNativeTab(payload)
+        coordinator?.createView()
     }
 
     // MARK: - Tab Navigation (Group A — Called Directly)
@@ -432,13 +418,13 @@ final class MainContentCommandActions {
     func saveChanges() {
         // Check if we're in structure view mode
         if coordinator?.tabManager.selectedTab?.showStructure == true {
-            // Post notification for structure view to handle
-            NotificationCenter.default.post(name: .saveStructureChanges, object: nil)
-        } else if rightPanelState.editState.hasEdits {
-            // Save sidebar edits if the right panel has pending changes
-            rightPanelState.onSave?()
-        } else {
-            // Handle data grid changes
+            coordinator?.structureActions?.saveChanges?()
+        } else if coordinator?.changeManager.hasChanges == true
+            || !pendingTruncates.wrappedValue.isEmpty
+            || !pendingDeletes.wrappedValue.isEmpty {
+            // Handle data grid changes (prioritize over sidebar edits since
+            // data grid edits are synced to sidebar editState, and the data grid
+            // path uses the correct plugin driver for statement generation)
             var truncates = pendingTruncates.wrappedValue
             var deletes = pendingDeletes.wrappedValue
             var options = tableOperationOptions.wrappedValue
@@ -450,6 +436,9 @@ final class MainContentCommandActions {
             pendingTruncates.wrappedValue = truncates
             pendingDeletes.wrappedValue = deletes
             tableOperationOptions.wrappedValue = options
+        } else if rightPanelState.editState.hasEdits {
+            // Save sidebar-only edits (edits made directly in the right panel)
+            rightPanelState.onSave?()
         }
     }
 
@@ -458,42 +447,15 @@ final class MainContentCommandActions {
     }
 
     func exportTables() {
-        coordinator?.activeSheet = .exportDialog
+        coordinator?.openExportDialog()
+    }
+
+    func exportQueryResults() {
+        coordinator?.openExportQueryResultsDialog()
     }
 
     func importTables() {
-        guard !connection.isReadOnly else { return }
-        guard connection.type != .mongodb && connection.type != .redis else {
-            let typeName = connection.type == .mongodb ? "MongoDB" : "Redis"
-            AlertHelper.showErrorSheet(
-                title: String(localized: "Import Not Supported"),
-                message: String(localized: "SQL import is not supported for \(typeName) connections."),
-                window: nil
-            )
-            return
-        }
-        // Open file picker first, then show dialog with selected file
-        let panel = NSOpenPanel()
-        var contentTypes: [UTType] = []
-        if let sqlType = UTType(filenameExtension: "sql") {
-            contentTypes.append(sqlType)
-        }
-        if let gzType = UTType(filenameExtension: "gz") {
-            contentTypes.append(gzType)
-        }
-        if !contentTypes.isEmpty {
-            panel.allowedContentTypes = contentTypes
-        }
-        panel.allowsMultipleSelection = false
-        panel.message = "Select SQL file to import"
-
-        panel.begin { [weak self] response in
-            guard response == .OK, let url = panel.url else { return }
-
-            // Store the selected file URL and show dialog
-            self?.coordinator?.importFileURL = url
-            self?.coordinator?.activeSheet = .importDialog
-        }
+        coordinator?.openImportDialog()
     }
 
     func previewSQL() {
@@ -520,11 +482,15 @@ final class MainContentCommandActions {
         coordinator?.activeSheet = .databaseSwitcher
     }
 
+    func openQuickSwitcher() {
+        coordinator?.activeSheet = .quickSwitcher
+    }
+
     // MARK: - Undo/Redo (Group A — Called Directly)
 
     func undoChange() {
         if coordinator?.tabManager.selectedTab?.showStructure == true {
-            NotificationCenter.default.post(name: .undoChange, object: nil)
+            coordinator?.structureActions?.undo?()
         } else {
             var indices = selectedRowIndices.wrappedValue
             coordinator?.undoLastChange(selectedRowIndices: &indices)
@@ -534,7 +500,7 @@ final class MainContentCommandActions {
 
     func redoChange() {
         if coordinator?.tabManager.selectedTab?.showStructure == true {
-            NotificationCenter.default.post(name: .redoChange, object: nil)
+            coordinator?.structureActions?.redo?()
         } else {
             coordinator?.redoLastChange()
         }
@@ -542,44 +508,10 @@ final class MainContentCommandActions {
 
     // MARK: - Group B Broadcast Subscribers
 
-    // MARK: Filter Broadcasts
-
-    private func setupFilterBroadcastObservers() {
-        observeKeyWindowOnly(.applyAllFilters) { [weak self] _ in self?.handleApplyAllFilters() }
-        observeKeyWindowOnly(.duplicateFilter) { [weak self] _ in self?.handleDuplicateFilter() }
-        observeKeyWindowOnly(.removeFilter) { [weak self] _ in self?.handleRemoveFilter() }
-    }
-
-    private func handleApplyAllFilters() {
-        if filterStateManager.hasSelectedFilters {
-            filterStateManager.applySelectedFilters()
-            coordinator?.applyFilters(filterStateManager.appliedFilters)
-        }
-    }
-
-    private func handleDuplicateFilter() {
-        if filterStateManager.isVisible, let focusedFilter = filterStateManager.focusedFilter {
-            filterStateManager.duplicateFilter(focusedFilter)
-        }
-    }
-
-    private func handleRemoveFilter() {
-        if filterStateManager.isVisible, let focusedFilter = filterStateManager.focusedFilter {
-            filterStateManager.removeFilter(focusedFilter)
-        }
-    }
-
     // MARK: Data Broadcasts
 
     private func setupDataBroadcastObservers() {
         observeKeyWindowOnly(.refreshData) { [weak self] _ in self?.handleRefreshData() }
-        observeKeyWindowOnly(.refreshAll) { [weak self] _ in self?.handleRefreshAll() }
-
-        observeKeyWindowOnly(.showTableStructure) { [weak self] notification in
-            if let tableName = notification.object as? String {
-                self?.coordinator?.openTableTab(tableName, showStructure: true)
-            }
-        }
     }
 
     private func handleRefreshData() {
@@ -591,132 +523,14 @@ final class MainContentCommandActions {
                 self?.pendingDeletes.wrappedValue.removeAll()
             }
         )
-    }
-
-    private func handleRefreshAll() {
-        let hasPendingTableOps = !pendingTruncates.wrappedValue.isEmpty || !pendingDeletes.wrappedValue.isEmpty
-        coordinator?.handleRefreshAll(
-            hasPendingTableOps: hasPendingTableOps,
-            onDiscard: { [weak self] in
-                self?.pendingTruncates.wrappedValue.removeAll()
-                self?.pendingDeletes.wrappedValue.removeAll()
-            }
-        )
+        coordinator?.reloadSidebar()
     }
 
     // MARK: Tab Broadcasts
 
     private func setupTabBroadcastObservers() {
-        observeKeyWindowOnly(.newQueryTab) { [weak self] notification in
-            let initialQuery = notification.object as? String
-            self?.newTab(initialQuery: initialQuery)
-        }
-
-        observeKeyWindowOnly(.loadQueryIntoEditor) { [weak self] notification in
-            self?.handleLoadQueryIntoEditor(notification)
-        }
-
-        observeKeyWindowOnly(.insertQueryFromAI) { [weak self] notification in
-            self?.handleInsertQueryFromAI(notification)
-        }
-
-        observeKeyWindowOnly(.showAllTables) { [weak self] _ in
-            self?.coordinator?.showAllTablesMetadata()
-        }
-
-        observeKeyWindowOnly(.editViewDefinition) { [weak self] notification in
-            if let viewName = notification.object as? String {
-                self?.handleEditViewDefinition(viewName)
-            }
-        }
-    }
-
-    private func handleLoadQueryIntoEditor(_ notification: Notification) {
-        guard let query = notification.object as? String,
-              let coordinator = coordinator else { return }
-
-        // If current window's tab is a query tab, load into it
-        if let tabIndex = coordinator.tabManager.selectedTabIndex,
-           tabIndex < coordinator.tabManager.tabs.count,
-           coordinator.tabManager.tabs[tabIndex].tabType == .query {
-            coordinator.tabManager.tabs[tabIndex].query = query
-            coordinator.tabManager.tabs[tabIndex].hasUserInteraction = true
-        } else {
-            // Open a new native tab with the query
-            let payload = EditorTabPayload(
-                connectionId: connection.id,
-                tabType: .query,
-                initialQuery: query
-            )
-            WindowOpener.shared.openNativeTab(payload)
-        }
-    }
-
-    private func handleInsertQueryFromAI(_ notification: Notification) {
-        guard let query = notification.object as? String,
-              let coordinator = coordinator else { return }
-
-        // If current window's tab is a query tab, append to it
-        if let tabIndex = coordinator.tabManager.selectedTabIndex,
-           tabIndex < coordinator.tabManager.tabs.count,
-           coordinator.tabManager.tabs[tabIndex].tabType == .query {
-            let existingQuery = coordinator.tabManager.tabs[tabIndex].query
-            if existingQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                coordinator.tabManager.tabs[tabIndex].query = query
-            } else {
-                coordinator.tabManager.tabs[tabIndex].query = existingQuery + "\n\n" + query
-            }
-            coordinator.tabManager.tabs[tabIndex].hasUserInteraction = true
-        } else {
-            // Open a new native tab with the query
-            let payload = EditorTabPayload(
-                connectionId: connection.id,
-                tabType: .query,
-                initialQuery: query
-            )
-            WindowOpener.shared.openNativeTab(payload)
-        }
-    }
-
-    private func handleEditViewDefinition(_ viewName: String) {
-        Task { @MainActor in
-            do {
-                guard let driver = DatabaseManager.shared.driver(for: self.connection.id) else { return }
-                let definition = try await driver.fetchViewDefinition(view: viewName)
-
-                let payload = EditorTabPayload(
-                    connectionId: connection.id,
-                    tabType: .query,
-                    initialQuery: definition
-                )
-                WindowOpener.shared.openNativeTab(payload)
-            } catch {
-                let fallbackSQL: String
-                switch connection.type {
-                case .postgresql, .redshift:
-                    fallbackSQL = "CREATE OR REPLACE VIEW \(viewName) AS\n-- Could not fetch view definition: \(error.localizedDescription)\nSELECT * FROM table_name;"
-                case .mysql, .mariadb, .clickhouse:
-                    fallbackSQL = "ALTER VIEW \(viewName) AS\n-- Could not fetch view definition: \(error.localizedDescription)\nSELECT * FROM table_name;"
-                case .sqlite:
-                    fallbackSQL = "-- SQLite does not support ALTER VIEW. Drop and recreate:\nDROP VIEW IF EXISTS \(viewName);\nCREATE VIEW \(viewName) AS\nSELECT * FROM table_name;"
-                case .mssql:
-                    fallbackSQL = "CREATE OR ALTER VIEW \(viewName) AS\n-- Could not fetch view definition: \(error.localizedDescription)\nSELECT * FROM table_name;"
-                case .oracle:
-                    fallbackSQL = "CREATE OR REPLACE VIEW \(viewName) AS\n-- Could not fetch view definition: \(error.localizedDescription)\nSELECT * FROM table_name;"
-                case .mongodb:
-                    fallbackSQL = "db.runCommand({\"collMod\": \"\(viewName)\", \"viewOn\": \"source_collection\", \"pipeline\": [{\"$match\": {}}]})"
-                case .redis:
-                    fallbackSQL = "-- Redis does not support views"
-                }
-
-                let payload = EditorTabPayload(
-                    connectionId: connection.id,
-                    tabType: .query,
-                    initialQuery: fallbackSQL
-                )
-                WindowOpener.shared.openNativeTab(payload)
-            }
-        }
+        // All tab notifications (newQueryTab, loadQueryIntoEditor, insertQueryFromAI)
+        // have been replaced with direct method calls via @FocusedValue.
     }
 
     // MARK: Database Broadcasts
@@ -731,20 +545,7 @@ final class MainContentCommandActions {
             if let driver = DatabaseManager.shared.driver(for: self.connection.id) {
                 coordinator?.toolbarState.databaseVersion = driver.serverVersion
             }
-        }
-    }
-
-    // MARK: UI Broadcasts
-
-    private func setupUIBroadcastObservers() {
-        observeKeyWindowOnly(.clearSelection) { [weak self] _ in self?.handleClearSelection() }
-    }
-
-    private func handleClearSelection() {
-        selectedRowIndices.wrappedValue.removeAll()
-        selectedTables.wrappedValue.removeAll()
-        if filterStateManager.isVisible {
-            filterStateManager.close()
+            coordinator?.reloadSidebar()
         }
     }
 
@@ -791,18 +592,6 @@ final class MainContentCommandActions {
                     WindowOpener.shared.openNativeTab(payload)
                 }
             }
-        }
-    }
-
-    // MARK: Reconnect Broadcasts
-
-    private func setupReconnectObservers() {
-        observeKeyWindowOnly(.reconnectDatabase) { [weak self] _ in self?.handleReconnect() }
-    }
-
-    private func handleReconnect() {
-        Task { @MainActor in
-            await DatabaseManager.shared.reconnectSession(self.connection.id)
         }
     }
 }

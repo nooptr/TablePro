@@ -83,13 +83,8 @@ fi
 echo "✅ PlugIns directory exists"
 
 REQUIRED_PLUGINS=(
-  "ClickHouseDriver.tableplugin"
-  "MSSQLDriver.tableplugin"
-  "MongoDBDriver.tableplugin"
   "MySQLDriver.tableplugin"
-  "OracleDriver.tableplugin"
   "PostgreSQLDriver.tableplugin"
-  "RedisDriver.tableplugin"
   "SQLiteDriver.tableplugin"
 )
 
@@ -107,7 +102,7 @@ if [ "$MISSING_PLUGINS" -eq 1 ]; then
   echo "❌ ERROR: One or more plugin bundles are missing"
   exit 1
 fi
-echo "✅ All 8 plugin bundles present"
+echo "✅ All bundled plugin bundles present"
 
 # Verify each plugin has a valid binary
 MISSING_BINARIES=0

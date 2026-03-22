@@ -8,6 +8,7 @@
 
 import AppKit
 import SwiftUI
+import TableProPluginKit
 
 /// Popover content for quick connection switching
 struct ConnectionSwitcherPopover: View {
@@ -74,12 +75,12 @@ struct ConnectionSwitcherPopover: View {
                                     )
                                     .padding(.horizontal, 4)
                             )
-                            .listRowInsets(DesignConstants.swiftUIListRowInsets)
+                            .listRowInsets(ThemeEngine.shared.activeTheme.spacing.listRowInsets.swiftUI)
                             .listRowSeparator(.hidden)
                         }
                     } header: {
                         Text("ACTIVE CONNECTIONS")
-                            .font(.system(size: DesignConstants.FontSize.caption, weight: .semibold))
+                            .font(.system(size: ThemeEngine.shared.activeTheme.typography.caption, weight: .semibold))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -108,12 +109,12 @@ struct ConnectionSwitcherPopover: View {
                                     )
                                     .padding(.horizontal, 4)
                             )
-                            .listRowInsets(DesignConstants.swiftUIListRowInsets)
+                            .listRowInsets(ThemeEngine.shared.activeTheme.spacing.listRowInsets.swiftUI)
                             .listRowSeparator(.hidden)
                         }
                     } header: {
                         Text("SAVED CONNECTIONS")
-                            .font(.system(size: DesignConstants.FontSize.caption, weight: .semibold))
+                            .font(.system(size: ThemeEngine.shared.activeTheme.typography.caption, weight: .semibold))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -190,6 +191,16 @@ struct ConnectionSwitcherPopover: View {
                 return nil
             case KeyCode.escape.rawValue:
                 onDismiss?()
+                return nil
+            case KeyCode.j.rawValue where event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.control):
+                if selectedIndex < items.count - 1 {
+                    selectedIndex += 1
+                }
+                return nil
+            case KeyCode.k.rawValue where event.modifierFlags.contains(.control):
+                if selectedIndex > 0 {
+                    selectedIndex -= 1
+                }
                 return nil
             default:
                 return event
@@ -293,7 +304,7 @@ struct ConnectionSwitcherPopover: View {
     // MARK: - Helpers
 
     private func connectionSubtitle(_ connection: DatabaseConnection) -> String {
-        if connection.type == .sqlite {
+        if PluginManager.shared.connectionMode(for: connection.type) == .fileBased {
             return connection.database
         }
         let port = connection.port != connection.type.defaultPort ? ":\(connection.port)" : ""

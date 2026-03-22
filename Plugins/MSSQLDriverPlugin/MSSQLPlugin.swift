@@ -16,11 +16,82 @@ final class MSSQLPlugin: NSObject, TableProPlugin, DriverPlugin {
 
     static let databaseTypeId = "SQL Server"
     static let databaseDisplayName = "SQL Server"
-    static let iconName = "server.rack"
+    static let iconName = "mssql-icon"
     static let defaultPort = 1433
     static let additionalConnectionFields: [ConnectionField] = [
-        ConnectionField(id: "mssqlSchema", label: "Schema", placeholder: "dbo")
+        ConnectionField(id: "mssqlSchema", label: "Schema", placeholder: "dbo", defaultValue: "dbo")
     ]
+
+    // MARK: - UI/Capability Metadata
+
+    static let postConnectActions: [PostConnectAction] = [.selectDatabaseFromLastSession]
+    static let brandColorHex = "#E34517"
+    static let systemDatabaseNames: [String] = ["master", "tempdb", "model", "msdb"]
+    static let defaultSchemaName = "dbo"
+    static let databaseGroupingStrategy: GroupingStrategy = .bySchema
+    static let columnTypesByCategory: [String: [String]] = [
+        "Integer": ["TINYINT", "SMALLINT", "INT", "BIGINT"],
+        "Float": ["FLOAT", "REAL", "DECIMAL", "NUMERIC", "MONEY", "SMALLMONEY"],
+        "String": ["CHAR", "VARCHAR", "TEXT", "NCHAR", "NVARCHAR", "NTEXT"],
+        "Date": ["DATE", "TIME", "DATETIME", "DATETIME2", "SMALLDATETIME", "DATETIMEOFFSET"],
+        "Binary": ["BINARY", "VARBINARY", "IMAGE"],
+        "Boolean": ["BIT"],
+        "XML": ["XML"],
+        "UUID": ["UNIQUEIDENTIFIER"],
+        "Spatial": ["GEOMETRY", "GEOGRAPHY"],
+        "Other": ["SQL_VARIANT", "TIMESTAMP", "ROWVERSION", "CURSOR", "TABLE", "HIERARCHYID"]
+    ]
+
+    static let sqlDialect: SQLDialectDescriptor? = SQLDialectDescriptor(
+        identifierQuote: "[",
+        keywords: [
+            "SELECT", "FROM", "WHERE", "JOIN", "INNER", "LEFT", "RIGHT", "OUTER", "CROSS", "FULL",
+            "ON", "USING", "AND", "OR", "NOT", "IN", "LIKE", "BETWEEN", "AS",
+            "ORDER", "BY", "GROUP", "HAVING", "TOP", "OFFSET", "FETCH", "NEXT", "ROWS", "ONLY",
+            "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE",
+            "CREATE", "ALTER", "DROP", "TABLE", "INDEX", "VIEW", "DATABASE", "SCHEMA",
+            "PRIMARY", "KEY", "FOREIGN", "REFERENCES", "UNIQUE", "CONSTRAINT",
+            "ADD", "COLUMN", "RENAME", "EXEC",
+            "NULL", "IS", "ASC", "DESC", "DISTINCT", "ALL", "ANY", "SOME",
+            "IDENTITY", "NOLOCK", "WITH", "ROWCOUNT", "NEWID",
+            "CASE", "WHEN", "THEN", "ELSE", "END", "COALESCE", "NULLIF", "IIF",
+            "UNION", "INTERSECT", "EXCEPT",
+            "DECLARE", "BEGIN", "COMMIT", "ROLLBACK", "TRANSACTION",
+            "PRINT", "GO", "EXECUTE",
+            "OVER", "PARTITION", "ROW_NUMBER", "RANK", "DENSE_RANK",
+            "RETURNING", "OUTPUT", "INSERTED", "DELETED"
+        ],
+        functions: [
+            "COUNT", "SUM", "AVG", "MAX", "MIN", "STRING_AGG",
+            "CONCAT", "SUBSTRING", "LEFT", "RIGHT", "LEN", "LOWER", "UPPER",
+            "TRIM", "LTRIM", "RTRIM", "REPLACE", "CHARINDEX", "PATINDEX",
+            "STUFF", "FORMAT",
+            "GETDATE", "GETUTCDATE", "SYSDATETIME", "CURRENT_TIMESTAMP",
+            "DATEADD", "DATEDIFF", "DATENAME", "DATEPART",
+            "CONVERT", "CAST",
+            "ROUND", "CEILING", "FLOOR", "ABS", "POWER", "SQRT", "RAND",
+            "ISNULL", "ISNUMERIC", "ISDATE", "COALESCE", "NEWID",
+            "OBJECT_ID", "OBJECT_NAME", "SCHEMA_NAME", "DB_NAME",
+            "SCOPE_IDENTITY", "@@IDENTITY", "@@ROWCOUNT"
+        ],
+        dataTypes: [
+            "INT", "INTEGER", "TINYINT", "SMALLINT", "BIGINT",
+            "DECIMAL", "NUMERIC", "FLOAT", "REAL", "MONEY", "SMALLMONEY",
+            "CHAR", "VARCHAR", "NCHAR", "NVARCHAR", "TEXT", "NTEXT",
+            "BINARY", "VARBINARY", "IMAGE",
+            "DATE", "TIME", "DATETIME", "DATETIME2", "SMALLDATETIME", "DATETIMEOFFSET",
+            "BIT", "UNIQUEIDENTIFIER", "XML", "SQL_VARIANT",
+            "ROWVERSION", "TIMESTAMP", "HIERARCHYID"
+        ],
+        tableOptions: [
+            "ON", "CLUSTERED", "NONCLUSTERED", "WITH", "TEXTIMAGE_ON"
+        ],
+        regexSyntax: .unsupported,
+        booleanLiteralStyle: .numeric,
+        likeEscapeStyle: .explicit,
+        paginationStyle: .offsetFetch,
+        autoLimitStyle: .top
+    )
 
     func createDriver(config: DriverConnectionConfig) -> any PluginDatabaseDriver {
         MSSQLPluginDriver(config: config)
@@ -79,6 +150,7 @@ private struct FreeTDSQueryResult {
     let columnTypeNames: [String]
     let rows: [[String?]]
     let affectedRows: Int
+    let isTruncated: Bool
 }
 
 private final class FreeTDSConnection: @unchecked Sendable {
@@ -91,6 +163,7 @@ private final class FreeTDSConnection: @unchecked Sendable {
     private let database: String
     private let lock = NSLock()
     private var _isConnected = false
+    private var _isCancelled = false
 
     var isConnected: Bool {
         lock.lock()
@@ -109,15 +182,8 @@ private final class FreeTDSConnection: @unchecked Sendable {
     }
 
     func connect() async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            queue.async { [self] in
-                do {
-                    try self.connectSync()
-                    continuation.resume()
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
+        try await pluginDispatchAsync(on: queue) { [self] in
+            try self.connectSync()
         }
     }
 
@@ -153,17 +219,12 @@ private final class FreeTDSConnection: @unchecked Sendable {
     }
 
     func switchDatabase(_ database: String) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            queue.async { [self] in
-                guard let proc = self.dbproc else {
-                    continuation.resume(throwing: MSSQLPluginError.notConnected)
-                    return
-                }
-                if dbuse(proc, database) == FAIL {
-                    continuation.resume(throwing: MSSQLPluginError.queryFailed("Cannot switch to database '\(database)'"))
-                } else {
-                    continuation.resume()
-                }
+        try await pluginDispatchAsync(on: queue) { [self] in
+            guard let proc = self.dbproc else {
+                throw MSSQLPluginError.notConnected
+            }
+            if dbuse(proc, database) == FAIL {
+                throw MSSQLPluginError.queryFailed("Cannot switch to database '\(database)'")
             }
         }
     }
@@ -183,17 +244,20 @@ private final class FreeTDSConnection: @unchecked Sendable {
         }
     }
 
+    func cancelCurrentQuery() {
+        lock.lock()
+        _isCancelled = true
+        let proc = dbproc
+        lock.unlock()
+
+        guard let proc else { return }
+        dbcancel(proc)
+    }
+
     func executeQuery(_ query: String) async throws -> FreeTDSQueryResult {
         let queryToRun = String(query)
-        return try await withCheckedThrowingContinuation { [self] (cont: CheckedContinuation<FreeTDSQueryResult, Error>) in
-            queue.async { [self] in
-                do {
-                    let result = try self.executeQuerySync(queryToRun)
-                    cont.resume(returning: result)
-                } catch {
-                    cont.resume(throwing: error)
-                }
-            }
+        return try await pluginDispatchAsync(on: queue) { [self] in
+            try self.executeQuerySync(queryToRun)
         }
     }
 
@@ -203,6 +267,10 @@ private final class FreeTDSConnection: @unchecked Sendable {
         }
 
         _ = dbcanquery(proc)
+
+        lock.lock()
+        _isCancelled = false
+        lock.unlock()
 
         freetdsLastError = ""
         if dbcmd(proc, query) == FAIL {
@@ -217,8 +285,17 @@ private final class FreeTDSConnection: @unchecked Sendable {
         var allTypeNames: [String] = []
         var allRows: [[String?]] = []
         var firstResultSet = true
+        var truncated = false
 
         while true {
+            lock.lock()
+            let cancelledBetweenResults = _isCancelled
+            if cancelledBetweenResults { _isCancelled = false }
+            lock.unlock()
+            if cancelledBetweenResults {
+                throw MSSQLPluginError.queryFailed("Query cancelled")
+            }
+
             let resCode = dbresults(proc)
             if resCode == FAIL {
                 throw MSSQLPluginError.queryFailed("Query execution failed")
@@ -249,6 +326,14 @@ private final class FreeTDSConnection: @unchecked Sendable {
                 if rowCode == Int32(NO_MORE_ROWS) { break }
                 if rowCode == FAIL { break }
 
+                lock.lock()
+                let cancelled = _isCancelled
+                if cancelled { _isCancelled = false }
+                lock.unlock()
+                if cancelled {
+                    throw MSSQLPluginError.queryFailed("Query cancelled")
+                }
+
                 var row: [String?] = []
                 for i in 1...numCols {
                     let len = dbdatlen(proc, Int32(i))
@@ -263,6 +348,10 @@ private final class FreeTDSConnection: @unchecked Sendable {
                     }
                 }
                 allRows.append(row)
+                if allRows.count >= PluginRowLimits.defaultMax {
+                    truncated = true
+                    break
+                }
             }
         }
 
@@ -271,7 +360,8 @@ private final class FreeTDSConnection: @unchecked Sendable {
             columns: allColumns,
             columnTypeNames: allTypeNames,
             rows: allRows,
-            affectedRows: affectedRows
+            affectedRows: affectedRows,
+            isTruncated: truncated
         )
     }
 
@@ -336,6 +426,26 @@ final class MSSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     var supportsSchemas: Bool { true }
     var supportsTransactions: Bool { true }
 
+    func quoteIdentifier(_ name: String) -> String {
+        let escaped = name.replacingOccurrences(of: "]", with: "]]")
+        return "[\(escaped)]"
+    }
+
+    // MARK: - View Templates
+
+    func createViewTemplate() -> String? {
+        "CREATE OR ALTER VIEW view_name AS\nSELECT column1, column2\nFROM table_name\nWHERE condition;"
+    }
+
+    func editViewFallbackTemplate(viewName: String) -> String? {
+        let quoted = quoteIdentifier(viewName)
+        return "CREATE OR ALTER VIEW \(quoted) AS\nSELECT * FROM table_name;"
+    }
+
+    func castColumnToText(_ column: String) -> String {
+        "CAST(\(column) AS NVARCHAR(MAX))"
+    }
+
     init(config: DriverConnectionConfig) {
         self.config = config
         self._currentSchema = config.additionalFields["mssqlSchema"]?.isEmpty == false
@@ -393,8 +503,175 @@ final class MSSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             columnTypeNames: result.columnTypeNames,
             rows: result.rows,
             rowsAffected: result.affectedRows,
-            executionTime: Date().timeIntervalSince(startTime)
+            executionTime: Date().timeIntervalSince(startTime),
+            isTruncated: result.isTruncated
         )
+    }
+
+    // MARK: - DML Statement Generation
+
+    func generateStatements(
+        table: String,
+        columns: [String],
+        changes: [PluginRowChange],
+        insertedRowData: [Int: [String?]],
+        deletedRowIndices: Set<Int>,
+        insertedRowIndices: Set<Int>
+    ) -> [(statement: String, parameters: [String?])]? {
+        var statements: [(statement: String, parameters: [String?])] = []
+
+        var deleteChanges: [PluginRowChange] = []
+
+        for change in changes {
+            switch change.type {
+            case .insert:
+                guard insertedRowIndices.contains(change.rowIndex) else { continue }
+                if let values = insertedRowData[change.rowIndex] {
+                    if let stmt = generateMssqlInsert(table: table, columns: columns, values: values) {
+                        statements.append(stmt)
+                    }
+                }
+            case .update:
+                if let stmt = generateMssqlUpdate(table: table, columns: columns, change: change) {
+                    statements.append(stmt)
+                }
+            case .delete:
+                guard deletedRowIndices.contains(change.rowIndex) else { continue }
+                deleteChanges.append(change)
+            }
+        }
+
+        if !deleteChanges.isEmpty {
+            for change in deleteChanges {
+                if let stmt = generateMssqlDelete(table: table, columns: columns, change: change) {
+                    statements.append(stmt)
+                }
+            }
+        }
+
+        return statements.isEmpty ? nil : statements
+    }
+
+    private func generateMssqlInsert(
+        table: String,
+        columns: [String],
+        values: [String?]
+    ) -> (statement: String, parameters: [String?])? {
+        var nonDefaultColumns: [String] = []
+        var parameters: [String?] = []
+
+        for (index, value) in values.enumerated() {
+            if value == "__DEFAULT__" { continue }
+            guard index < columns.count else { continue }
+            nonDefaultColumns.append("[\(columns[index].replacingOccurrences(of: "]", with: "]]"))]")
+            parameters.append(value)
+        }
+
+        guard !nonDefaultColumns.isEmpty else { return nil }
+
+        let columnList = nonDefaultColumns.joined(separator: ", ")
+        let placeholders = parameters.map { _ in "?" }.joined(separator: ", ")
+        let escapedTable = "[\(table.replacingOccurrences(of: "]", with: "]]"))]"
+        let sql = "INSERT INTO \(escapedTable) (\(columnList)) VALUES (\(placeholders))"
+        return (statement: sql, parameters: parameters)
+    }
+
+    private func generateMssqlUpdate(
+        table: String,
+        columns: [String],
+        change: PluginRowChange
+    ) -> (statement: String, parameters: [String?])? {
+        guard !change.cellChanges.isEmpty else { return nil }
+
+        let escapedTable = "[\(table.replacingOccurrences(of: "]", with: "]]"))]"
+        var parameters: [String?] = []
+
+        let setClauses = change.cellChanges.map { cellChange -> String in
+            let col = "[\(cellChange.columnName.replacingOccurrences(of: "]", with: "]]"))]"
+            parameters.append(cellChange.newValue)
+            return "\(col) = ?"
+        }.joined(separator: ", ")
+
+        // Check if we have original row data to identify by PK or all columns
+        guard let originalRow = change.originalRow else { return nil }
+
+        // Use all columns as WHERE clause for safety
+        var conditions: [String] = []
+        for (index, columnName) in columns.enumerated() {
+            guard index < originalRow.count else { continue }
+            let col = "[\(columnName.replacingOccurrences(of: "]", with: "]]"))]"
+            if let value = originalRow[index] {
+                parameters.append(value)
+                conditions.append("\(col) = ?")
+            } else {
+                conditions.append("\(col) IS NULL")
+            }
+        }
+
+        guard !conditions.isEmpty else { return nil }
+
+        let whereClause = conditions.joined(separator: " AND ")
+
+        // Without a reliable PK, use UPDATE TOP (1) for safety
+        let sql = "UPDATE TOP (1) \(escapedTable) SET \(setClauses) WHERE \(whereClause)"
+        return (statement: sql, parameters: parameters)
+    }
+
+    private func generateMssqlDelete(
+        table: String,
+        columns: [String],
+        change: PluginRowChange
+    ) -> (statement: String, parameters: [String?])? {
+        guard let originalRow = change.originalRow else { return nil }
+
+        let escapedTable = "[\(table.replacingOccurrences(of: "]", with: "]]"))]"
+        var parameters: [String?] = []
+        var conditions: [String] = []
+
+        for (index, columnName) in columns.enumerated() {
+            guard index < originalRow.count else { continue }
+            let col = "[\(columnName.replacingOccurrences(of: "]", with: "]]"))]"
+            if let value = originalRow[index] {
+                parameters.append(value)
+                conditions.append("\(col) = ?")
+            } else {
+                conditions.append("\(col) IS NULL")
+            }
+        }
+
+        guard !conditions.isEmpty else { return nil }
+
+        let whereClause = conditions.joined(separator: " AND ")
+        let sql = "DELETE TOP (1) FROM \(escapedTable) WHERE \(whereClause)"
+        return (statement: sql, parameters: parameters)
+    }
+
+    func cancelQuery() throws {
+        freeTDSConn?.cancelCurrentQuery()
+    }
+
+    func applyQueryTimeout(_ seconds: Int) async throws {
+        guard seconds > 0 else { return }
+        let ms = seconds * 1_000
+        _ = try await execute(query: "SET LOCK_TIMEOUT \(ms)")
+    }
+
+    func executeParameterized(query: String, parameters: [String?]) async throws -> PluginQueryResult {
+        guard !parameters.isEmpty else {
+            return try await execute(query: query)
+        }
+
+        let (convertedQuery, paramDecls, paramAssigns) = Self.buildSpExecuteSql(
+            query: query, parameters: parameters
+        )
+
+        // If no placeholders were found, execute the query as-is
+        guard !paramDecls.isEmpty else {
+            return try await execute(query: query)
+        }
+
+        let sql = "EXEC sp_executesql N'\(Self.escapeNString(convertedQuery))', N'\(paramDecls)', \(paramAssigns)"
+        return try await execute(query: sql)
     }
 
     func fetchRowCount(query: String) async throws -> Int {
@@ -461,18 +738,29 @@ final class MSSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         let esc = effectiveSchemaEscaped(schema)
         let sql = """
             SELECT
-                COLUMN_NAME,
-                DATA_TYPE,
-                CHARACTER_MAXIMUM_LENGTH,
-                NUMERIC_PRECISION,
-                NUMERIC_SCALE,
-                IS_NULLABLE,
-                COLUMN_DEFAULT,
-                COLUMNPROPERTY(OBJECT_ID(TABLE_SCHEMA + '.' + TABLE_NAME), COLUMN_NAME, 'IsIdentity') AS IS_IDENTITY
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_NAME = '\(escapedTable)'
-              AND TABLE_SCHEMA = '\(esc)'
-            ORDER BY ORDINAL_POSITION
+                c.COLUMN_NAME,
+                c.DATA_TYPE,
+                c.CHARACTER_MAXIMUM_LENGTH,
+                c.NUMERIC_PRECISION,
+                c.NUMERIC_SCALE,
+                c.IS_NULLABLE,
+                c.COLUMN_DEFAULT,
+                COLUMNPROPERTY(OBJECT_ID(c.TABLE_SCHEMA + '.' + c.TABLE_NAME), c.COLUMN_NAME, 'IsIdentity') AS IS_IDENTITY,
+                CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK
+            FROM INFORMATION_SCHEMA.COLUMNS c
+            LEFT JOIN (
+                SELECT kcu.COLUMN_NAME
+                FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+                JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+                    ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+                    AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA
+                WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+                    AND tc.TABLE_SCHEMA = '\(esc)'
+                    AND tc.TABLE_NAME = '\(escapedTable)'
+            ) pk ON c.COLUMN_NAME = pk.COLUMN_NAME
+            WHERE c.TABLE_NAME = '\(escapedTable)'
+              AND c.TABLE_SCHEMA = '\(esc)'
+            ORDER BY c.ORDINAL_POSITION
             """
         let result = try await execute(query: sql)
         return result.rows.compactMap { row -> PluginColumnInfo? in
@@ -484,6 +772,7 @@ final class MSSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             let isNullable = (row[safe: 5] ?? nil) == "YES"
             let defaultValue = row[safe: 6] ?? nil
             let isIdentity = (row[safe: 7] ?? nil) == "1"
+            let isPk = (row[safe: 8] ?? nil) == "1"
 
             let baseType = (dataType ?? "nvarchar").lowercased()
             let fixedSizeTypes: Set<String> = [
@@ -509,7 +798,7 @@ final class MSSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 name: name,
                 dataType: fullType,
                 isNullable: isNullable,
-                isPrimaryKey: false,
+                isPrimaryKey: isPk,
                 defaultValue: defaultValue,
                 extra: isIdentity ? "IDENTITY" : nil
             )
@@ -587,6 +876,172 @@ final class MSSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 referencedTable: refTable,
                 referencedColumn: refColumn
             )
+        }
+    }
+
+    func fetchAllColumns(schema: String?) async throws -> [String: [PluginColumnInfo]] {
+        let esc = effectiveSchemaEscaped(schema)
+        let sql = """
+            SELECT
+                c.TABLE_NAME,
+                c.COLUMN_NAME,
+                c.DATA_TYPE,
+                c.CHARACTER_MAXIMUM_LENGTH,
+                c.NUMERIC_PRECISION,
+                c.NUMERIC_SCALE,
+                c.IS_NULLABLE,
+                c.COLUMN_DEFAULT,
+                COLUMNPROPERTY(OBJECT_ID(c.TABLE_SCHEMA + '.' + c.TABLE_NAME), c.COLUMN_NAME, 'IsIdentity') AS IS_IDENTITY,
+                CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK
+            FROM INFORMATION_SCHEMA.COLUMNS c
+            LEFT JOIN (
+                SELECT kcu.TABLE_NAME, kcu.COLUMN_NAME
+                FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+                JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+                    ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+                    AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA
+                WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+                    AND tc.TABLE_SCHEMA = '\(esc)'
+            ) pk ON c.TABLE_NAME = pk.TABLE_NAME AND c.COLUMN_NAME = pk.COLUMN_NAME
+            WHERE c.TABLE_SCHEMA = '\(esc)'
+            ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION
+            """
+        let result = try await execute(query: sql)
+        var columnsByTable: [String: [PluginColumnInfo]] = [:]
+        for row in result.rows {
+            guard let tableName = row[safe: 0] ?? nil,
+                  let name = row[safe: 1] ?? nil else { continue }
+            let dataType = row[safe: 2] ?? nil
+            let charLen = row[safe: 3] ?? nil
+            let numPrecision = row[safe: 4] ?? nil
+            let numScale = row[safe: 5] ?? nil
+            let isNullable = (row[safe: 6] ?? nil) == "YES"
+            let defaultValue = row[safe: 7] ?? nil
+            let isIdentity = (row[safe: 8] ?? nil) == "1"
+            let isPk = (row[safe: 9] ?? nil) == "1"
+
+            let baseType = (dataType ?? "nvarchar").lowercased()
+            let fixedSizeTypes: Set<String> = [
+                "int", "bigint", "smallint", "tinyint", "bit",
+                "money", "smallmoney", "float", "real",
+                "datetime", "datetime2", "smalldatetime", "date", "time",
+                "uniqueidentifier", "text", "ntext", "image", "xml",
+                "timestamp", "rowversion"
+            ]
+            var fullType = baseType
+            if fixedSizeTypes.contains(baseType) {
+                // No suffix
+            } else if let charLen, let len = Int(charLen), len > 0 {
+                fullType += "(\(len))"
+            } else if charLen == "-1" {
+                fullType += "(max)"
+            } else if let prec = numPrecision, let scale = numScale,
+                      let p = Int(prec), let s = Int(scale) {
+                fullType += "(\(p),\(s))"
+            }
+
+            let col = PluginColumnInfo(
+                name: name,
+                dataType: fullType,
+                isNullable: isNullable,
+                isPrimaryKey: isPk,
+                defaultValue: defaultValue,
+                extra: isIdentity ? "IDENTITY" : nil
+            )
+            columnsByTable[tableName, default: []].append(col)
+        }
+        return columnsByTable
+    }
+
+    func fetchAllForeignKeys(schema: String?) async throws -> [String: [PluginForeignKeyInfo]] {
+        let esc = effectiveSchemaEscaped(schema)
+        let sql = """
+            SELECT
+                tp.name AS table_name,
+                fk.name AS constraint_name,
+                cp.name AS column_name,
+                tr.name AS ref_table,
+                cr.name AS ref_column
+            FROM sys.foreign_keys fk
+            JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
+            JOIN sys.tables tp ON fkc.parent_object_id = tp.object_id
+            JOIN sys.schemas s ON tp.schema_id = s.schema_id
+            JOIN sys.columns cp
+                ON fkc.parent_object_id = cp.object_id AND fkc.parent_column_id = cp.column_id
+            JOIN sys.tables tr ON fkc.referenced_object_id = tr.object_id
+            JOIN sys.columns cr
+                ON fkc.referenced_object_id = cr.object_id AND fkc.referenced_column_id = cr.column_id
+            WHERE s.name = '\(esc)'
+            ORDER BY tp.name, fk.name
+            """
+        let result = try await execute(query: sql)
+        var fksByTable: [String: [PluginForeignKeyInfo]] = [:]
+        for row in result.rows {
+            guard let tableName = row[safe: 0] ?? nil,
+                  let constraintName = row[safe: 1] ?? nil,
+                  let columnName = row[safe: 2] ?? nil,
+                  let refTable = row[safe: 3] ?? nil,
+                  let refColumn = row[safe: 4] ?? nil else { continue }
+            let fk = PluginForeignKeyInfo(
+                name: constraintName,
+                column: columnName,
+                referencedTable: refTable,
+                referencedColumn: refColumn
+            )
+            fksByTable[tableName, default: []].append(fk)
+        }
+        return fksByTable
+    }
+
+    func fetchAllDatabaseMetadata() async throws -> [PluginDatabaseMetadata] {
+        let sql = """
+            SELECT d.name,
+                   SUM(mf.size) * 8 * 1024 AS size_bytes
+            FROM sys.databases d
+            LEFT JOIN sys.master_files mf ON d.database_id = mf.database_id
+            GROUP BY d.name
+            ORDER BY d.name
+            """
+        do {
+            let result = try await execute(query: sql)
+            var metadata = result.rows.compactMap { row -> PluginDatabaseMetadata? in
+                guard let name = row[safe: 0] ?? nil else { return nil }
+                let sizeBytes = (row[safe: 1] ?? nil).flatMap { Int64($0) }
+                return PluginDatabaseMetadata(name: name, sizeBytes: sizeBytes)
+            }
+
+            for i in metadata.indices {
+                let dbName = metadata[i].name.replacingOccurrences(of: "]", with: "]]")
+                do {
+                    let countResult = try await execute(
+                        query: "SELECT COUNT(*) FROM [\(dbName)].sys.tables"
+                    )
+                    if let countStr = countResult.rows.first?[safe: 0] ?? nil,
+                       let count = Int(countStr) {
+                        metadata[i] = PluginDatabaseMetadata(
+                            name: metadata[i].name,
+                            tableCount: count,
+                            sizeBytes: metadata[i].sizeBytes
+                        )
+                    }
+                } catch {
+                    // Database offline or permission denied — leave tableCount as nil
+                }
+            }
+
+            return metadata
+        } catch {
+            // Fall back to N+1 if permission denied on sys.master_files
+            let dbs = try await fetchDatabases()
+            var result: [PluginDatabaseMetadata] = []
+            for db in dbs {
+                do {
+                    result.append(try await fetchDatabaseMetadata(db))
+                } catch {
+                    result.append(PluginDatabaseMetadata(name: db))
+                }
+            }
+            return result
         }
     }
 
@@ -723,7 +1178,289 @@ final class MSSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         _ = try await execute(query: "CREATE DATABASE \(quotedName)")
     }
 
+    // MARK: - All Tables Metadata
+
+    func allTablesMetadataSQL(schema: String?) -> String? {
+        """
+        SELECT
+            s.name as schema_name,
+            t.name as name,
+            CASE WHEN v.object_id IS NOT NULL THEN 'VIEW' ELSE 'TABLE' END as kind,
+            p.rows as estimated_rows,
+            CAST(ROUND(SUM(a.total_pages) * 8 / 1024.0, 2) AS VARCHAR) + ' MB' as total_size
+        FROM sys.tables t
+        INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+        INNER JOIN sys.indexes i ON t.object_id = i.object_id AND i.index_id IN (0, 1)
+        INNER JOIN sys.partitions p ON i.object_id = p.object_id AND i.index_id = p.index_id
+        INNER JOIN sys.allocation_units a ON p.partition_id = a.container_id
+        LEFT JOIN sys.views v ON t.object_id = v.object_id
+        GROUP BY s.name, t.name, p.rows, v.object_id
+        ORDER BY t.name
+        """
+    }
+
+    // MARK: - Query Building
+
+    func buildBrowseQuery(
+        table: String,
+        sortColumns: [(columnIndex: Int, ascending: Bool)],
+        columns: [String],
+        limit: Int,
+        offset: Int
+    ) -> String? {
+        let quotedTable = mssqlQuoteIdentifier(table)
+        var query = "SELECT * FROM \(quotedTable)"
+        let orderBy = mssqlBuildOrderByClause(sortColumns: sortColumns, columns: columns)
+            ?? "ORDER BY (SELECT NULL)"
+        query += " \(orderBy) OFFSET \(offset) ROWS FETCH NEXT \(limit) ROWS ONLY"
+        return query
+    }
+
+    func buildFilteredQuery(
+        table: String,
+        filters: [(column: String, op: String, value: String)],
+        logicMode: String,
+        sortColumns: [(columnIndex: Int, ascending: Bool)],
+        columns: [String],
+        limit: Int,
+        offset: Int
+    ) -> String? {
+        let quotedTable = mssqlQuoteIdentifier(table)
+        var query = "SELECT * FROM \(quotedTable)"
+        let whereClause = mssqlBuildWhereClause(filters: filters, logicMode: logicMode)
+        if !whereClause.isEmpty {
+            query += " WHERE \(whereClause)"
+        }
+        let orderBy = mssqlBuildOrderByClause(sortColumns: sortColumns, columns: columns)
+            ?? "ORDER BY (SELECT NULL)"
+        query += " \(orderBy) OFFSET \(offset) ROWS FETCH NEXT \(limit) ROWS ONLY"
+        return query
+    }
+
+    func buildQuickSearchQuery(
+        table: String,
+        searchText: String,
+        columns: [String],
+        sortColumns: [(columnIndex: Int, ascending: Bool)],
+        limit: Int,
+        offset: Int
+    ) -> String? {
+        let quotedTable = mssqlQuoteIdentifier(table)
+        var query = "SELECT * FROM \(quotedTable)"
+        let escapedSearch = mssqlEscapeForLike(searchText)
+        let conditions = columns.map { column -> String in
+            let quotedColumn = mssqlQuoteIdentifier(column)
+            return "CAST(\(quotedColumn) AS NVARCHAR(MAX)) LIKE '%\(escapedSearch)%' ESCAPE '\\'"
+        }
+        if !conditions.isEmpty {
+            query += " WHERE (" + conditions.joined(separator: " OR ") + ")"
+        }
+        let orderBy = mssqlBuildOrderByClause(sortColumns: sortColumns, columns: columns)
+            ?? "ORDER BY (SELECT NULL)"
+        query += " \(orderBy) OFFSET \(offset) ROWS FETCH NEXT \(limit) ROWS ONLY"
+        return query
+    }
+
+    func buildCombinedQuery(
+        table: String,
+        filters: [(column: String, op: String, value: String)],
+        logicMode: String,
+        searchText: String,
+        searchColumns: [String],
+        sortColumns: [(columnIndex: Int, ascending: Bool)],
+        columns: [String],
+        limit: Int,
+        offset: Int
+    ) -> String? {
+        let quotedTable = mssqlQuoteIdentifier(table)
+        var query = "SELECT * FROM \(quotedTable)"
+        let filterConditions = mssqlBuildWhereClause(filters: filters, logicMode: logicMode)
+        let escapedSearch = mssqlEscapeForLike(searchText)
+        let searchConditions = searchColumns.map { column -> String in
+            let quotedColumn = mssqlQuoteIdentifier(column)
+            return "CAST(\(quotedColumn) AS NVARCHAR(MAX)) LIKE '%\(escapedSearch)%' ESCAPE '\\'"
+        }
+        let searchClause = searchConditions.isEmpty
+            ? "" : "(" + searchConditions.joined(separator: " OR ") + ")"
+        var whereParts: [String] = []
+        if !filterConditions.isEmpty {
+            whereParts.append("(\(filterConditions))")
+        }
+        if !searchClause.isEmpty {
+            whereParts.append(searchClause)
+        }
+        if !whereParts.isEmpty {
+            query += " WHERE " + whereParts.joined(separator: " AND ")
+        }
+        let orderBy = mssqlBuildOrderByClause(sortColumns: sortColumns, columns: columns)
+            ?? "ORDER BY (SELECT NULL)"
+        query += " \(orderBy) OFFSET \(offset) ROWS FETCH NEXT \(limit) ROWS ONLY"
+        return query
+    }
+
+    // MARK: - Query Building Helpers
+
+    private func mssqlQuoteIdentifier(_ identifier: String) -> String {
+        quoteIdentifier(identifier)
+    }
+
+    private func mssqlBuildOrderByClause(
+        sortColumns: [(columnIndex: Int, ascending: Bool)],
+        columns: [String]
+    ) -> String? {
+        let parts = sortColumns.compactMap { sortCol -> String? in
+            guard sortCol.columnIndex >= 0, sortCol.columnIndex < columns.count else { return nil }
+            let columnName = columns[sortCol.columnIndex]
+            let direction = sortCol.ascending ? "ASC" : "DESC"
+            let quotedColumn = mssqlQuoteIdentifier(columnName)
+            return "\(quotedColumn) \(direction)"
+        }
+        guard !parts.isEmpty else { return nil }
+        return "ORDER BY " + parts.joined(separator: ", ")
+    }
+
+    private func mssqlEscapeForLike(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_")
+            .replacingOccurrences(of: "'", with: "''")
+    }
+
+    private func mssqlEscapeValue(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespaces)
+        if trimmed.caseInsensitiveCompare("NULL") == .orderedSame { return "NULL" }
+        if trimmed.caseInsensitiveCompare("TRUE") == .orderedSame { return "1" }
+        if trimmed.caseInsensitiveCompare("FALSE") == .orderedSame { return "0" }
+        if Int(trimmed) != nil || Double(trimmed) != nil { return trimmed }
+        return "'\(trimmed.replacingOccurrences(of: "'", with: "''"))'"
+    }
+
+    private func mssqlBuildWhereClause(
+        filters: [(column: String, op: String, value: String)],
+        logicMode: String
+    ) -> String {
+        let conditions = filters.compactMap { filter -> String? in
+            mssqlBuildFilterCondition(column: filter.column, op: filter.op, value: filter.value)
+        }
+        guard !conditions.isEmpty else { return "" }
+        let separator = logicMode == "and" ? " AND " : " OR "
+        return conditions.joined(separator: separator)
+    }
+
+    private func mssqlBuildFilterCondition(column: String, op: String, value: String) -> String? {
+        let quoted = mssqlQuoteIdentifier(column)
+        switch op {
+        case "=": return "\(quoted) = \(mssqlEscapeValue(value))"
+        case "!=": return "\(quoted) != \(mssqlEscapeValue(value))"
+        case ">": return "\(quoted) > \(mssqlEscapeValue(value))"
+        case ">=": return "\(quoted) >= \(mssqlEscapeValue(value))"
+        case "<": return "\(quoted) < \(mssqlEscapeValue(value))"
+        case "<=": return "\(quoted) <= \(mssqlEscapeValue(value))"
+        case "IS NULL": return "\(quoted) IS NULL"
+        case "IS NOT NULL": return "\(quoted) IS NOT NULL"
+        case "IS EMPTY": return "(\(quoted) IS NULL OR \(quoted) = '')"
+        case "IS NOT EMPTY": return "(\(quoted) IS NOT NULL AND \(quoted) != '')"
+        case "CONTAINS":
+            let escaped = mssqlEscapeForLike(value)
+            return "\(quoted) LIKE '%\(escaped)%' ESCAPE '\\'"
+        case "NOT CONTAINS":
+            let escaped = mssqlEscapeForLike(value)
+            return "\(quoted) NOT LIKE '%\(escaped)%' ESCAPE '\\'"
+        case "STARTS WITH":
+            let escaped = mssqlEscapeForLike(value)
+            return "\(quoted) LIKE '\(escaped)%' ESCAPE '\\'"
+        case "ENDS WITH":
+            let escaped = mssqlEscapeForLike(value)
+            return "\(quoted) LIKE '%\(escaped)' ESCAPE '\\'"
+        case "IN":
+            let values = value.split(separator: ",")
+                .map { mssqlEscapeValue($0.trimmingCharacters(in: .whitespaces)) }
+                .joined(separator: ", ")
+            return values.isEmpty ? nil : "\(quoted) IN (\(values))"
+        case "NOT IN":
+            let values = value.split(separator: ",")
+                .map { mssqlEscapeValue($0.trimmingCharacters(in: .whitespaces)) }
+                .joined(separator: ", ")
+            return values.isEmpty ? nil : "\(quoted) NOT IN (\(values))"
+        case "BETWEEN":
+            let parts = value.split(separator: ",", maxSplits: 1)
+            guard parts.count == 2 else { return nil }
+            let v1 = mssqlEscapeValue(parts[0].trimmingCharacters(in: .whitespaces))
+            let v2 = mssqlEscapeValue(parts[1].trimmingCharacters(in: .whitespaces))
+            return "\(quoted) BETWEEN \(v1) AND \(v2)"
+        case "REGEX":
+            let escaped = value.replacingOccurrences(of: "'", with: "''")
+            return "\(quoted) LIKE '%\(escaped)%'"
+        default: return nil
+        }
+    }
+
     // MARK: - Private Helpers
+
+    /// Convert `?` placeholders to `@p1, @p2, ...` and build sp_executesql components.
+    /// Returns: (convertedQuery, paramDeclarations, paramAssignments)
+    private static func buildSpExecuteSql(
+        query: String,
+        parameters: [String?]
+    ) -> (String, String, String) {
+        var converted = ""
+        var paramIndex = 0
+        var inSingleQuote = false
+        var inDoubleQuote = false
+        let chars = Array(query)
+        let length = chars.count
+
+        var i = 0
+        while i < length {
+            let char = chars[i]
+
+            // Handle doubled quotes (T-SQL escape: '' inside strings, "" inside identifiers)
+            if char == "'" && inSingleQuote && i + 1 < length && chars[i + 1] == "'" {
+                converted.append("''")
+                i += 2
+                continue
+            }
+            if char == "\"" && inDoubleQuote && i + 1 < length && chars[i + 1] == "\"" {
+                converted.append("\"\"")
+                i += 2
+                continue
+            }
+
+            if char == "'" && !inDoubleQuote {
+                inSingleQuote.toggle()
+            } else if char == "\"" && !inSingleQuote {
+                inDoubleQuote.toggle()
+            }
+
+            if char == "?" && !inSingleQuote && !inDoubleQuote && paramIndex < parameters.count {
+                paramIndex += 1
+                converted.append("@p\(paramIndex)")
+            } else {
+                converted.append(char)
+            }
+            i += 1
+        }
+
+        let count = paramIndex
+        guard count > 0 else {
+            return (converted, "", "")
+        }
+        let decls = (1...count).map { "@p\($0) NVARCHAR(MAX)" }.joined(separator: ", ")
+        let assigns = (1...count).map { i -> String in
+            if let value = parameters[i - 1] {
+                return "@p\(i) = N'\(escapeNString(value))'"
+            }
+            return "@p\(i) = NULL"
+        }.joined(separator: ", ")
+
+        return (converted, decls, assigns)
+    }
+
+    /// Escape single quotes for N'...' string literals in SQL Server.
+    private static func escapeNString(_ value: String) -> String {
+        value.replacingOccurrences(of: "'", with: "''")
+    }
 
     private func effectiveSchemaEscaped(_ schema: String?) -> String {
         let raw = schema ?? _currentSchema
@@ -780,16 +1517,18 @@ final class MSSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
 
 // MARK: - Errors
 
-enum MSSQLPluginError: LocalizedError {
+enum MSSQLPluginError: Error {
     case connectionFailed(String)
     case notConnected
     case queryFailed(String)
+}
 
-    var errorDescription: String? {
+extension MSSQLPluginError: PluginDriverError {
+    var pluginErrorMessage: String {
         switch self {
-        case .connectionFailed(let message): return "SQL Server Error: \(message)"
-        case .notConnected: return "SQL Server Error: Not connected to database"
-        case .queryFailed(let message): return "SQL Server Error: \(message)"
+        case .connectionFailed(let msg): return msg
+        case .notConnected: return String(localized: "Not connected to database")
+        case .queryFailed(let msg): return msg
         }
     }
 }

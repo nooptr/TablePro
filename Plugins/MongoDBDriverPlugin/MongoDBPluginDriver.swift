@@ -7,8 +7,6 @@ import Foundation
 import os
 import TableProPluginKit
 
-private let defaultMaxRows = 100_000
-
 final class MongoDBPluginDriver: PluginDatabaseDriver {
     private let config: DriverConnectionConfig
     private var mongoConnection: MongoDBConnection?
@@ -22,11 +20,18 @@ final class MongoDBPluginDriver: PluginDatabaseDriver {
     func beginTransaction() async throws {}
     func commitTransaction() async throws {}
     func rollbackTransaction() async throws {}
+    func quoteIdentifier(_ name: String) -> String { name }
+
+    func defaultExportQuery(table: String) -> String? {
+        "db.getCollection(\"\(table)\").find({})"
+    }
 
     init(config: DriverConnectionConfig) {
         self.config = config
         self.currentDb = config.database
     }
+
+    private static let systemDatabases: Set<String> = ["admin", "local", "config"]
 
     // MARK: - Connection Management
 
@@ -37,14 +42,26 @@ final class MongoDBPluginDriver: PluginDatabaseDriver {
             user: config.username,
             password: config.password,
             database: currentDb,
-            sslMode: config.additionalFields["sslMode"] ?? "disabled",
+            sslMode: config.additionalFields["sslMode"] ?? "Disabled",
             sslCACertPath: config.additionalFields["sslCACertPath"] ?? "",
             sslClientCertPath: config.additionalFields["sslClientCertPath"] ?? "",
+            authSource: config.additionalFields["mongoAuthSource"],
             readPreference: config.additionalFields["mongoReadPreference"],
             writeConcern: config.additionalFields["mongoWriteConcern"]
         )
 
         try await conn.connect()
+
+        if currentDb.isEmpty {
+            do {
+                let dbs = try await conn.listDatabases()
+                currentDb = dbs.first { !Self.systemDatabases.contains($0) } ?? dbs.first ?? ""
+            } catch {
+                conn.disconnect()
+                throw error
+            }
+        }
+
         mongoConnection = conn
     }
 
@@ -112,8 +129,8 @@ final class MongoDBPluginDriver: PluginDatabaseDriver {
         case .findOne:
             return 1
         case .aggregate(let collection, let pipeline):
-            let docs = try await conn.aggregate(database: db, collection: collection, pipeline: pipeline)
-            return docs.count
+            let result = try await conn.aggregate(database: db, collection: collection, pipeline: pipeline)
+            return result.docs.count
         case .countDocuments(let collection, let filter):
             let count = try await conn.countDocuments(database: db, collection: collection, filter: filter)
             return Int(count)
@@ -137,12 +154,12 @@ final class MongoDBPluginDriver: PluginDatabaseDriver {
         case .find(let collection, let filter, var options):
             options.skip = offset
             options.limit = limit
-            let docs = try await conn.find(
+            let result = try await conn.find(
                 database: db, collection: collection, filter: filter,
                 sort: options.sort, projection: options.projection,
                 skip: offset, limit: limit
             )
-            return buildPluginResult(from: docs, startTime: startTime)
+            return buildPluginResult(from: result.docs, startTime: startTime, isTruncated: result.isTruncated)
         default:
             return try await executeOperation(operation, connection: conn, startTime: startTime)
         }
@@ -167,7 +184,7 @@ final class MongoDBPluginDriver: PluginDatabaseDriver {
         let docs = try await conn.find(
             database: currentDb, collection: table,
             filter: "{}", sort: nil, projection: nil, skip: 0, limit: 500
-        )
+        ).docs
 
         if docs.isEmpty {
             return [
@@ -424,6 +441,160 @@ final class MongoDBPluginDriver: PluginDatabaseDriver {
         currentDb = database
     }
 
+    // MARK: - EXPLAIN
+
+    func buildExplainQuery(_ sql: String) -> String? {
+        guard let operation = try? MongoShellParser.parse(sql) else {
+            return "db.runCommand({\"explain\": \"\(escapeJsonString(sql))\", \"verbosity\": \"executionStats\"})"
+        }
+
+        switch operation {
+        case .find(let collection, let filter, let options):
+            var findDoc = "\"find\": \"\(escapeJsonString(collection))\", \"filter\": \(filter)"
+            if let sort = options.sort {
+                findDoc += ", \"sort\": \(sort)"
+            }
+            if let skip = options.skip {
+                findDoc += ", \"skip\": \(skip)"
+            }
+            if let limit = options.limit {
+                findDoc += ", \"limit\": \(limit)"
+            }
+            if let projection = options.projection {
+                findDoc += ", \"projection\": \(projection)"
+            }
+            return "db.runCommand({\"explain\": {\(findDoc)}, \"verbosity\": \"executionStats\"})"
+
+        case .findOne(let collection, let filter):
+            return "db.runCommand({\"explain\": {\"find\": \"\(escapeJsonString(collection))\", \"filter\": \(filter), \"limit\": 1}, \"verbosity\": \"executionStats\"})"
+
+        case .aggregate(let collection, let pipeline):
+            return "db.runCommand({\"explain\": {\"aggregate\": \"\(escapeJsonString(collection))\", \"pipeline\": \(pipeline), \"cursor\": {}}, \"verbosity\": \"executionStats\"})"
+
+        case .countDocuments(let collection, let filter):
+            return "db.runCommand({\"explain\": {\"count\": \"\(escapeJsonString(collection))\", \"query\": \(filter)}, \"verbosity\": \"executionStats\"})"
+
+        case .deleteOne(let collection, let filter):
+            return "db.runCommand({\"explain\": {\"delete\": \"\(escapeJsonString(collection))\", \"deletes\": [{\"q\": \(filter), \"limit\": 1}]}, \"verbosity\": \"executionStats\"})"
+
+        case .deleteMany(let collection, let filter):
+            return "db.runCommand({\"explain\": {\"delete\": \"\(escapeJsonString(collection))\", \"deletes\": [{\"q\": \(filter), \"limit\": 0}]}, \"verbosity\": \"executionStats\"})"
+
+        case .updateOne(let collection, let filter, let update):
+            return "db.runCommand({\"explain\": {\"update\": \"\(escapeJsonString(collection))\", \"updates\": [{\"q\": \(filter), \"u\": \(update), \"multi\": false}]}, \"verbosity\": \"executionStats\"})"
+
+        case .updateMany(let collection, let filter, let update):
+            return "db.runCommand({\"explain\": {\"update\": \"\(escapeJsonString(collection))\", \"updates\": [{\"q\": \(filter), \"u\": \(update), \"multi\": true}]}, \"verbosity\": \"executionStats\"})"
+
+        case .findOneAndUpdate(let collection, let filter, let update):
+            let cmd = "\"findAndModify\": \"\(escapeJsonString(collection))\", \"query\": \(filter), \"update\": \(update)"
+            return "db.runCommand({\"explain\": {\(cmd)}, \"verbosity\": \"executionStats\"})"
+
+        case .findOneAndReplace(let collection, let filter, let replacement):
+            let cmd = "\"findAndModify\": \"\(escapeJsonString(collection))\", \"query\": \(filter), \"update\": \(replacement)"
+            return "db.runCommand({\"explain\": {\(cmd)}, \"verbosity\": \"executionStats\"})"
+
+        case .findOneAndDelete(let collection, let filter):
+            let cmd = "\"findAndModify\": \"\(escapeJsonString(collection))\", \"query\": \(filter), \"remove\": true"
+            return "db.runCommand({\"explain\": {\(cmd)}, \"verbosity\": \"executionStats\"})"
+
+        default:
+            return "db.runCommand({\"explain\": \"\(escapeJsonString(sql))\", \"verbosity\": \"executionStats\"})"
+        }
+    }
+
+    // MARK: - View Templates
+
+    func createViewTemplate() -> String? {
+        "db.createView(\"view_name\", \"source_collection\", [\n  {\"$match\": {}},\n  {\"$project\": {\"_id\": 1}}\n])"
+    }
+
+    func editViewFallbackTemplate(viewName: String) -> String? {
+        let escaped = viewName.replacingOccurrences(of: "\"", with: "\\\"")
+        return "db.runCommand({\"collMod\": \"\(escaped)\", \"viewOn\": \"source_collection\", \"pipeline\": [{\"$match\": {}}]})"
+    }
+
+    // MARK: - Query Building
+
+    func buildBrowseQuery(
+        table: String,
+        sortColumns: [(columnIndex: Int, ascending: Bool)],
+        columns: [String],
+        limit: Int,
+        offset: Int
+    ) -> String? {
+        let builder = MongoDBQueryBuilder()
+        return builder.buildBaseQuery(
+            collection: table, sortColumns: sortColumns,
+            columns: columns, limit: limit, offset: offset
+        )
+    }
+
+    func buildFilteredQuery(
+        table: String,
+        filters: [(column: String, op: String, value: String)],
+        logicMode: String,
+        sortColumns: [(columnIndex: Int, ascending: Bool)],
+        columns: [String],
+        limit: Int,
+        offset: Int
+    ) -> String? {
+        let builder = MongoDBQueryBuilder()
+        return builder.buildFilteredQuery(
+            collection: table, filters: filters, logicMode: logicMode,
+            sortColumns: sortColumns, columns: columns, limit: limit, offset: offset
+        )
+    }
+
+    func buildQuickSearchQuery(
+        table: String,
+        searchText: String,
+        columns: [String],
+        sortColumns: [(columnIndex: Int, ascending: Bool)],
+        limit: Int,
+        offset: Int
+    ) -> String? {
+        let builder = MongoDBQueryBuilder()
+        return builder.buildQuickSearchQuery(
+            collection: table, searchText: searchText, columns: columns,
+            sortColumns: sortColumns, limit: limit, offset: offset
+        )
+    }
+
+    func buildCombinedQuery(
+        table: String,
+        filters: [(column: String, op: String, value: String)],
+        logicMode: String,
+        searchText: String,
+        searchColumns: [String],
+        sortColumns: [(columnIndex: Int, ascending: Bool)],
+        columns: [String],
+        limit: Int,
+        offset: Int
+    ) -> String? {
+        let builder = MongoDBQueryBuilder()
+        return builder.buildCombinedQuery(
+            collection: table, filters: filters, logicMode: logicMode,
+            searchText: searchText, searchColumns: searchColumns,
+            sortColumns: sortColumns, columns: columns, limit: limit, offset: offset
+        )
+    }
+
+    func generateStatements(
+        table: String,
+        columns: [String],
+        changes: [PluginRowChange],
+        insertedRowData: [Int: [String?]],
+        deletedRowIndices: Set<Int>,
+        insertedRowIndices: Set<Int>
+    ) -> [(statement: String, parameters: [String?])]? {
+        let generator = MongoDBStatementGenerator(collectionName: table, columns: columns)
+        return generator.generateStatements(
+            from: changes, insertedRowData: insertedRowData,
+            deletedRowIndices: deletedRowIndices, insertedRowIndices: insertedRowIndices
+        )
+    }
+
     // MARK: - Operation Dispatch
 
     private func executeOperation(
@@ -435,29 +606,29 @@ final class MongoDBPluginDriver: PluginDatabaseDriver {
 
         switch operation {
         case .find(let collection, let filter, let options):
-            let docs = try await conn.find(
+            let result = try await conn.find(
                 database: db, collection: collection, filter: filter,
                 sort: options.sort, projection: options.projection,
-                skip: options.skip ?? 0, limit: options.limit ?? defaultMaxRows
+                skip: options.skip ?? 0, limit: options.limit ?? PluginRowLimits.defaultMax
             )
-            if docs.isEmpty {
+            if result.docs.isEmpty {
                 return PluginQueryResult(
                     columns: ["_id"], columnTypeNames: ["ObjectId"],
                     rows: [], rowsAffected: 0, executionTime: Date().timeIntervalSince(startTime)
                 )
             }
-            return buildPluginResult(from: docs, startTime: startTime)
+            return buildPluginResult(from: result.docs, startTime: startTime, isTruncated: result.isTruncated)
 
         case .findOne(let collection, let filter):
-            let docs = try await conn.find(
+            let result = try await conn.find(
                 database: db, collection: collection, filter: filter,
                 sort: nil, projection: nil, skip: 0, limit: 1
             )
-            return buildPluginResult(from: docs, startTime: startTime)
+            return buildPluginResult(from: result.docs, startTime: startTime)
 
         case .aggregate(let collection, let pipeline):
-            let docs = try await conn.aggregate(database: db, collection: collection, pipeline: pipeline)
-            return buildPluginResult(from: docs, startTime: startTime)
+            let result = try await conn.aggregate(database: db, collection: collection, pipeline: pipeline)
+            return buildPluginResult(from: result.docs, startTime: startTime, isTruncated: result.isTruncated)
 
         case .countDocuments(let collection, let filter):
             let count = try await conn.countDocuments(database: db, collection: collection, filter: filter)
@@ -617,7 +788,11 @@ final class MongoDBPluginDriver: PluginDatabaseDriver {
 
     // MARK: - Result Building
 
-    private func buildPluginResult(from documents: [[String: Any]], startTime: Date) -> PluginQueryResult {
+    private func buildPluginResult(
+        from documents: [[String: Any]],
+        startTime: Date,
+        isTruncated: Bool = false
+    ) -> PluginQueryResult {
         if documents.isEmpty {
             return PluginQueryResult(
                 columns: [], columnTypeNames: [],
@@ -634,7 +809,8 @@ final class MongoDBPluginDriver: PluginDatabaseDriver {
         return PluginQueryResult(
             columns: columns, columnTypeNames: typeNames,
             rows: rows, rowsAffected: 0,
-            executionTime: Date().timeIntervalSince(startTime)
+            executionTime: Date().timeIntervalSince(startTime),
+            isTruncated: isTruncated
         )
     }
 
@@ -689,14 +865,16 @@ final class MongoDBPluginDriver: PluginDatabaseDriver {
 
 // MARK: - Error
 
-enum MongoDBPluginError: Error, LocalizedError {
+enum MongoDBPluginError: Error {
     case notConnected
     case unsupportedOperation
+}
 
-    var errorDescription: String? {
+extension MongoDBPluginError: PluginDriverError {
+    var pluginErrorMessage: String {
         switch self {
-        case .notConnected: return "Not connected to MongoDB"
-        case .unsupportedOperation: return "Operation not supported for MongoDB"
+        case .notConnected: return String(localized: "Not connected to MongoDB")
+        case .unsupportedOperation: return String(localized: "Operation not supported for MongoDB")
         }
     }
 }

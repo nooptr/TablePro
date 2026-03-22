@@ -1,15 +1,15 @@
 ---
 title: Quản lý Kết nối
-description: Tạo, tổ chức và quản lý kết nối đến 10 hệ quản trị cơ sở dữ liệu từ một giao diện duy nhất
+description: Tạo, tổ chức và quản lý kết nối đến 18+ hệ quản trị cơ sở dữ liệu từ một giao diện duy nhất
 ---
 
 # Quản lý Kết nối
 
-TablePro kết nối được đến 10 hệ quản trị cơ sở dữ liệu từ cùng một giao diện. Tạo kết nối, sắp xếp bằng màu sắc, tag và nhóm, rồi chuyển đổi giữa chúng mà không cần rời khỏi cửa sổ làm việc.
+TablePro kết nối được đến 18+ hệ quản trị cơ sở dữ liệu từ cùng một giao diện. Tạo kết nối, sắp xếp bằng màu sắc, tag và nhóm, rồi chuyển đổi giữa chúng mà không cần rời khỏi cửa sổ làm việc.
 
 ## Cơ sở dữ liệu được hỗ trợ
 
-TablePro hỗ trợ 10 hệ thống cơ sở dữ liệu:
+TablePro hỗ trợ 18+ hệ thống cơ sở dữ liệu:
 
 <CardGroup cols={2}>
   <Card title="MySQL" icon="database">
@@ -41,6 +41,21 @@ TablePro hỗ trợ 10 hệ thống cơ sở dữ liệu:
   </Card>
   <Card title="ClickHouse" icon="database">
     Cơ sở dữ liệu OLAP ClickHouse qua HTTP API. Cổng mặc định: 8123
+  </Card>
+  <Card title="Cassandra / ScyllaDB" icon="database">
+    Cassandra 3.11+ và ScyllaDB 4.0+ qua giao thức CQL native. Cổng mặc định: 9042
+  </Card>
+  <Card title="DuckDB" icon="database">
+    Cơ sở dữ liệu OLAP DuckDB nhúng. Dạng file, không cần server
+  </Card>
+  <Card title="DynamoDB" icon="database">
+    Amazon DynamoDB qua AWS SDK. Cơ sở dữ liệu NoSQL key-value và document
+  </Card>
+  <Card title="Etcd" icon="database">
+    Kho key-value phân tán Etcd qua gRPC API. Cổng mặc định: 2379
+  </Card>
+  <Card title="Cloudflare D1" icon="database">
+    Cơ sở dữ liệu SQLite serverless Cloudflare D1 qua Cloudflare API
   </Card>
 </CardGroup>
 
@@ -105,7 +120,7 @@ open "mysql://root:secret@localhost:3306/myapp"
 open "redis://:password@localhost:6379"
 ```
 
-TablePro đăng ký `postgresql`, `postgres`, `mysql`, `mariadb`, `sqlite`, `mongodb`, `mongodb+srv`, `redis`, `rediss`, `redshift`, `mssql`, `sqlserver`, `oracle` và `clickhouse` là các URL scheme trên macOS, nên hệ điều hành sẽ chuyển hướng các URL này trực tiếp đến ứng dụng.
+TablePro đăng ký `postgresql`, `postgres`, `mysql`, `mariadb`, `sqlite`, `mongodb`, `mongodb+srv`, `redis`, `rediss`, `redshift`, `mssql`, `sqlserver`, `oracle`, `clickhouse`, `duckdb`, `cassandra` và `scylladb` là các URL scheme trên macOS, nên hệ điều hành sẽ chuyển hướng các URL này trực tiếp đến ứng dụng.
 
 **Khi mở URL:**
 
@@ -128,7 +143,7 @@ Khác với **Import from URL** (điền form để bạn xem xét và lưu), m�
 | Trường | Mô tả |
 |-------|-------------|
 | **Name** | Tên thân thiện để xác định kết nối này |
-| **Type** | Loại cơ sở dữ liệu: MySQL, MariaDB, PostgreSQL, SQLite, MongoDB, Redis, Redshift, SQL Server hoặc Oracle |
+| **Type** | Loại cơ sở dữ liệu: MySQL, MariaDB, PostgreSQL, SQLite, MongoDB, Redis, Redshift, SQL Server, Oracle, ClickHouse, DuckDB, Cassandra hoặc ScyllaDB |
 
 #### Phần Appearance
 
@@ -569,6 +584,8 @@ TablePro tự động điền cổng khi chọn loại database:
 | Microsoft SQL Server | 1433 |
 | Oracle Database | 1521 |
 | ClickHouse | 8123 |
+| Cassandra | 9042 |
+| ScyllaDB | 9042 |
 
 ## Hướng dẫn Liên quan
 
@@ -599,6 +616,9 @@ TablePro tự động điền cổng khi chọn loại database:
   </Card>
   <Card title="ClickHouse" icon="database" href="/vi/databases/clickhouse">
     Kết nối cơ sở dữ liệu OLAP ClickHouse
+  </Card>
+  <Card title="Cassandra / ScyllaDB" icon="database" href="/vi/databases/cassandra">
+    Kết nối Cassandra và ScyllaDB qua CQL
   </Card>
   <Card title="SSH Tunneling" icon="lock" href="/vi/databases/ssh-tunneling">
     Kết nối an toàn qua SSH

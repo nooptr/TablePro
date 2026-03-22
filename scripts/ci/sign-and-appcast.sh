@@ -38,23 +38,21 @@ INFO_PLIST=$(find "$TEMP_DIR" -maxdepth 3 -path "*/Contents/Info.plist" | head -
 if [ -n "$INFO_PLIST" ] && [ -f "$INFO_PLIST" ]; then
   BUILD_NUMBER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$INFO_PLIST" 2>/dev/null || echo "1")
   SHORT_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$INFO_PLIST" 2>/dev/null || echo "$VERSION")
-  MIN_OS=$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$INFO_PLIST" 2>/dev/null || echo "13.5")
+  MIN_OS=$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$INFO_PLIST" 2>/dev/null || echo "14.0")
 else
   echo "⚠️  Could not find app Info.plist in ZIP, using defaults from tag"
   BUILD_NUMBER="1"
   SHORT_VERSION="$VERSION"
-  MIN_OS="13.5"
+  MIN_OS="14.0"
 fi
 rm -rf "$TEMP_DIR"
 
-# Extract release notes from CHANGELOG.md and convert to HTML for appcast
-NOTES=$(awk -v ver="$VERSION" '
-  /^## \[/ {
-    if (found) exit
-    if ($0 ~ "\\[" ver "\\]") { found=1; next }
-  }
-  found { print }
-' CHANGELOG.md)
+# Extract release notes for appcast
+if [ -f release_notes.md ]; then
+    NOTES=$(cat release_notes.md)
+else
+    NOTES=$(awk "/^## \\[${VERSION}\\]/{flag=1; next} /^## \\[/{flag=0} flag" CHANGELOG.md)
+fi
 
 if [ -z "$NOTES" ]; then
   RELEASE_HTML="<li>Bug fixes and improvements</li>"
@@ -84,7 +82,7 @@ fi
 DESCRIPTION_HTML="<body style=\"font-family: -apple-system, sans-serif; font-size: 13px; padding: 8px;\">${RELEASE_HTML}</body>"
 
 # Build appcast.xml with architecture-specific items (Sparkle 2 convention)
-DOWNLOAD_PREFIX="https://github.com/datlechin/TablePro/releases/download/v${VERSION}"
+DOWNLOAD_PREFIX="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-datlechin/TablePro}/releases/download/v${VERSION}"
 PUB_DATE=$(date -u '+%a, %d %b %Y %H:%M:%S +0000')
 
 mkdir -p appcast
@@ -99,8 +97,9 @@ cat > appcast/appcast.xml << APPCAST_EOF
             <sparkle:version>${BUILD_NUMBER}</sparkle:version>
             <sparkle:shortVersionString>${SHORT_VERSION}</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>${MIN_OS}</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <description><![CDATA[${DESCRIPTION_HTML}]]></description>
-            <enclosure url="${DOWNLOAD_PREFIX}/TablePro-${VERSION}-arm64.zip" length="${ARM64_LENGTH}" type="application/octet-stream" sparkle:edSignature="${ARM64_ED_SIG}" sparkle:architectures="arm64"/>
+            <enclosure url="${DOWNLOAD_PREFIX}/TablePro-${VERSION}-arm64.zip" length="${ARM64_LENGTH}" type="application/octet-stream" sparkle:edSignature="${ARM64_ED_SIG}"/>
         </item>
         <item>
             <title>${SHORT_VERSION}</title>
@@ -109,7 +108,7 @@ cat > appcast/appcast.xml << APPCAST_EOF
             <sparkle:shortVersionString>${SHORT_VERSION}</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>${MIN_OS}</sparkle:minimumSystemVersion>
             <description><![CDATA[${DESCRIPTION_HTML}]]></description>
-            <enclosure url="${DOWNLOAD_PREFIX}/TablePro-${VERSION}-x86_64.zip" length="${X86_64_LENGTH}" type="application/octet-stream" sparkle:edSignature="${X86_64_ED_SIG}" sparkle:architectures="x86_64"/>
+            <enclosure url="${DOWNLOAD_PREFIX}/TablePro-${VERSION}-x86_64.zip" length="${X86_64_LENGTH}" type="application/octet-stream" sparkle:edSignature="${X86_64_ED_SIG}"/>
         </item>
     </channel>
 </rss>

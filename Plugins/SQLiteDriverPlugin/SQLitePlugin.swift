@@ -16,8 +16,74 @@ final class SQLitePlugin: NSObject, TableProPlugin, DriverPlugin {
 
     static let databaseTypeId = "SQLite"
     static let databaseDisplayName = "SQLite"
-    static let iconName = "doc.fill"
+    static let iconName = "sqlite-icon"
     static let defaultPort = 0
+
+    // MARK: - UI/Capability Metadata
+
+    static let requiresAuthentication = false
+    static let supportsSSH = false
+    static let supportsSSL = false
+    static let isDownloadable = false
+    static let pathFieldRole: PathFieldRole = .filePath
+    static let connectionMode: ConnectionMode = .fileBased
+    static let urlSchemes: [String] = ["sqlite"]
+    static let fileExtensions: [String] = ["db", "sqlite", "sqlite3"]
+    static let brandColorHex = "#003B57"
+    static let supportsDatabaseSwitching = false
+    static let databaseGroupingStrategy: GroupingStrategy = .flat
+    static let columnTypesByCategory: [String: [String]] = [
+        "Integer": ["INTEGER", "INT", "TINYINT", "SMALLINT", "MEDIUMINT", "BIGINT"],
+        "Float": ["REAL", "DOUBLE", "FLOAT", "NUMERIC", "DECIMAL"],
+        "String": ["TEXT", "VARCHAR", "CHARACTER", "CHAR", "CLOB", "NVARCHAR", "NCHAR"],
+        "Date": ["DATE", "TIME", "DATETIME", "TIMESTAMP"],
+        "Binary": ["BLOB"],
+        "Boolean": ["BOOLEAN"]
+    ]
+
+    static let sqlDialect: SQLDialectDescriptor? = SQLDialectDescriptor(
+        identifierQuote: "`",
+        keywords: [
+            "SELECT", "FROM", "WHERE", "JOIN", "INNER", "LEFT", "RIGHT", "OUTER", "CROSS",
+            "ON", "AND", "OR", "NOT", "IN", "LIKE", "GLOB", "BETWEEN", "AS",
+            "ORDER", "BY", "GROUP", "HAVING", "LIMIT", "OFFSET",
+            "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE",
+            "CREATE", "ALTER", "DROP", "TABLE", "INDEX", "VIEW", "TRIGGER",
+            "PRIMARY", "KEY", "FOREIGN", "REFERENCES", "UNIQUE", "CONSTRAINT",
+            "ADD", "COLUMN", "RENAME",
+            "NULL", "IS", "ASC", "DESC", "DISTINCT", "ALL",
+            "CASE", "WHEN", "THEN", "ELSE", "END", "COALESCE", "IFNULL", "NULLIF",
+            "UNION", "INTERSECT", "EXCEPT",
+            "AUTOINCREMENT", "WITHOUT", "ROWID", "PRAGMA",
+            "REPLACE", "ABORT", "FAIL", "IGNORE", "ROLLBACK",
+            "TEMP", "TEMPORARY", "VACUUM", "EXPLAIN", "QUERY", "PLAN"
+        ],
+        functions: [
+            "COUNT", "SUM", "AVG", "MAX", "MIN", "GROUP_CONCAT", "TOTAL",
+            "LENGTH", "SUBSTR", "SUBSTRING", "LOWER", "UPPER", "TRIM", "LTRIM", "RTRIM",
+            "REPLACE", "INSTR", "PRINTF",
+            "DATE", "TIME", "DATETIME", "JULIANDAY", "STRFTIME",
+            "ABS", "ROUND", "RANDOM",
+            "CAST", "TYPEOF",
+            "COALESCE", "IFNULL", "NULLIF", "HEX", "QUOTE"
+        ],
+        dataTypes: [
+            "INTEGER", "REAL", "TEXT", "BLOB", "NUMERIC",
+            "INT", "TINYINT", "SMALLINT", "MEDIUMINT", "BIGINT",
+            "UNSIGNED", "BIG", "INT2", "INT8",
+            "CHARACTER", "VARCHAR", "VARYING", "NCHAR", "NATIVE",
+            "NVARCHAR", "CLOB",
+            "DOUBLE", "PRECISION", "FLOAT",
+            "DECIMAL", "BOOLEAN", "DATE", "DATETIME"
+        ],
+        tableOptions: [
+            "WITHOUT ROWID", "STRICT"
+        ],
+        regexSyntax: .unsupported,
+        booleanLiteralStyle: .numeric,
+        likeEscapeStyle: .explicit,
+        paginationStyle: .limit
+    )
 
     func createDriver(config: DriverConnectionConfig) -> any PluginDatabaseDriver {
         SQLitePluginDriver(config: config)
@@ -96,17 +162,28 @@ private actor SQLiteConnectionActor {
 
         var rows: [[String?]] = []
         var rowsAffected = 0
+        var truncated = false
 
         while sqlite3_step(statement) == SQLITE_ROW {
-            if rows.count >= 100_000 {
+            if rows.count >= PluginRowLimits.defaultMax {
+                truncated = true
                 break
             }
 
             var row: [String?] = []
 
             for i in 0..<columnCount {
-                if sqlite3_column_type(statement, i) == SQLITE_NULL {
+                let colType = sqlite3_column_type(statement, i)
+                if colType == SQLITE_NULL {
                     row.append(nil)
+                } else if colType == SQLITE_BLOB {
+                    let byteCount = Int(sqlite3_column_bytes(statement, i))
+                    if byteCount > 0, let blobPtr = sqlite3_column_blob(statement, i) {
+                        let data = Data(bytes: blobPtr, count: byteCount)
+                        row.append(String(data: data, encoding: .isoLatin1) ?? "")
+                    } else {
+                        row.append("")
+                    }
                 } else if let text = sqlite3_column_text(statement, i) {
                     row.append(String(cString: text))
                 } else {
@@ -128,7 +205,8 @@ private actor SQLiteConnectionActor {
             columnTypeNames: columnTypeNames,
             rows: rows,
             rowsAffected: rowsAffected,
-            executionTime: executionTime
+            executionTime: executionTime,
+            isTruncated: truncated
         )
     }
 
@@ -155,7 +233,12 @@ private actor SQLiteConnectionActor {
             let bindIndex = Int32(index + 1)
 
             if let stringValue = param {
-                let bindResult = sqlite3_bind_text(statement, bindIndex, stringValue, -1, nil)
+                // SQLITE_TRANSIENT ensures SQLite copies the string immediately,
+                // preventing use-after-free from Swift's temporary C string bridge
+                let bindResult = sqlite3_bind_text(
+                    statement, bindIndex, stringValue, -1,
+                    unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+                )
                 if bindResult != SQLITE_OK {
                     let errorMessage = String(cString: sqlite3_errmsg(db))
                     throw SQLitePluginError.queryFailed(
@@ -193,17 +276,28 @@ private actor SQLiteConnectionActor {
 
         var rows: [[String?]] = []
         var rowsAffected = 0
+        var truncated = false
 
         while sqlite3_step(statement) == SQLITE_ROW {
-            if rows.count >= 100_000 {
+            if rows.count >= PluginRowLimits.defaultMax {
+                truncated = true
                 break
             }
 
             var row: [String?] = []
 
             for i in 0..<columnCount {
-                if sqlite3_column_type(statement, i) == SQLITE_NULL {
+                let colType = sqlite3_column_type(statement, i)
+                if colType == SQLITE_NULL {
                     row.append(nil)
+                } else if colType == SQLITE_BLOB {
+                    let byteCount = Int(sqlite3_column_bytes(statement, i))
+                    if byteCount > 0, let blobPtr = sqlite3_column_blob(statement, i) {
+                        let data = Data(bytes: blobPtr, count: byteCount)
+                        row.append(String(data: data, encoding: .isoLatin1) ?? "")
+                    } else {
+                        row.append("")
+                    }
                 } else if let text = sqlite3_column_text(statement, i) {
                     row.append(String(cString: text))
                 } else {
@@ -225,7 +319,8 @@ private actor SQLiteConnectionActor {
             columnTypeNames: columnTypeNames,
             rows: rows,
             rowsAffected: rowsAffected,
-            executionTime: executionTime
+            executionTime: executionTime,
+            isTruncated: truncated
         )
     }
 }
@@ -236,6 +331,7 @@ private struct SQLiteRawResult: Sendable {
     let rows: [[String?]]
     let rowsAffected: Int
     let executionTime: TimeInterval
+    let isTruncated: Bool
 }
 
 // MARK: - SQLite Plugin Driver
@@ -254,6 +350,11 @@ final class SQLitePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     var serverVersion: String? { String(cString: sqlite3_libversion()) }
     var supportsSchemas: Bool { false }
     var supportsTransactions: Bool { true }
+
+    func quoteIdentifier(_ name: String) -> String {
+        let escaped = name.replacingOccurrences(of: "`", with: "``")
+        return "`\(escaped)`"
+    }
 
     init(config: DriverConnectionConfig) {
         self.config = config
@@ -300,7 +401,8 @@ final class SQLitePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             columnTypeNames: rawResult.columnTypeNames,
             rows: rawResult.rows,
             rowsAffected: rawResult.rowsAffected,
-            executionTime: rawResult.executionTime
+            executionTime: rawResult.executionTime,
+            isTruncated: rawResult.isTruncated
         )
     }
 
@@ -311,7 +413,8 @@ final class SQLitePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             columnTypeNames: rawResult.columnTypeNames,
             rows: rawResult.rows,
             rowsAffected: rawResult.rowsAffected,
-            executionTime: rawResult.executionTime
+            executionTime: rawResult.executionTime,
+            isTruncated: rawResult.isTruncated
         )
     }
 
@@ -321,6 +424,33 @@ final class SQLitePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         interruptLock.unlock()
         guard let db else { return }
         sqlite3_interrupt(db)
+    }
+
+    // MARK: - EXPLAIN
+
+    func buildExplainQuery(_ sql: String) -> String? {
+        "EXPLAIN QUERY PLAN \(sql)"
+    }
+
+    // MARK: - View Templates
+
+    func createViewTemplate() -> String? {
+        "CREATE VIEW IF NOT EXISTS view_name AS\nSELECT column1, column2\nFROM table_name\nWHERE condition;"
+    }
+
+    func editViewFallbackTemplate(viewName: String) -> String? {
+        let quoted = quoteIdentifier(viewName)
+        return "DROP VIEW IF EXISTS \(quoted);\nCREATE VIEW \(quoted) AS\nSELECT * FROM table_name;"
+    }
+
+    // MARK: - Foreign Key Checks
+
+    func foreignKeyDisableStatements() -> [String]? {
+        ["PRAGMA foreign_keys = OFF"]
+    }
+
+    func foreignKeyEnableStatements() -> [String]? {
+        ["PRAGMA foreign_keys = ON"]
     }
 
     // MARK: - Pagination
@@ -418,6 +548,47 @@ final class SQLitePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         }
 
         return allColumns
+    }
+
+    func fetchAllForeignKeys(schema: String?) async throws -> [String: [PluginForeignKeyInfo]] {
+        let query = """
+            SELECT m.name AS table_name, p.id, p."table" AS referenced_table,
+                   p."from" AS column_name, p."to" AS referenced_column,
+                   p.on_update, p.on_delete
+            FROM sqlite_master m, pragma_foreign_key_list(m.name) p
+            WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'
+            ORDER BY m.name, p.id, p.seq
+            """
+        let result = try await execute(query: query)
+
+        var allForeignKeys: [String: [PluginForeignKeyInfo]] = [:]
+
+        for row in result.rows {
+            guard row.count >= 7,
+                  let tableName = row[0],
+                  let id = row[1],
+                  let refTable = row[2],
+                  let fromCol = row[3],
+                  let toCol = row[4] else {
+                continue
+            }
+
+            let onUpdate = row[5] ?? "NO ACTION"
+            let onDelete = row[6] ?? "NO ACTION"
+
+            let fk = PluginForeignKeyInfo(
+                name: "fk_\(tableName)_\(id)",
+                column: fromCol,
+                referencedTable: refTable,
+                referencedColumn: toCol,
+                onDelete: onDelete,
+                onUpdate: onUpdate
+            )
+
+            allForeignKeys[tableName, default: []].append(fk)
+        }
+
+        return allForeignKeys
     }
 
     func fetchIndexes(table: String, schema: String?) async throws -> [PluginIndexInfo] {
@@ -556,6 +727,28 @@ final class SQLitePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         throw SQLitePluginError.unsupportedOperation
     }
 
+    // MARK: - All Tables Metadata
+
+    func allTablesMetadataSQL(schema: String?) -> String? {
+        """
+        SELECT
+            '' as schema,
+            name,
+            type as kind,
+            '' as charset,
+            '' as collation,
+            '' as estimated_rows,
+            '' as total_size,
+            '' as data_size,
+            '' as index_size,
+            '' as comment
+        FROM sqlite_master
+        WHERE type IN ('table', 'view')
+        AND name NOT LIKE 'sqlite_%'
+        ORDER BY name
+        """
+    }
+
     // MARK: - Private Helpers
 
     nonisolated private func setInterruptHandle(_ handle: OpaquePointer?) {
@@ -569,10 +762,6 @@ final class SQLitePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             return NSString(string: path).expandingTildeInPath
         }
         return path
-    }
-
-    private func escapeStringLiteral(_ value: String) -> String {
-        value.replacingOccurrences(of: "'", with: "''")
     }
 
     private func stripLimitOffset(from query: String) -> String {
@@ -646,18 +835,20 @@ final class SQLitePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
 
 // MARK: - Errors
 
-enum SQLitePluginError: LocalizedError {
+enum SQLitePluginError: Error {
     case connectionFailed(String)
     case notConnected
     case queryFailed(String)
     case unsupportedOperation
+}
 
-    var errorDescription: String? {
+extension SQLitePluginError: PluginDriverError {
+    var pluginErrorMessage: String {
         switch self {
-        case .connectionFailed(let message): return "Connection failed: \(message)"
-        case .notConnected: return "Not connected to database"
-        case .queryFailed(let message): return "Query failed: \(message)"
-        case .unsupportedOperation: return "Operation not supported"
+        case .connectionFailed(let msg): return msg
+        case .notConnected: return String(localized: "Not connected to database")
+        case .queryFailed(let msg): return msg
+        case .unsupportedOperation: return String(localized: "Operation not supported")
         }
     }
 }

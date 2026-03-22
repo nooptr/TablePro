@@ -7,7 +7,7 @@
 //  ghost text as a CATextLayer overlay on the text view.
 //
 
-import AppKit
+@preconcurrency import AppKit
 import CodeEditSourceEditor
 import CodeEditTextView
 import os
@@ -58,7 +58,6 @@ final class InlineSuggestionManager {
     func install(controller: TextViewController, schemaProvider: SQLSchemaProvider?) {
         self.controller = controller
         self.schemaProvider = schemaProvider
-        installScrollObserver()
     }
 
     func editorDidFocus() {
@@ -87,11 +86,7 @@ final class InlineSuggestionManager {
         removeGhostLayer()
 
         removeKeyEventMonitor()
-
-        if let observer = _scrollObserver.withLock({ $0 }) {
-            NotificationCenter.default.removeObserver(observer)
-            _scrollObserver.withLock { $0 = nil }
-        }
+        removeScrollObserver()
 
         schemaProvider = nil
         controller = nil
@@ -310,7 +305,7 @@ final class InlineSuggestionManager {
         layer.allowsFontSubpixelQuantization = true
 
         // Use the editor's font and grey color for ghost appearance
-        let font = SQLEditorTheme.font
+        let font = ThemeEngine.shared.editorFonts.font
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: NSColor.tertiaryLabelColor
@@ -337,6 +332,7 @@ final class InlineSuggestionManager {
 
         textView.layer?.addSublayer(layer)
         ghostLayer = layer
+        installScrollObserver()
     }
 
     private func removeGhostLayer() {
@@ -346,7 +342,6 @@ final class InlineSuggestionManager {
 
     // MARK: - Accept / Dismiss
 
-    /// Accept the current suggestion by inserting it at the cursor
     private func acceptSuggestion() {
         guard let suggestion = currentSuggestion,
               let textView = controller?.textView else { return }
@@ -354,6 +349,7 @@ final class InlineSuggestionManager {
         let offset = suggestionOffset
         removeGhostLayer()
         currentSuggestion = nil
+        removeScrollObserver()
 
         textView.replaceCharacters(
             in: NSRange(location: offset, length: 0),
@@ -361,50 +357,54 @@ final class InlineSuggestionManager {
         )
     }
 
-    /// Dismiss the current suggestion without inserting
     func dismissSuggestion() {
         debounceTimer?.invalidate()
         currentTask?.cancel()
         currentTask = nil
         removeGhostLayer()
         currentSuggestion = nil
+        removeScrollObserver()
     }
 
     // MARK: - Key Event Monitor
 
     private func installKeyEventMonitor() {
         removeKeyEventMonitor()
-        _keyEventMonitor.withLock { $0 = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, self.isEditorFocused else { return event }
+        _keyEventMonitor.withLock { $0 = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] nsEvent in
+            nonisolated(unsafe) let event = nsEvent
+            return MainActor.assumeIsolated {
+                guard let self, self.isEditorFocused else { return event }
 
-            guard AppSettingsManager.shared.ai.inlineSuggestEnabled else { return event }
+                guard AppSettingsManager.shared.ai.inlineSuggestEnabled else { return event }
 
-            guard self.currentSuggestion != nil else { return event }
+                guard self.currentSuggestion != nil else { return event }
 
-            guard let textView = self.controller?.textView,
-                  event.window === textView.window,
-                  textView.window?.firstResponder === textView else { return event }
+                guard let textView = self.controller?.textView,
+                      event.window === textView.window,
+                      textView.window?.firstResponder === textView else { return event }
 
-            switch event.keyCode {
-            case 48: // Tab — accept suggestion
-                Task { @MainActor [weak self] in
-                    self?.acceptSuggestion()
+                switch event.keyCode {
+                case 48: // Tab — accept suggestion
+                    Task { @MainActor [weak self] in
+                        self?.acceptSuggestion()
+                    }
+                    return nil
+
+                case 53: // Escape — dismiss suggestion
+                    Task { @MainActor [weak self] in
+                        self?.dismissSuggestion()
+                    }
+                    return nil
+
+                default:
+                    Task { @MainActor [weak self] in
+                        self?.dismissSuggestion()
+                    }
+                    return event
                 }
-                return nil
-
-            case 53: // Escape — dismiss suggestion
-                Task { @MainActor [weak self] in
-                    self?.dismissSuggestion()
-                }
-                return nil
-
-            default:
-                Task { @MainActor [weak self] in
-                    self?.dismissSuggestion()
-                }
-                return event
             }
-        } }
+        }
+        }
     }
 
     private func removeKeyEventMonitor() {
@@ -417,22 +417,32 @@ final class InlineSuggestionManager {
     // MARK: - Scroll Observer
 
     private func installScrollObserver() {
+        guard _scrollObserver.withLock({ $0 }) == nil else { return }
         guard let scrollView = controller?.scrollView else { return }
+        let contentView = scrollView.contentView
 
         _scrollObserver.withLock {
             $0 = NotificationCenter.default.addObserver(
                 forName: NSView.boundsDidChangeNotification,
-                object: scrollView.contentView,
+                object: contentView,
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     if let suggestion = self.currentSuggestion {
-                        // Reposition the ghost layer after scroll
                         self.showGhostText(suggestion, at: self.suggestionOffset)
                     }
                 }
             }
+        }
+    }
+
+    private func removeScrollObserver() {
+        _scrollObserver.withLock {
+            if let observer = $0 {
+                NotificationCenter.default.removeObserver(observer)
+            }
+            $0 = nil
         }
     }
 }

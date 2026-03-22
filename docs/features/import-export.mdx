@@ -214,6 +214,10 @@ Export data from query results or tables:
   <Tab title="XLSX">
     **Excel Spreadsheet**
 
+    <Note>
+    XLSX export requires a **Pro license**. CSV, JSON, and SQL export are available in the free version.
+    </Note>
+
     Best for:
     - Sharing data with non-technical users
     - Excel and spreadsheet applications
@@ -251,11 +255,15 @@ Export data from query results or tables:
 
 ### Exporting Query Results
 
-To export the results of a specific query:
+To export the results of a specific query to a file:
 
-1. Write and execute your query
-2. Click **Export** while results are displayed
-3. Only the displayed results are exported
+1. Write and execute your query in the SQL editor
+2. Right-click on the results grid and select **Export Results...**, or go to **File** > **Export Results...**
+3. Choose your export format (CSV, JSON, SQL, XLSX, or MQL)
+4. Configure format-specific options and filename
+5. Click **Export**
+
+The export dialog shows the row count and uses a simplified layout without the table selection tree, since only the in-memory query results are exported.
 
 <Tip>
 For large exports, use pagination or LIMIT in your query to control the output size.
@@ -371,6 +379,10 @@ TablePro imports **SQL files** (`.sql` and `.sql.gz`). Statements execute direct
 
 <Tip>
 Wrapping in a transaction ensures that if any statement fails, all changes roll back, leaving your database in a consistent state.
+</Tip>
+
+<Tip>
+Import options (wrap in transaction, disable foreign key checks) persist across app launches. Change them once and they stick.
 </Tip>
 
 ### SQL Preview

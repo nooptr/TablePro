@@ -12,6 +12,7 @@
 //
 
 import SwiftUI
+import TableProPluginKit
 
 /// Content for the principal (center) toolbar area
 /// Displays environment badge, connection status, and execution indicator in a unified card
@@ -34,8 +35,10 @@ struct ToolbarPrincipalContent: View {
                 connectionState: state.connectionState,
                 displayColor: state.displayColor,
                 tagName: state.tagId.flatMap { TagStorage.shared.tag(for: $0)?.name },
-                isReadOnly: state.isReadOnly
+                safeModeLevel: state.safeModeLevel
             )
+
+            SafeModeBadgeView(safeModeLevel: Bindable(state).safeModeLevel)
 
             ExecutionIndicatorView(
                 isExecuting: state.isExecuting,
@@ -59,21 +62,21 @@ struct TableProToolbar: ViewModifier {
             .toolbar {
                 // MARK: - Navigation (Left)
 
-                if state.databaseType != .redis {
-                    ToolbarItem(placement: .navigation) {
-                        Button {
-                            showConnectionSwitcher.toggle()
-                        } label: {
-                            Label("Connection", systemImage: "network")
-                        }
-                        .help("Switch Connection (⌘⌥C)")
-                        .popover(isPresented: $showConnectionSwitcher) {
-                            ConnectionSwitcherPopover {
-                                showConnectionSwitcher = false
-                            }
+                ToolbarItem(placement: .navigation) {
+                    Button {
+                        showConnectionSwitcher.toggle()
+                    } label: {
+                        Label("Connection", systemImage: "network")
+                    }
+                    .help("Switch Connection (⌘⌥C)")
+                    .popover(isPresented: $showConnectionSwitcher) {
+                        ConnectionSwitcherPopover {
+                            showConnectionSwitcher = false
                         }
                     }
+                }
 
+                if PluginManager.shared.supportsDatabaseSwitching(for: state.databaseType) {
                     ToolbarItem(placement: .navigation) {
                         Button {
                             actions?.openDatabaseSwitcher()
@@ -82,11 +85,12 @@ struct TableProToolbar: ViewModifier {
                         }
                         .help("Open Database (⌘K)")
                         .disabled(
-                            state.connectionState != .connected || state.databaseType == .sqlite)
+                            state.connectionState != .connected
+                                || PluginManager.shared.connectionMode(for: state.databaseType) == .fileBased)
                     }
                 }
 
-                ToolbarItem(placement: .navigation) {
+                ToolbarItemGroup(placement: .navigation) {
                     Button {
                         NotificationCenter.default.post(name: .refreshData, object: nil)
                     } label: {
@@ -94,6 +98,15 @@ struct TableProToolbar: ViewModifier {
                     }
                     .help("Refresh (⌘R)")
                     .disabled(state.connectionState != .connected)
+
+                    Button {
+                        actions?.saveChanges()
+                    } label: {
+                        Label("Save Changes", systemImage: "checkmark.circle.fill")
+                    }
+                    .help("Save Changes (⌘S)")
+                    .disabled(!state.hasPendingChanges || state.connectionState != .connected)
+                    .tint(.accentColor)
                 }
 
                 // MARK: - Principal (Center)
@@ -103,6 +116,16 @@ struct TableProToolbar: ViewModifier {
                 }
 
                 // MARK: - Primary Action (Right)
+
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        actions?.openQuickSwitcher()
+                    } label: {
+                        Label("Quick Switcher", systemImage: "magnifyingglass")
+                    }
+                    .help("Quick Switcher (⌘P)")
+                    .disabled(state.connectionState != .connected)
+                }
 
                 ToolbarItem(placement: .primaryAction) {
                     Button {
@@ -127,16 +150,14 @@ struct TableProToolbar: ViewModifier {
                     Button {
                         actions?.previewSQL()
                     } label: {
-                        Label(
-                            state.databaseType == .mongodb ? "Preview MQL"
-                                : state.databaseType == .redis ? "Preview Commands"
-                                : "Preview SQL",
-                            systemImage: "eye")
+                        let langName = PluginManager.shared.queryLanguageName(for: state.databaseType)
+                        Label("Preview \(langName)", systemImage: "eye")
                     }
-                    .help(state.databaseType == .mongodb ? "Preview MQL (⌘⇧P)"
-                        : state.databaseType == .redis ? "Preview Commands (⌘⇧P)"
-                        : "Preview SQL (⌘⇧P)")
+                    .help("Preview \(PluginManager.shared.queryLanguageName(for: state.databaseType)) (⌘⇧P)")
                     .disabled(!state.hasPendingChanges || state.connectionState != .connected)
+                    .popover(isPresented: $state.showSQLReviewPopover) {
+                        SQLReviewPopover(statements: state.previewStatements, databaseType: state.databaseType)
+                    }
                 }
 
                 ToolbarItem(placement: .primaryAction) {
@@ -166,19 +187,16 @@ struct TableProToolbar: ViewModifier {
                     .help("Export Data (⌘⇧E)")
                     .disabled(state.connectionState != .connected)
 
-                    if state.databaseType != .mongodb && state.databaseType != .redis {
+                    if PluginManager.shared.supportsImport(for: state.databaseType) {
                         Button {
                             actions?.importTables()
                         } label: {
                             Label("Import", systemImage: "square.and.arrow.down")
                         }
                         .help("Import Data (⌘⇧I)")
-                        .disabled(state.connectionState != .connected || state.isReadOnly)
+                        .disabled(state.connectionState != .connected || state.safeModeLevel.blocksAllWrites)
                     }
                 }
-            }
-            .popover(isPresented: $state.showSQLReviewPopover) {
-                SQLReviewPopover(statements: state.previewStatements, databaseType: state.databaseType)
             }
             .onReceive(NotificationCenter.default.publisher(for: .openConnectionSwitcher)) { _ in
                 showConnectionSwitcher = true

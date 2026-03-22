@@ -31,6 +31,8 @@ enum AppLanguage: String, Codable, CaseIterable, Identifiable {
     case system = "system"
     case english = "en"
     case vietnamese = "vi"
+    case chineseSimplified = "zh-Hans"
+    case turkish = "tr"
 
     var id: String { rawValue }
 
@@ -39,6 +41,8 @@ enum AppLanguage: String, Codable, CaseIterable, Identifiable {
         case .system: return String(localized: "System")
         case .english: return "English"
         case .vietnamese: return "Tiếng Việt"
+        case .chineseSimplified: return "简体中文"
+        case .turkish: return "Türkçe"
         }
     }
 
@@ -97,95 +101,62 @@ struct GeneralSettings: Codable, Equatable {
 
 // MARK: - Appearance Settings
 
-/// App theme options
-enum AppTheme: String, Codable, CaseIterable, Identifiable {
-    case system = "system"
-    case light = "light"
-    case dark = "dark"
-
-    var id: String { rawValue }
+/// Controls NSApp.appearance independent of the active theme.
+enum AppAppearanceMode: String, Codable, CaseIterable {
+    case light
+    case dark
+    case auto
 
     var displayName: String {
         switch self {
-        case .system: return String(localized: "System")
         case .light: return String(localized: "Light")
         case .dark: return String(localized: "Dark")
+        case .auto: return String(localized: "Auto")
         }
-    }
-
-    /// Apply this theme to the app
-    func apply() {
-        guard let app = NSApp else { return }
-        switch self {
-        case .system:
-            app.appearance = nil
-        case .light:
-            app.appearance = NSAppearance(named: .aqua)
-        case .dark:
-            app.appearance = NSAppearance(named: .darkAqua)
-        }
-    }
-}
-
-/// Accent color options
-enum AccentColorOption: String, Codable, CaseIterable, Identifiable {
-    case system = "system"
-    case blue = "blue"
-    case purple = "purple"
-    case pink = "pink"
-    case red = "red"
-    case orange = "orange"
-    case yellow = "yellow"
-    case green = "green"
-    case graphite = "graphite"
-
-    var id: String { rawValue }
-
-    var displayName: String {
-        switch self {
-        case .system: return String(localized: "System")
-        case .blue: return String(localized: "Blue")
-        case .purple: return String(localized: "Purple")
-        case .pink: return String(localized: "Pink")
-        case .red: return String(localized: "Red")
-        case .orange: return String(localized: "Orange")
-        case .yellow: return String(localized: "Yellow")
-        case .green: return String(localized: "Green")
-        case .graphite: return String(localized: "Graphite")
-        }
-    }
-
-    /// Color for display in settings picker (always returns a concrete color)
-    var color: Color {
-        switch self {
-        case .system: return .accentColor
-        case .blue: return .blue
-        case .purple: return .purple
-        case .pink: return .pink
-        case .red: return .red
-        case .orange: return .orange
-        case .yellow: return .yellow
-        case .green: return .green
-        case .graphite: return .gray
-        }
-    }
-
-    /// Tint color for applying to views (nil means use system default)
-    /// Derived from `color` property for DRY - only .system returns nil
-    var tintColor: Color? {
-        self == .system ? nil : color
     }
 }
 
 /// Appearance settings
 struct AppearanceSettings: Codable, Equatable {
-    var theme: AppTheme
-    var accentColor: AccentColorOption
+    var activeThemeId: String
+    var appearanceMode: AppAppearanceMode
 
     static let `default` = AppearanceSettings(
-        theme: .system,
-        accentColor: .system
+        activeThemeId: "tablepro.default-light",
+        appearanceMode: .auto
     )
+
+    init(activeThemeId: String = "tablepro.default-light", appearanceMode: AppAppearanceMode = .auto) {
+        self.activeThemeId = activeThemeId
+        self.appearanceMode = appearanceMode
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Migration: try new field first, then fall back to old theme field
+        if let themeId = try container.decodeIfPresent(String.self, forKey: .activeThemeId) {
+            activeThemeId = themeId
+        } else if let oldTheme = try? container.decodeIfPresent(String.self, forKey: .theme) {
+            // Migrate from old AppTheme enum
+            switch oldTheme {
+            case "dark": activeThemeId = "tablepro.default-dark"
+            default: activeThemeId = "tablepro.default-light"
+            }
+        } else {
+            activeThemeId = "tablepro.default-light"
+        }
+        appearanceMode = try container.decodeIfPresent(AppAppearanceMode.self, forKey: .appearanceMode) ?? .auto
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case activeThemeId, theme, appearanceMode
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(activeThemeId, forKey: .activeThemeId)
+        try container.encode(appearanceMode, forKey: .appearanceMode)
+    }
 }
 
 // MARK: - Editor Settings
@@ -241,8 +212,6 @@ enum EditorFont: String, Codable, CaseIterable, Identifiable {
 
 /// Editor settings
 struct EditorSettings: Codable, Equatable {
-    var fontFamily: EditorFont
-    var fontSize: Int // 11-18pt
     var showLineNumbers: Bool
     var highlightCurrentLine: Bool
     var tabWidth: Int // 2, 4, or 8 spaces
@@ -251,8 +220,6 @@ struct EditorSettings: Codable, Equatable {
     var vimModeEnabled: Bool
 
     static let `default` = EditorSettings(
-        fontFamily: .systemMono,
-        fontSize: 13,
         showLineNumbers: true,
         highlightCurrentLine: true,
         tabWidth: 4,
@@ -262,8 +229,6 @@ struct EditorSettings: Codable, Equatable {
     )
 
     init(
-        fontFamily: EditorFont = .systemMono,
-        fontSize: Int = 13,
         showLineNumbers: Bool = true,
         highlightCurrentLine: Bool = true,
         tabWidth: Int = 4,
@@ -271,8 +236,6 @@ struct EditorSettings: Codable, Equatable {
         wordWrap: Bool = false,
         vimModeEnabled: Bool = false
     ) {
-        self.fontFamily = fontFamily
-        self.fontSize = fontSize
         self.showLineNumbers = showLineNumbers
         self.highlightCurrentLine = highlightCurrentLine
         self.tabWidth = tabWidth
@@ -283,19 +246,13 @@ struct EditorSettings: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        fontFamily = try container.decode(EditorFont.self, forKey: .fontFamily)
-        fontSize = try container.decode(Int.self, forKey: .fontSize)
-        showLineNumbers = try container.decode(Bool.self, forKey: .showLineNumbers)
-        highlightCurrentLine = try container.decode(Bool.self, forKey: .highlightCurrentLine)
-        tabWidth = try container.decode(Int.self, forKey: .tabWidth)
-        autoIndent = try container.decode(Bool.self, forKey: .autoIndent)
-        wordWrap = try container.decode(Bool.self, forKey: .wordWrap)
+        // Old fontFamily/fontSize keys are ignored (moved to ThemeFonts)
+        showLineNumbers = try container.decodeIfPresent(Bool.self, forKey: .showLineNumbers) ?? true
+        highlightCurrentLine = try container.decodeIfPresent(Bool.self, forKey: .highlightCurrentLine) ?? true
+        tabWidth = try container.decodeIfPresent(Int.self, forKey: .tabWidth) ?? 4
+        autoIndent = try container.decodeIfPresent(Bool.self, forKey: .autoIndent) ?? true
+        wordWrap = try container.decodeIfPresent(Bool.self, forKey: .wordWrap) ?? false
         vimModeEnabled = try container.decodeIfPresent(Bool.self, forKey: .vimModeEnabled) ?? false
-    }
-
-    /// Clamped font size (11-18)
-    var clampedFontSize: Int {
-        min(max(fontSize, 11), 18)
     }
 
     /// Clamped tab width (1-16)
@@ -357,9 +314,18 @@ struct DataGridSettings: Codable, Equatable {
     var nullDisplay: String
     var defaultPageSize: Int
     var showAlternateRows: Bool
+    var showRowNumbers: Bool
     var autoShowInspector: Bool
 
-    static let `default` = DataGridSettings()
+    static let `default` = DataGridSettings(
+        rowHeight: .normal,
+        dateFormat: .iso8601,
+        nullDisplay: "NULL",
+        defaultPageSize: 1_000,
+        showAlternateRows: true,
+        showRowNumbers: true,
+        autoShowInspector: false
+    )
 
     init(
         rowHeight: DataGridRowHeight = .normal,
@@ -367,6 +333,7 @@ struct DataGridSettings: Codable, Equatable {
         nullDisplay: String = "NULL",
         defaultPageSize: Int = 1_000,
         showAlternateRows: Bool = true,
+        showRowNumbers: Bool = true,
         autoShowInspector: Bool = false
     ) {
         self.rowHeight = rowHeight
@@ -374,16 +341,19 @@ struct DataGridSettings: Codable, Equatable {
         self.nullDisplay = nullDisplay
         self.defaultPageSize = defaultPageSize
         self.showAlternateRows = showAlternateRows
+        self.showRowNumbers = showRowNumbers
         self.autoShowInspector = autoShowInspector
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        rowHeight = try container.decode(DataGridRowHeight.self, forKey: .rowHeight)
-        dateFormat = try container.decode(DateFormatOption.self, forKey: .dateFormat)
-        nullDisplay = try container.decode(String.self, forKey: .nullDisplay)
-        defaultPageSize = try container.decode(Int.self, forKey: .defaultPageSize)
-        showAlternateRows = try container.decode(Bool.self, forKey: .showAlternateRows)
+        // Old fontFamily/fontSize keys are ignored (moved to ThemeFonts)
+        rowHeight = try container.decodeIfPresent(DataGridRowHeight.self, forKey: .rowHeight) ?? .normal
+        dateFormat = try container.decodeIfPresent(DateFormatOption.self, forKey: .dateFormat) ?? .iso8601
+        nullDisplay = try container.decodeIfPresent(String.self, forKey: .nullDisplay) ?? "NULL"
+        defaultPageSize = try container.decodeIfPresent(Int.self, forKey: .defaultPageSize) ?? 1_000
+        showAlternateRows = try container.decodeIfPresent(Bool.self, forKey: .showAlternateRows) ?? true
+        showRowNumbers = try container.decodeIfPresent(Bool.self, forKey: .showRowNumbers) ?? true
         autoShowInspector = try container.decodeIfPresent(Bool.self, forKey: .autoShowInspector) ?? false
     }
 
@@ -480,5 +450,15 @@ struct HistorySettings: Codable, Equatable {
 
 /// Tab behavior settings
 struct TabSettings: Codable, Equatable {
+    var enablePreviewTabs: Bool = true
     static let `default` = TabSettings()
+
+    init(enablePreviewTabs: Bool = true) {
+        self.enablePreviewTabs = enablePreviewTabs
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enablePreviewTabs = try container.decodeIfPresent(Bool.self, forKey: .enablePreviewTabs) ?? true
+    }
 }

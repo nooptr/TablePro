@@ -13,6 +13,7 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     private let config: DriverConnectionConfig
     private var mariadbConnection: MariaDBPluginConnection?
     private var _serverVersion: String?
+    private var _activeDatabase: String
 
     /// Detected server type from version string after connecting
     private var isMariaDB = false
@@ -24,12 +25,32 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     var supportsSchemas: Bool { false }
     var supportsTransactions: Bool { true }
 
+    func quoteIdentifier(_ name: String) -> String {
+        let escaped = name.replacingOccurrences(of: "`", with: "``")
+        return "`\(escaped)`"
+    }
+
+    func escapeStringLiteral(_ value: String) -> String {
+        var result = value
+        result = result.replacingOccurrences(of: "\\", with: "\\\\")
+        result = result.replacingOccurrences(of: "'", with: "''")
+        result = result.replacingOccurrences(of: "\n", with: "\\n")
+        result = result.replacingOccurrences(of: "\r", with: "\\r")
+        result = result.replacingOccurrences(of: "\t", with: "\\t")
+        result = result.replacingOccurrences(of: "\0", with: "\\0")
+        result = result.replacingOccurrences(of: "\u{08}", with: "\\b")
+        result = result.replacingOccurrences(of: "\u{0C}", with: "\\f")
+        result = result.replacingOccurrences(of: "\u{1A}", with: "\\Z")
+        return result
+    }
+
     private static let tableNameRegex = try? NSRegularExpression(pattern: "(?i)\\bFROM\\s+[`\"']?([\\w]+)[`\"']?")
     private static let limitRegex = try? NSRegularExpression(pattern: "(?i)\\s+LIMIT\\s+\\d+(\\s*,\\s*\\d+)?")
     private static let offsetRegex = try? NSRegularExpression(pattern: "(?i)\\s+OFFSET\\s+\\d+")
 
     init(config: DriverConnectionConfig) {
         self.config = config
+        self._activeDatabase = config.database
     }
 
     // MARK: - Connection
@@ -42,7 +63,7 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             port: config.port,
             user: config.username,
             password: config.password,
-            database: config.database,
+            database: _activeDatabase,
             sslConfig: sslConfig
         )
 
@@ -92,7 +113,8 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             columnTypeNames: result.columnTypeNames,
             rows: result.rows,
             rowsAffected: Int(result.affectedRows),
-            executionTime: Date().timeIntervalSince(startTime)
+            executionTime: Date().timeIntervalSince(startTime),
+            isTruncated: result.isTruncated
         )
     }
 
@@ -120,7 +142,8 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                         columnTypeNames: Array(repeating: "TEXT", count: columns.count),
                         rows: [],
                         rowsAffected: Int(result.affectedRows),
-                        executionTime: Date().timeIntervalSince(startTime)
+                        executionTime: Date().timeIntervalSince(startTime),
+                        isTruncated: result.isTruncated
                     )
                 }
             }
@@ -130,7 +153,8 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 columnTypeNames: result.columnTypeNames,
                 rows: result.rows,
                 rowsAffected: Int(result.affectedRows),
-                executionTime: Date().timeIntervalSince(startTime)
+                executionTime: Date().timeIntervalSince(startTime),
+                isTruncated: result.isTruncated
             )
         } catch let error as MariaDBPluginError where !isRetry && isConnectionLostError(error) {
             try await reconnect()
@@ -201,7 +225,7 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     }
 
     func fetchAllColumns(schema: String?) async throws -> [String: [PluginColumnInfo]] {
-        let dbName = config.database
+        let dbName = _activeDatabase
         let escapedDb = dbName.replacingOccurrences(of: "'", with: "''")
         let query = """
             SELECT
@@ -288,7 +312,7 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     }
 
     func fetchForeignKeys(table: String, schema: String?) async throws -> [PluginForeignKeyInfo] {
-        let dbName = config.database
+        let dbName = _activeDatabase
         let escapedDb = dbName.replacingOccurrences(of: "'", with: "''")
         let escapedTable = table.replacingOccurrences(of: "'", with: "''")
 
@@ -329,7 +353,7 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     }
 
     func fetchAllForeignKeys(schema: String?) async throws -> [String: [PluginForeignKeyInfo]] {
-        let dbName = config.database
+        let dbName = _activeDatabase
         let escapedDb = dbName.replacingOccurrences(of: "'", with: "''")
 
         let query = """
@@ -372,7 +396,7 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     }
 
     func fetchApproximateRowCount(table: String, schema: String?) async throws -> Int? {
-        let dbName = config.database
+        let dbName = _activeDatabase
         let escapedDb = dbName.replacingOccurrences(of: "'", with: "''")
         let escapedTable = table.replacingOccurrences(of: "'", with: "''")
 
@@ -556,6 +580,7 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     func switchDatabase(to database: String) async throws {
         let escaped = database.replacingOccurrences(of: "`", with: "``")
         _ = try await execute(query: "USE `\(escaped)`")
+        _activeDatabase = database
     }
 
     // MARK: - Query Timeout
@@ -572,6 +597,60 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         } catch {
             Self.logger.warning("Failed to set query timeout: \(error.localizedDescription)")
         }
+    }
+
+    // MARK: - EXPLAIN
+
+    func buildExplainQuery(_ sql: String) -> String? {
+        "EXPLAIN \(sql)"
+    }
+
+    // MARK: - View Templates
+
+    func createViewTemplate() -> String? {
+        "CREATE VIEW view_name AS\nSELECT column1, column2\nFROM table_name\nWHERE condition;"
+    }
+
+    func editViewFallbackTemplate(viewName: String) -> String? {
+        let quoted = quoteIdentifier(viewName)
+        return "ALTER VIEW \(quoted) AS\nSELECT * FROM table_name;"
+    }
+
+    func castColumnToText(_ column: String) -> String {
+        "CAST(\(column) AS CHAR)"
+    }
+
+    // MARK: - Foreign Key Checks
+
+    func foreignKeyDisableStatements() -> [String]? {
+        ["SET FOREIGN_KEY_CHECKS=0"]
+    }
+
+    func foreignKeyEnableStatements() -> [String]? {
+        ["SET FOREIGN_KEY_CHECKS=1"]
+    }
+
+    // MARK: - All Tables Metadata
+
+    func allTablesMetadataSQL(schema: String?) -> String? {
+        """
+        SELECT
+            TABLE_SCHEMA as `schema`,
+            TABLE_NAME as name,
+            TABLE_TYPE as kind,
+            IFNULL(CCSA.CHARACTER_SET_NAME, '') as charset,
+            TABLE_COLLATION as collation,
+            TABLE_ROWS as estimated_rows,
+            CONCAT(ROUND((DATA_LENGTH + INDEX_LENGTH) / 1024 / 1024, 2), ' MB') as total_size,
+            CONCAT(ROUND(DATA_LENGTH / 1024 / 1024, 2), ' MB') as data_size,
+            CONCAT(ROUND(INDEX_LENGTH / 1024 / 1024, 2), ' MB') as index_size,
+            TABLE_COMMENT as comment
+        FROM information_schema.TABLES
+        LEFT JOIN information_schema.COLLATION_CHARACTER_SET_APPLICABILITY CCSA
+            ON TABLE_COLLATION = CCSA.COLLATION_NAME
+        WHERE TABLE_SCHEMA = DATABASE()
+        ORDER BY TABLE_NAME
+        """
     }
 
     // MARK: - Private Helpers

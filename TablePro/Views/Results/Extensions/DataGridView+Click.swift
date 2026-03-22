@@ -51,10 +51,10 @@ extension TableViewCoordinator {
         let columnIndex = column - 1
         guard !changeManager.isRowDeleted(row) else { return }
 
-        // MongoDB _id is immutable — block editing
-        if databaseType == .mongodb,
+        let immutable = databaseType.map { PluginManager.shared.immutableColumns(for: $0) } ?? []
+        if !immutable.isEmpty,
            columnIndex < rowProvider.columns.count,
-           rowProvider.columns[columnIndex] == "_id" {
+           immutable.contains(rowProvider.columns[columnIndex]) {
             return
         }
 
@@ -105,7 +105,7 @@ extension TableViewCoordinator {
         }
 
         // Multiline values use the overlay editor instead of inline field editor
-        if let value = rowProvider.row(at: row)?.value(at: columnIndex),
+        if let value = rowProvider.value(atRow: row, column: columnIndex),
            value.containsLineBreak {
             showOverlayEditor(tableView: sender, row: row, column: column, columnIndex: columnIndex, value: value)
             return
@@ -123,13 +123,12 @@ extension TableViewCoordinator {
         let columnIndex = button.fkColumnIndex
 
         guard row >= 0 && row < cachedRowCount,
-              columnIndex >= 0 && columnIndex < rowProvider.columns.count,
-              let rowData = rowProvider.row(at: row) else { return }
+              columnIndex >= 0 && columnIndex < rowProvider.columns.count else { return }
 
         let columnName = rowProvider.columns[columnIndex]
         guard let fkInfo = rowProvider.columnForeignKeys[columnName] else { return }
 
-        let value = rowData.value(at: columnIndex)
+        let value = rowProvider.value(atRow: row, column: columnIndex)
         guard let value = value, !value.isEmpty else { return }
 
         onNavigateFK?(value, fkInfo)

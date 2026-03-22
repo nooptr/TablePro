@@ -23,6 +23,7 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     var supportsSchemas: Bool { true }
     var supportsTransactions: Bool { true }
     var serverVersion: String? { libpqConnection?.serverVersion() }
+    var parameterStyle: ParameterStyle { .dollar }
 
     init(config: DriverConnectionConfig) {
         self.config = config
@@ -91,7 +92,8 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 columnTypeNames: result.columnTypeNames,
                 rows: result.rows,
                 rowsAffected: result.affectedRows,
-                executionTime: Date().timeIntervalSince(startTime)
+                executionTime: Date().timeIntervalSince(startTime),
+                isTruncated: result.isTruncated
             )
         } catch let error as NSError where !isRetry && isConnectionLostError(error) {
             try await reconnect()
@@ -111,7 +113,8 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             columnTypeNames: result.columnTypeNames,
             rows: result.rows,
             rowsAffected: result.affectedRows,
-            executionTime: Date().timeIntervalSince(startTime)
+            executionTime: Date().timeIntervalSince(startTime),
+            isTruncated: result.isTruncated
         )
     }
 
@@ -157,6 +160,27 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         _ = try await execute(query: "SET statement_timeout = '\(ms)'")
     }
 
+    // MARK: - EXPLAIN
+
+    func buildExplainQuery(_ sql: String) -> String? {
+        "EXPLAIN \(sql)"
+    }
+
+    // MARK: - View Templates
+
+    func createViewTemplate() -> String? {
+        "CREATE OR REPLACE VIEW view_name AS\nSELECT column1, column2\nFROM table_name\nWHERE condition;"
+    }
+
+    func editViewFallbackTemplate(viewName: String) -> String? {
+        let quoted = quoteIdentifier(viewName)
+        return "CREATE OR REPLACE VIEW \(quoted) AS\nSELECT * FROM table_name;"
+    }
+
+    func castColumnToText(_ column: String) -> String {
+        "CAST(\(column) AS TEXT)"
+    }
+
     // MARK: - Schema
 
     func fetchTables(schema: String?) async throws -> [PluginTableInfo] {
@@ -184,7 +208,8 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 c.column_default,
                 c.collation_name,
                 pgd.description,
-                c.udt_name
+                c.udt_name,
+                CASE WHEN pk.column_name IS NOT NULL THEN 'YES' ELSE 'NO' END AS is_pk
             FROM information_schema.columns c
             LEFT JOIN pg_catalog.pg_statio_all_tables st
                 ON st.schemaname = c.table_schema
@@ -192,6 +217,16 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             LEFT JOIN pg_catalog.pg_description pgd
                 ON pgd.objoid = st.relid
                 AND pgd.objsubid = c.ordinal_position
+            LEFT JOIN (
+                SELECT DISTINCT kcu.column_name
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                    ON tc.constraint_name = kcu.constraint_name
+                    AND tc.table_schema = kcu.table_schema
+                WHERE tc.constraint_type = 'PRIMARY KEY'
+                    AND tc.table_schema = '\(escapedSchema)'
+                    AND tc.table_name = '\(escapeLiteral(table))'
+            ) pk ON c.column_name = pk.column_name
             WHERE c.table_schema = '\(escapedSchema)' AND c.table_name = '\(escapeLiteral(table))'
             ORDER BY c.ordinal_position
             """
@@ -214,6 +249,7 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             let defaultValue = row[3]
             let collation = row.count > 4 ? row[4] : nil
             let comment = row.count > 5 ? row[5] : nil
+            let isPk = row.count > 7 && row[7] == "YES"
 
             let charset: String? = {
                 guard let coll = collation else { return nil }
@@ -227,7 +263,7 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 name: name,
                 dataType: dataType,
                 isNullable: isNullable,
-                isPrimaryKey: false,
+                isPrimaryKey: isPk,
                 defaultValue: defaultValue,
                 charset: charset,
                 collation: collation,
@@ -246,7 +282,8 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 c.column_default,
                 c.collation_name,
                 pgd.description,
-                c.udt_name
+                c.udt_name,
+                CASE WHEN pk.column_name IS NOT NULL THEN 'YES' ELSE 'NO' END AS is_pk
             FROM information_schema.columns c
             LEFT JOIN pg_catalog.pg_statio_all_tables st
                 ON st.schemaname = c.table_schema
@@ -254,6 +291,15 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             LEFT JOIN pg_catalog.pg_description pgd
                 ON pgd.objoid = st.relid
                 AND pgd.objsubid = c.ordinal_position
+            LEFT JOIN (
+                SELECT DISTINCT kcu.table_name, kcu.column_name
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                    ON tc.constraint_name = kcu.constraint_name
+                    AND tc.table_schema = kcu.table_schema
+                WHERE tc.constraint_type = 'PRIMARY KEY'
+                    AND tc.table_schema = '\(escapedSchema)'
+            ) pk ON c.table_name = pk.table_name AND c.column_name = pk.column_name
             WHERE c.table_schema = '\(escapedSchema)'
             ORDER BY c.table_name, c.ordinal_position
             """
@@ -278,6 +324,7 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             let defaultValue = row[4]
             let collation = row.count > 5 ? row[5] : nil
             let comment = row.count > 6 ? row[6] : nil
+            let isPk = row.count > 8 && row[8] == "YES"
 
             let charset: String? = {
                 guard let coll = collation else { return nil }
@@ -291,7 +338,7 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 name: name,
                 dataType: dataType,
                 isNullable: isNullable,
-                isPrimaryKey: false,
+                isPrimaryKey: isPk,
                 defaultValue: defaultValue,
                 charset: charset,
                 collation: collation,
@@ -700,6 +747,26 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             query += " LC_COLLATE '\(escapedCollation)'"
         }
         _ = try await execute(query: query)
+    }
+
+    // MARK: - All Tables Metadata
+
+    func allTablesMetadataSQL(schema: String?) -> String? {
+        let s = schema ?? currentSchema ?? "public"
+        return """
+        SELECT
+            schemaname as schema,
+            relname as name,
+            'TABLE' as kind,
+            n_live_tup as estimated_rows,
+            pg_size_pretty(pg_total_relation_size(schemaname||'.'||relname)) as total_size,
+            pg_size_pretty(pg_relation_size(schemaname||'.'||relname)) as data_size,
+            pg_size_pretty(pg_indexes_size(schemaname||'.'||relname)) as index_size,
+            obj_description((schemaname||'.'||relname)::regclass) as comment
+        FROM pg_stat_user_tables
+        WHERE schemaname = '\(s)'
+        ORDER BY relname
+        """
     }
 
     // MARK: - Helpers

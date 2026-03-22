@@ -3,10 +3,9 @@
 //  TablePro
 //
 //  ViewModel for SidebarView.
-//  Handles table loading, search filtering, batch operations, and notification handling.
+//  Handles table loading, search filtering, and batch operations.
 //
 
-import Combine
 import Observation
 import SwiftUI
 
@@ -14,7 +13,7 @@ import SwiftUI
 
 /// Abstraction over table fetching for testability
 protocol TableFetcher: Sendable {
-    func fetchTables() async throws -> [TableInfo]
+    func fetchTables(force: Bool) async throws -> [TableInfo]
 }
 
 /// Production implementation that uses DatabaseManager, with optional schema provider cache
@@ -27,17 +26,25 @@ struct LiveTableFetcher: TableFetcher {
         self.schemaProvider = schemaProvider
     }
 
-    func fetchTables() async throws -> [TableInfo] {
+    func fetchTables(force: Bool) async throws -> [TableInfo] {
         if let provider = schemaProvider {
-            let cached = await provider.getTables()
-            if !cached.isEmpty {
-                return cached
+            if force {
+                if let fresh = try await provider.fetchFreshTables() { return fresh }
+            } else {
+                let cached = await provider.getTables()
+                if !cached.isEmpty { return cached }
             }
         }
         guard let driver = await DatabaseManager.shared.driver(for: connectionId) else {
+            NSLog("[LiveTableFetcher] driver is nil for connectionId: %@", connectionId.uuidString)
             return []
         }
-        return try await driver.fetchTables()
+        let fetched = try await driver.fetchTables()
+        NSLog("[LiveTableFetcher] fetched %d tables", fetched.count)
+        if let provider = schemaProvider {
+            await provider.updateTables(fetched)
+        }
+        return fetched
     }
 }
 
@@ -81,8 +88,6 @@ final class SidebarViewModel {
 
     private let connectionId: UUID
     private let tableFetcher: TableFetcher
-    private var cancellables = Set<AnyCancellable>()
-    private var hasSetupNotifications = false
     private var loadTask: Task<Void, Never>?
 
     // MARK: - Convenience Accessors
@@ -138,64 +143,28 @@ final class SidebarViewModel {
     // MARK: - Lifecycle
 
     func onAppear() {
-        guard tables.isEmpty else { return }
+        guard tables.isEmpty else {
+            NSLog("[SidebarVM] onAppear: tables not empty (%d), skipping", tables.count)
+            return
+        }
         Task { @MainActor in
             if DatabaseManager.shared.driver(for: connectionId) != nil {
+                NSLog("[SidebarVM] onAppear: driver found, loading tables")
                 loadTables()
+            } else {
+                NSLog("[SidebarVM] onAppear: driver is nil for %@", connectionId.uuidString)
             }
         }
-    }
-
-    // MARK: - Notifications
-
-    func setupNotifications() {
-        guard !hasSetupNotifications else { return }
-        hasSetupNotifications = true
-
-        Publishers.Merge3(
-            NotificationCenter.default.publisher(for: .databaseDidConnect),
-            NotificationCenter.default.publisher(for: .refreshData),
-            NotificationCenter.default.publisher(for: .refreshAll)
-        )
-        .receive(on: DispatchQueue.main)
-        .sink { [weak self] _ in
-            Task { @MainActor in
-                self?.forceLoadTables()
-            }
-        }
-        .store(in: &cancellables)
-
-        NotificationCenter.default.publisher(for: .copyTableNames)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.copySelectedTableNames()
-            }
-            .store(in: &cancellables)
-
-        NotificationCenter.default.publisher(for: .truncateTables)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                guard let self, !self.selectedTables.isEmpty else { return }
-                self.batchToggleTruncate()
-            }
-            .store(in: &cancellables)
-
-        NotificationCenter.default.publisher(for: .clearSelection)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.selectedTables.removeAll()
-            }
-            .store(in: &cancellables)
     }
 
     // MARK: - Table Loading
 
-    func loadTables() {
+    func loadTables(force: Bool = false) {
         guard !isLoading else { return }
         isLoading = true
         errorMessage = nil
         loadTask = Task {
-            await loadTablesAsync()
+            await loadTablesAsync(force: force)
         }
     }
 
@@ -203,14 +172,14 @@ final class SidebarViewModel {
         loadTask?.cancel()
         loadTask = nil
         isLoading = false
-        loadTables()
+        loadTables(force: true)
     }
 
-    private func loadTablesAsync() async {
+    private func loadTablesAsync(force: Bool = false) async {
         let previousSelectedName: String? = tables.isEmpty ? nil : selectedTables.first?.name
 
         do {
-            let fetchedTables = try await tableFetcher.fetchTables()
+            let fetchedTables = try await tableFetcher.fetchTables(force: force)
             tables = fetchedTables
 
             // Clean up stale entries for tables that no longer exist

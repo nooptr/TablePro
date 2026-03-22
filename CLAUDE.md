@@ -7,9 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 TablePro is a native macOS database client (SwiftUI + AppKit) — a fast, lightweight alternative to TablePlus. macOS 14.0+, Swift 5.9, Universal Binary (arm64 + x86_64).
 
 - **Source**: `TablePro/` — `Core/` (business logic, services), `Views/` (UI), `Models/` (data structures), `ViewModels/`, `Extensions/`, `Theme/`
-- **Plugins**: `Plugins/` — 8 `.tableplugin` bundles (MySQL, PostgreSQL, SQLite, ClickHouse, MSSQL, MongoDB, Redis, Oracle) + `TableProPluginKit` shared framework
+- **Plugins**: `Plugins/` — `.tableplugin` bundles + `TableProPluginKit` shared framework. Built-in (bundled in app): MySQL, PostgreSQL, SQLite, CSV, JSON, SQL export. Separately distributed via plugin registry: ClickHouse, MSSQL, MongoDB, Redis, Oracle, DuckDB, XLSX, MQL, SQLImport
 - **C bridges**: Each plugin contains its own C bridge module (e.g., `Plugins/MySQLDriverPlugin/CMariaDB/`, `Plugins/PostgreSQLDriverPlugin/CLibPQ/`)
-- **Static libs**: `Libs/` — pre-built `libmariadb*.a`, `libpq*.a`, etc. (Git LFS tracked)
+- **Static libs**: `Libs/` — pre-built `libmariadb*.a`, `libpq*.a`, etc. Downloaded from GitHub Releases via `scripts/download-libs.sh` (not in git)
 - **SPM deps**: CodeEditSourceEditor (`main` branch, tree-sitter editor), Sparkle (2.8.1, auto-update), OracleNIO. Managed via Xcode, no `Package.swift`.
 
 ## Build & Development Commands
@@ -39,6 +39,25 @@ xcodebuild -project TablePro.xcodeproj -scheme TablePro test -skipPackagePluginV
 
 # DMG
 scripts/create-dmg.sh
+
+# Static libraries (first-time setup or after lib updates)
+scripts/download-libs.sh          # Download from GitHub Releases (skips if already present)
+scripts/download-libs.sh --force  # Re-download and overwrite
+```
+
+### Updating Static Libraries
+
+Static libs (`Libs/*.a`) are hosted on the `libs-v1` GitHub Release (not in git). When adding or updating a library:
+
+```bash
+# 1. Update the .a files in Libs/
+# 2. Regenerate checksums
+shasum -a 256 Libs/*.a > Libs/checksums.sha256
+# 3. Recreate and upload the archive
+tar czf /tmp/tablepro-libs-v1.tar.gz -C Libs .
+gh release upload libs-v1 /tmp/tablepro-libs-v1.tar.gz --clobber --repo datlechin/TablePro
+# 4. Commit the updated checksums
+git add Libs/checksums.sha256 && git commit -m "build: update static library checksums"
 ```
 
 ## Architecture
@@ -55,20 +74,29 @@ All database drivers are `.tableplugin` bundles loaded at runtime by `PluginMana
 
 Plugin bundles under `Plugins/`:
 
-| Plugin | Database Types | C Bridge |
-|--------|---------------|----------|
-| MySQLDriverPlugin | MySQL, MariaDB | CMariaDB |
-| PostgreSQLDriverPlugin | PostgreSQL, Redshift | CLibPQ |
-| SQLiteDriverPlugin | SQLite | (Foundation sqlite3) |
-| ClickHouseDriverPlugin | ClickHouse | (URLSession HTTP) |
-| MSSQLDriverPlugin | SQL Server | CFreeTDS |
-| MongoDBDriverPlugin | MongoDB | CLibMongoc |
-| RedisDriverPlugin | Redis | CRedis |
-| OracleDriverPlugin | Oracle | OracleNIO (SPM) |
+| Plugin                 | Database Types       | C Bridge             | Distribution |
+| ---------------------- | -------------------- | -------------------- | ------------ |
+| MySQLDriverPlugin      | MySQL, MariaDB       | CMariaDB             | Built-in     |
+| PostgreSQLDriverPlugin | PostgreSQL, Redshift | CLibPQ               | Built-in     |
+| SQLiteDriverPlugin     | SQLite               | (Foundation sqlite3) | Built-in     |
+| ClickHouseDriverPlugin | ClickHouse           | (URLSession HTTP)    | Registry     |
+| MSSQLDriverPlugin      | SQL Server           | CFreeTDS             | Registry     |
+| MongoDBDriverPlugin    | MongoDB              | CLibMongoc           | Registry     |
+| RedisDriverPlugin      | Redis                | CRedis               | Registry     |
+| DuckDBDriverPlugin     | DuckDB               | CDuckDB              | Registry     |
+| OracleDriverPlugin     | Oracle               | OracleNIO (SPM)      | Registry     |
 
 When adding a new driver: create a new plugin bundle under `Plugins/`, implement `DriverPlugin` + `PluginDatabaseDriver`, add target to pbxproj. See `docs/development/plugin-system/` for details.
 
 When adding a new method to the driver protocol: add to `PluginDatabaseDriver` (with default implementation), then update `PluginDriverAdapter` to bridge it to `DatabaseDriver`.
+
+### DatabaseType (String-Based Struct)
+
+`DatabaseType` is a string-based struct (not an enum). Key rules:
+- All `switch` statements on `DatabaseType` must include `default:` — the type is open
+- Use static constants (`.mysql`, `.postgresql`) for known types
+- Unknown types (from future plugins) are valid — they round-trip through Codable
+- Use `DatabaseType.allKnownTypes` (not `allCases`) for the canonical list of built-in types
 
 ### Editor Architecture (CodeEditSourceEditor)
 
@@ -93,13 +121,13 @@ When adding a new method to the driver protocol: add to `PluginDatabaseDriver` (
 
 `Core/Services/` is split into domain subdirectories:
 
-| Subdirectory | Contents |
-|-------------|----------|
-| `Export/` | ExportService, ImportService, XLSXWriter |
-| `Formatting/` | SQLFormatterService, DateFormattingService |
-| `Infrastructure/` | AppNotifications, DeeplinkHandler, WindowOpener, UpdaterBridge, etc. |
-| `Licensing/` | LicenseManager, LicenseAPIClient, LicenseSignatureVerifier |
-| `Query/` | SQLDialectProvider, TableQueryBuilder, RowParser, RowOperationsManager |
+| Subdirectory      | Contents                                                               |
+| ----------------- | ---------------------------------------------------------------------- |
+| `Export/`         | ExportService, ImportService, XLSXWriter                               |
+| `Formatting/`     | SQLFormatterService, DateFormattingService                             |
+| `Infrastructure/` | AppNotifications, DeeplinkHandler, WindowOpener, UpdaterBridge, etc.   |
+| `Licensing/`      | LicenseManager, LicenseAPIClient, LicenseSignatureVerifier             |
+| `Query/`          | SQLDialectProvider, TableQueryBuilder, RowParser, RowOperationsManager |
 
 `Models/` is split into: `AI/`, `Connection/`, `Database/`, `Export/`, `Query/`, `Settings/`, `UI/`, `Schema/`, `ClickHouse/`
 
@@ -109,13 +137,13 @@ When adding a new method to the driver protocol: add to `PluginDatabaseDriver` (
 
 ### Storage Patterns
 
-| What | How | Where |
-|------|-----|-------|
-| Connection passwords | Keychain | `ConnectionStorage` |
-| User preferences | UserDefaults | `AppSettingsStorage` / `AppSettingsManager` |
-| Query history | SQLite FTS5 | `QueryHistoryStorage` |
-| Tab state | JSON persistence | `TabPersistenceService` / `TabStateStorage` |
-| Filter presets | — | `FilterSettingsStorage` |
+| What                 | How              | Where                                       |
+| -------------------- | ---------------- | ------------------------------------------- |
+| Connection passwords | Keychain         | `ConnectionStorage`                         |
+| User preferences     | UserDefaults     | `AppSettingsStorage` / `AppSettingsManager` |
+| Query history        | SQLite FTS5      | `QueryHistoryStorage`                       |
+| Tab state            | JSON persistence | `TabPersistenceService` / `TabStateStorage` |
+| Filter presets       | —                | `FilterSettingsStorage`                     |
 
 ### Logging
 
@@ -148,12 +176,12 @@ private static let logger = Logger(subsystem: "com.TablePro", category: "Compone
 
 ### SwiftLint Limits
 
-| Metric | Warning | Error |
-|--------|---------|-------|
-| File length | 1200 | 1800 |
-| Type body | 1100 | 1500 |
-| Function body | 160 | 250 |
-| Cyclomatic complexity | 40 | 60 |
+| Metric                | Warning | Error |
+| --------------------- | ------- | ----- |
+| File length           | 1200    | 1800  |
+| Type body             | 1100    | 1500  |
+| Function body         | 160     | 250   |
+| Cyclomatic complexity | 40      | 60    |
 
 When approaching limits: extract into `TypeName+Category.swift` extension files in an `Extensions/` subfolder. Group by domain logic, not arbitrary line counts.
 
@@ -166,11 +194,11 @@ These are **non-negotiable** — never skip them:
 2. **Localization**: Use `String(localized:)` for new user-facing strings in computed properties, AppKit code, alerts, and error descriptions. SwiftUI view literals (`Text("literal")`, `Button("literal")`) auto-localize. Do NOT localize technical terms (font names, database types, SQL keywords, encoding names).
 
 3. **Documentation**: Update docs in `docs/` (Mintlify-based) when adding/changing features. Key mappings:
-   - New keyboard shortcuts → `docs/features/keyboard-shortcuts.mdx`
-   - UI/feature changes → relevant `docs/features/*.mdx` page
-   - Settings changes → `docs/customization/settings.mdx`
-   - Database driver changes → `docs/databases/*.mdx`
-   - Update both English (`docs/`) and Vietnamese (`docs/vi/`) pages
+    - New keyboard shortcuts → `docs/features/keyboard-shortcuts.mdx`
+    - UI/feature changes → relevant `docs/features/*.mdx` page
+    - Settings changes → `docs/customization/settings.mdx`
+    - Database driver changes → `docs/databases/*.mdx`
+    - Update both English (`docs/`) and Vietnamese (`docs/vi/`) pages
 
 4. **Test-first correctness**: When tests fail, fix the **source code** — never adjust tests to match incorrect output. Tests define expected behavior.
 
@@ -180,11 +208,15 @@ These are **non-negotiable** — never skip them:
 
 ## Agent Execution Strategy
 
-- **Always use subagents** for implementation work. Delegate coding tasks to Task subagents to preserve main context tokens.
-- **Always parallelize** independent tasks. Launch all subagents in a single message with multiple Task tool calls.
-- **Main context = orchestrator only.** Read files, launch subagents, summarize results, update tracking. Never do heavy implementation directly.
-- **Subagent prompts must be self-contained.** Include file paths, the specific problem, and clear instructions.
-- **Every implementation must run in a separate worktree.** Use `isolation: "worktree"` when spawning Task subagents for any code changes. This keeps the main branch clean and allows parallel work without conflicts.
+- **Plans must include edge cases.** When creating implementation plans, identify edge cases, thread safety concerns, and boundary conditions. Include them as explicit checklist items in the plan — don't defer discovery to code review.
+- **Implementation includes self-review.** Before committing, agents must check: thread safety (lock coverage, race conditions), all code paths (loops, early returns, between iterations), error handling, and flag/state reset logic. This eliminates the review→fix→review cycle.
+- **Tests are part of implementation, not a separate step.** When implementing a feature, write tests in the same commit or immediately after — don't wait for a separate `/write-tests` invocation. The implementation agent should include test writing in its scope.
+- **Always use team agents** for implementation work. Use the Agent tool (not subagents/tasks) to delegate coding to specialized agents (e.g., `feature-dev:feature-dev`, `feature-dev:code-architect`, `code-simplifier:code-simplifier`).
+- **Always parallelize** independent tasks. Launch multiple agents in a single message.
+- **Main context = orchestrator only.** Read files, launch agents, summarize results, update tracking. Never do heavy implementation directly.
+- **Agent prompts must be self-contained.** Include file paths, the specific problem, and clear instructions.
+- **Use worktree isolation** (`isolation: "worktree"`) for agents making code changes. This keeps the main branch clean and allows parallel work without conflicts.
+- **Implementation standards** (apply to ALL new features and refactors): Clean architecture, correct macOS/Apple platform approach, proper design patterns, no backward compatibility hacks, easy to maintain and extensible. Always include these requirements in agent prompts.
 
 ## Performance Pitfalls
 

@@ -414,7 +414,7 @@ Khi không chọn hàng, Cell Inspector hiển thị metadata bảng:
 | Collation | Collation sắp xếp |
 
 <Note>
-Kết nối chỉ đọc và kết quả query tuân thủ trạng thái chỉ đọc. Chỉnh sửa bị tắt trong Cell Inspector cho những trường hợp đó.
+Kết nối có Safe Mode đặt ở Read-Only và kết quả query phức tạp không cho phép chỉnh sửa. Chỉnh sửa bị tắt trong Cell Inspector cho những trường hợp đó. Xem [Safe Mode](/features/safe-mode) để biết chi tiết.
 </Note>
 
 ## Điều Hướng
@@ -464,7 +464,7 @@ Nhiều định dạng sao chép:
 |--------|----------|-------------|
 | Tab-separated | `Cmd+C` | Mặc định, tương thích bảng tính |
 | CSV | `Cmd+Shift+C` | Phân tách dấu phẩy |
-| JSON | `Cmd+Option+C` | Mảng JSON |
+| JSON | `Cmd+Option+J` | Mảng JSON |
 | TSV | Menu ngữ cảnh | Tab-separated có header |
 
 Tab-separated mặc định tương thích với:
@@ -623,6 +623,15 @@ Cấu hình trong **Settings** > **Data Grid** > **Show Alternate Rows**.
   />
 </Frame>
 
+## Số thứ tự hàng
+
+Cột số thứ tự (`#`) hiển thị số thứ tự cho mỗi hàng. Bạn có thể ẩn nó nếu muốn giao diện gọn hơn:
+
+- **Bật**: Số thứ tự hiển thị ở cột đầu tiên (mặc định)
+- **Tắt**: Ẩn cột số thứ tự
+
+Cấu hình tại **Cài đặt** > **Lưới dữ liệu** > **Hiển thị số thứ tự hàng**.
+
 ## MongoDB Collections
 
 Collection MongoDB có một số khác biệt so với SQL trong data grid.
@@ -697,7 +706,7 @@ Xem [Import & Export](/features/import-export) để biết chi tiết.
 |--------|----------|
 | Sao chép | `Cmd+C` |
 | Sao chép CSV | `Cmd+Shift+C` |
-| Sao chép JSON | `Cmd+Option+C` |
+| Sao chép JSON | `Cmd+Option+J` |
 | Chọn tất cả | `Cmd+A` |
 | Xóa hàng | `Delete` |
 | Chỉnh sửa ô | `Enter` |

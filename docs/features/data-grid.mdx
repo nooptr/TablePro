@@ -414,7 +414,7 @@ When no row is selected, the Cell Inspector shows table metadata:
 | Collation | Collation used for sorting |
 
 <Note>
-Read-only connections and query results respect the read-only state. Editing is disabled in the Cell Inspector for those contexts.
+Connections with Safe Mode set to Read-Only and complex query results are not editable. Editing is disabled in the Cell Inspector for those contexts. See [Safe Mode](/features/safe-mode) for details.
 </Note>
 
 ## Navigation
@@ -464,7 +464,7 @@ Multiple copy formats:
 |--------|----------|-------------|
 | Tab-separated | `Cmd+C` | Default copy, compatible with spreadsheets |
 | CSV | `Cmd+Shift+C` | Comma-separated values |
-| JSON | `Cmd+Option+C` | JSON array of objects |
+| JSON | `Cmd+Option+J` | JSON array of objects |
 | TSV | Available from context menu | Tab-separated with header |
 
 The default tab-separated format works with:
@@ -623,6 +623,15 @@ Configure in **Settings** > **Data Grid** > **Show Alternate Rows**.
   />
 </Frame>
 
+## Row Numbers
+
+The row number column (`#`) shows sequential numbers for each row. You can hide it if you prefer a cleaner view:
+
+- **On**: Row numbers visible as the first column (default)
+- **Off**: Row number column hidden
+
+Configure in **Settings** > **Data Grid** > **Show Row Numbers**.
+
 ## MongoDB Collections
 
 MongoDB collections have some differences from SQL databases in the data grid.
@@ -697,7 +706,7 @@ See [Import & Export](/features/import-export) for detailed export options.
 |--------|----------|
 | Copy selection | `Cmd+C` |
 | Copy as CSV | `Cmd+Shift+C` |
-| Copy as JSON | `Cmd+Option+C` |
+| Copy as JSON | `Cmd+Option+J` |
 | Select all | `Cmd+A` |
 | Delete row | `Delete` |
 | Edit cell | `Enter` |
