@@ -147,6 +147,11 @@ struct MainEditorContentView: View {
             if let tab = tabManager.selectedTab {
                 cacheRowProvider(for: tab)
             }
+            coordinator.onTeardown = { [self] in
+                tabProviderCache.removeAll()
+                sortCache.removeAll()
+                cachedChangeManager = nil
+            }
         }
         .onChange(of: tabManager.selectedTab?.resultVersion) { _, newVersion in
             guard let tab = tabManager.selectedTab, newVersion != nil else { return }
@@ -272,7 +277,8 @@ struct MainEditorContentView: View {
             } else if tab.resultColumns.isEmpty && tab.errorMessage == nil && tab.lastExecutedAt != nil && !tab.isExecuting {
                 QuerySuccessView(
                     rowsAffected: tab.rowsAffected,
-                    executionTime: tab.executionTime
+                    executionTime: tab.executionTime,
+                    statusMessage: tab.statusMessage
                 )
             } else {
                 // Filter panel (collapsible, above data grid)

@@ -37,7 +37,7 @@ extension AppDelegate {
         let deeplinks = urls.filter { $0.scheme == "tablepro" }
         if !deeplinks.isEmpty {
             Task { @MainActor in
-                for url in deeplinks { self.handleDeeplink(url) }
+                for url in deeplinks { await self.handleDeeplink(url) }
             }
         }
 
@@ -53,7 +53,9 @@ extension AppDelegate {
             suppressWelcomeWindow()
             Task { @MainActor in
                 for url in databaseURLs { self.handleDatabaseURL(url) }
-                self.scheduleWelcomeWindowSuppression()
+                // endFileOpenSuppression is called here to match suppressWelcomeWindow above.
+                // Individual handlers no longer manage this flag.
+                self.endFileOpenSuppression()
             }
         }
 
@@ -72,8 +74,14 @@ extension AppDelegate {
                         self.handleGenericDatabaseFile(url, type: dbType)
                     }
                 }
-                self.scheduleWelcomeWindowSuppression()
+                self.endFileOpenSuppression()
             }
+        }
+
+        // Connection share files
+        let connectionShareFiles = urls.filter { $0.pathExtension.lowercased() == "tablepro" }
+        for url in connectionShareFiles {
+            handleConnectionShareFile(url)
         }
 
         let sqlFiles = urls.filter { $0.pathExtension.lowercased() == "sql" }
@@ -87,7 +95,7 @@ extension AppDelegate {
                     window.close()
                 }
                 NotificationCenter.default.post(name: .openSQLFiles, object: sqlFiles)
-                scheduleWelcomeWindowSuppression()
+                endFileOpenSuppression()
             } else {
                 queuedFileURLs.append(contentsOf: sqlFiles)
                 openWelcomeWindow()
@@ -107,7 +115,7 @@ extension AppDelegate {
 
     // MARK: - Deeplink Handling
 
-    private func handleDeeplink(_ url: URL) {
+    private func handleDeeplink(_ url: URL) async {
         guard let action = DeeplinkHandler.parse(url) else { return }
 
         switch action {
@@ -121,14 +129,23 @@ extension AppDelegate {
             }
 
         case .openQuery(let name, let sql):
+            let preview = (sql as NSString).length > 300 ? String(sql.prefix(300)) + "…" : sql
+            let confirmed = await AlertHelper.confirmDestructive(
+                title: String(localized: "Open Query from Link"),
+                message: String(localized: "An external link wants to open a query on connection \"\(name)\":\n\n\(preview)"),
+                confirmButton: String(localized: "Open Query"),
+                cancelButton: String(localized: "Cancel"),
+                window: NSApp.keyWindow
+            )
+            guard confirmed else { return }
             connectViaDeeplink(connectionName: name) { connectionId in
                 EditorTabPayload(connectionId: connectionId, tabType: .query,
                                  initialQuery: sql)
             }
 
         case .importConnection(let name, let host, let port, let type, let username, let database):
-            handleImportDeeplink(name: name, host: host, port: port, type: type,
-                                 username: username, database: database)
+            await handleImportDeeplink(name: name, host: host, port: port, type: type,
+                                       username: username, database: database)
         }
     }
 
@@ -168,6 +185,20 @@ extension AppDelegate {
 
         Task { @MainActor in
             do {
+                // Confirm pre-connect script if present (deep links are external, so always confirm)
+                if let script = connection.preConnectScript,
+                   !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                {
+                    let confirmed = await AlertHelper.confirmDestructive(
+                        title: String(localized: "Pre-Connect Script"),
+                        message: String(localized: "Connection \"\(connection.name)\" has a script that will run before connecting:\n\n\(script)"),
+                        confirmButton: String(localized: "Run Script"),
+                        cancelButton: String(localized: "Cancel"),
+                        window: NSApp.keyWindow
+                    )
+                    guard confirmed else { return }
+                }
+
                 try await DatabaseManager.shared.connectToSession(connection)
                 for window in NSApp.windows where self.isWelcomeWindow(window) {
                     window.close()
@@ -185,7 +216,18 @@ extension AppDelegate {
     private func handleImportDeeplink(
         name: String, host: String, port: Int,
         type: DatabaseType, username: String, database: String
-    ) {
+    ) async {
+        let userPart = username.isEmpty ? "" : "\(username)@"
+        let details = "\(type.rawValue)://\(userPart)\(host):\(port)/\(database)"
+        let confirmed = await AlertHelper.confirmDestructive(
+            title: String(localized: "Import Connection from Link"),
+            message: String(localized: "An external link wants to add a database connection:\n\nName: \(name)\n\(details)"),
+            confirmButton: String(localized: "Add Connection"),
+            cancelButton: String(localized: "Cancel"),
+            window: NSApp.keyWindow
+        )
+        guard confirmed else { return }
+
         let connection = DatabaseConnection(
             name: name, host: host, port: port,
             database: database, username: username, type: type
@@ -195,6 +237,16 @@ extension AppDelegate {
 
         if let openWindow = WindowOpener.shared.openWindow {
             openWindow(id: "connection-form", value: connection.id)
+        }
+    }
+
+    // MARK: - Connection Share Import
+
+    private func handleConnectionShareFile(_ url: URL) {
+        openWelcomeWindow()
+        // Delay to ensure WelcomeWindowView's .onReceive is registered after window renders
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            NotificationCenter.default.post(name: .connectionShareFileOpened, object: url)
         }
     }
 

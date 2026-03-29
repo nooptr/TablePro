@@ -48,6 +48,24 @@ struct ContentView: View {
             defaultTitle = "SQL Query"
         }
         _windowTitle = State(initialValue: defaultTitle)
+
+        // For Cmd+T (new tab), the session already exists. Resolve synchronously
+        // to avoid the "Connecting..." flash while waiting for async onChange.
+        var resolvedSession: ConnectionSession?
+        if let connectionId = payload?.connectionId {
+            resolvedSession = DatabaseManager.shared.activeSessions[connectionId]
+        }
+        _currentSession = State(initialValue: resolvedSession)
+
+        if let session = resolvedSession {
+            _rightPanelState = State(initialValue: RightPanelState())
+            _sessionState = State(initialValue: SessionStateFactory.create(
+                connection: session.connection, payload: payload
+            ))
+        } else {
+            _rightPanelState = State(initialValue: nil)
+            _sessionState = State(initialValue: nil)
+        }
     }
 
     var body: some View {
@@ -114,7 +132,8 @@ struct ContentView: View {
                 // Match by checking if the window is registered for our connectionId
                 // in WindowLifecycleMonitor (subtitle may not be set yet on first appear).
                 guard let notificationWindow = notification.object as? NSWindow,
-                      notificationWindow.identifier?.rawValue.contains("main") == true,
+                      let windowId = notificationWindow.identifier?.rawValue,
+                      windowId == "main" || windowId.hasPrefix("main-"),
                       let connectionId = payload?.connectionId
                 else { return }
 
@@ -156,9 +175,9 @@ struct ContentView: View {
 
     @ViewBuilder
     private var mainContent: some View {
-        if let currentSession = currentSession, let rightPanelState, let sessionState {
-            NavigationSplitView(columnVisibility: $columnVisibility) {
-                // MARK: - Sidebar (Left) - Table Browser
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            // MARK: - Sidebar (Left) - Table Browser
+            if let currentSession = currentSession, let sessionState {
                 VStack(spacing: 0) {
                     SidebarView(
                         tables: sessionTablesBinding,
@@ -197,8 +216,13 @@ struct ContentView: View {
                     prompt: sidebarSearchPrompt(for: currentSession.connection.id)
                 )
                 .navigationSplitViewColumnWidth(min: 200, ideal: 250, max: 600)
-            } detail: {
-                // MARK: - Detail (Main workspace with optional right sidebar)
+            } else {
+                Color.clear
+                    .navigationSplitViewColumnWidth(min: 200, ideal: 250, max: 600)
+            }
+        } detail: {
+            // MARK: - Detail (Main workspace with optional right sidebar)
+            if let currentSession = currentSession, let rightPanelState, let sessionState {
                 HStack(spacing: 0) {
                     MainContentView(
                         connection: currentSession.connection,
@@ -234,25 +258,21 @@ struct ContentView: View {
                     }
                 }
                 .animation(.easeInOut(duration: 0.2), value: rightPanelState.isPresented)
-            }
-            .navigationTitle(windowTitle)
-            .navigationSubtitle(currentSession.connection.name)
-        } else {
-            VStack(spacing: 16) {
-                ProgressView()
-                    .scaleEffect(1.5)
+            } else {
+                VStack(spacing: 16) {
+                    ProgressView()
+                        .scaleEffect(1.5)
 
-                Text("Connecting...")
-                    .font(.headline)
-                    .foregroundStyle(.secondary)
+                    Text("Connecting...")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .navigationTitle("TablePro")
         }
+        .navigationTitle(windowTitle)
+        .navigationSubtitle(currentSession?.connection.name ?? "")
     }
-
-    // Removed: newConnectionSheet and editConnectionSheet helpers
-    // Connection forms are now handled by the separate connection-form window
 
     // MARK: - Session State Bindings
 
@@ -333,7 +353,9 @@ struct ContentView: View {
     // MARK: - Connection Status
 
     private func handleConnectionStatusChange() {
-        guard closingSessionId == nil else { return }
+        guard closingSessionId == nil else {
+            return
+        }
         let sessions = DatabaseManager.shared.activeSessions
         let connectionId = payload?.connectionId ?? currentSession?.id ?? DatabaseManager.shared.currentSessionId
         guard let sid = connectionId else {
@@ -355,13 +377,10 @@ struct ContentView: View {
                 AppState.shared.currentDatabaseType = nil
                 AppState.shared.supportsDatabaseSwitching = true
 
-                let tabbingId = "com.TablePro.main.\(sid.uuidString)"
-                DispatchQueue.main.async {
-                    for window in NSApp.windows where window.tabbingIdentifier == tabbingId {
-                        window.isReleasedWhenClosed = true
-                        window.close()
-                    }
-                }
+                // Window cleanup is handled by windowWillClose (opens welcome)
+                // and windowDidBecomeKey (hides restored orphan windows).
+                // Do NOT close windows here — it triggers SwiftUI state
+                // restoration which creates an infinite close→restore loop.
             }
             return
         }
@@ -370,6 +389,10 @@ struct ContentView: View {
             return
         }
         currentSession = newSession
+        // Update window title on first session connect (fixes cold-launch stale title)
+        if payload?.tableName == nil, windowTitle == "SQL Query" || windowTitle.hasSuffix(" Query") {
+            windowTitle = newSession.connection.name
+        }
         if rightPanelState == nil {
             rightPanelState = RightPanelState()
         }

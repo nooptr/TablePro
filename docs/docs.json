@@ -41,6 +41,9 @@
               "databases/cassandra",
               "databases/dynamodb",
               "databases/mssql",
+              "databases/duckdb",
+              "databases/cloudflare-d1",
+              "databases/bigquery",
               "databases/ssh-tunneling"
             ]
           },
@@ -62,6 +65,7 @@
               "features/keyboard-shortcuts",
               "features/deep-links",
               "features/safe-mode",
+              "features/connection-sharing",
               "features/icloud-sync",
               "features/ssh-profiles"
             ]
@@ -110,12 +114,12 @@
       "anchors": [
         {
           "anchor": "GitHub",
-          "href": "https://github.com/datlechin/tablepro",
+          "href": "https://github.com/TableProApp/TablePro",
           "icon": "github"
         },
         {
           "anchor": "Releases",
-          "href": "https://github.com/datlechin/tablepro/releases",
+          "href": "https://github.com/TableProApp/TablePro/releases",
           "icon": "download"
         },
         {
@@ -145,7 +149,7 @@
     "primary": {
       "type": "button",
       "label": "Download",
-      "href": "https://github.com/datlechin/tablepro/releases"
+      "href": "https://github.com/TableProApp/TablePro/releases"
     }
   },
   "contextual": {
@@ -161,7 +165,7 @@
   },
   "footer": {
     "socials": {
-      "github": "https://github.com/datlechin/tablepro",
+      "github": "https://github.com/TableProApp/TablePro",
       "facebook": "https://www.facebook.com/groups/tablepro",
       "telegram": "https://t.me/tablepro_app"
     }

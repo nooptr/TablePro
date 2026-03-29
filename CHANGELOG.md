@@ -7,6 +7,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Global toggle to disable all AI features (Settings > AI)
+- Drag to reorder columns in the Structure tab (MySQL/MariaDB)
+- Nested hierarchical groups for connection list (up to 3 levels deep)
+- Confirmation dialogs for deep link queries, connection imports, and pre-connect scripts
+- JSON fields in Row Details sidebar now display in a scrollable monospaced text area
+
+### Fixed
+
+- SQL editor not auto-focused on new tab and cursor missing after tab switch
+- Long lines not scrollable horizontally in the SQL editor
+- SSH profile lost after app restart when iCloud Sync enabled
+- MariaDB JSON columns showing as hex dumps instead of JSON text
+- MongoDB Atlas TLS certificate verification failure
+- ENUM/SET dropdown chevron buttons not showing on first table open
+
+## [0.25.0] - 2026-03-27
+
+### Added
+
+- Connection sharing: export/import connections as `.tablepro` files with import preview and duplicate detection (#466)
+- Encrypted export with credentials, protected by AES-256-GCM passphrase (Pro)
+- Linked Folders: watch a shared directory for `.tablepro` files (Pro)
+- Environment variable references (`$VAR`, `${VAR}`) in connection fields (Pro)
+
+## [0.24.2] - 2026-03-26
+
+### Fixed
+
+- XLSX export producing corrupted files that Excel cannot open (#464)
+- Deep link cold launch missing toolbar and duplicate windows (#465)
+
+### Added
+
+- Enum/set picker support for PostgreSQL custom enums, ClickHouse Enum8/Enum16, and DuckDB ENUM types
+- Boolean picker for MSSQL BIT columns and MySQL TINYINT(1) convention
+- Correct type classification for ClickHouse Nullable()/LowCardinality() wrappers, MSSQL MONEY/IMAGE/DATETIME2, DuckDB unsigned integers, and parameterized MySQL integer types
+
+## [0.24.1] - 2026-03-26
+
+### Fixed
+
+- Keyboard shortcut hints in welcome window footer overflowing and truncating when too many items are displayed
+
+## [0.24.0] - 2026-03-26
+
+### Added
+
+- Multi-select connections in Welcome window (Cmd+Click, Shift+Click) with bulk delete (⌘⌫), Move to Group, and multi-connect
+- Reorder connections within groups and reorder groups in Welcome window
+- ClickHouse, MSSQL, Redis, XLSX Export, MQL Export, and SQL Import now ship as built-in plugins
+- Large document safety caps for syntax highlighting (skip >5MB, throttle >50KB)
+- Lazy-load full values for LONGTEXT/MEDIUMTEXT/CLOB columns in the detail pane sidebar
+
+### Fixed
+
+- SSH profile connections displaying incorrect host/username on the Welcome window home screen (#454)
+- Saved connections disappearing after normal app quit (Cmd+Q) while persisting after force quit (#452)
+- Crash when disconnecting an etcd connection while requests are in-flight
+- Detail pane showing truncated values for LONGTEXT/MEDIUMTEXT/CLOB columns, preventing correct editing
+- Redis hash/list/set/zset/stream views showing empty or misaligned rows when values contained binary, null, or integer types
+
+## [0.23.2] - 2026-03-24
+
+### Fixed
+
+- MongoDB Atlas connections failing to authenticate (#438)
+- MongoDB TLS certificate verification skipped for SRV connections
+- Active tab data no longer refreshes when switching back to the app window
+- Undo history preserved when switching between database tables
+- Health monitor now detects stuck queries beyond the configured timeout
+- SSH tunnel closure errors now logged instead of silently discarded
+- Schema/database restore errors during reconnect now logged
+- Memory not released after closing tabs
+- New tabs opening as separate windows instead of joining the connection tab group
+- Clicking tables in sidebar not opening table tabs
+
+## [0.23.1] - 2026-03-24
+
+### Added
+
+- Test Connection button in SSH profile editor to validate SSH connectivity independently
+
 ### Changed
 
 - Improve performance: faster sorting, lower memory usage, adaptive tab eviction
@@ -999,46 +1083,52 @@ TablePro is a native macOS database client built with SwiftUI and AppKit, design
     - Custom SQL query templates
     - Performance optimized for large datasets
 
-[Unreleased]: https://github.com/datlechin/tablepro/compare/v0.23.0...HEAD
-[0.23.0]: https://github.com/datlechin/tablepro/compare/v0.22.1...v0.23.0
-[0.22.1]: https://github.com/datlechin/tablepro/compare/v0.22.0...v0.22.1
-[0.22.0]: https://github.com/datlechin/tablepro/compare/v0.21.0...v0.22.0
-[0.21.0]: https://github.com/datlechin/tablepro/compare/v0.20.4...v0.21.0
-[0.20.4]: https://github.com/datlechin/tablepro/compare/v0.20.3...v0.20.4
-[0.20.3]: https://github.com/datlechin/tablepro/compare/v0.20.2...v0.20.3
-[0.20.2]: https://github.com/datlechin/tablepro/compare/v0.20.1...v0.20.2
-[0.20.1]: https://github.com/datlechin/tablepro/compare/v0.20.0...v0.20.1
-[0.20.0]: https://github.com/datlechin/tablepro/compare/v0.19.1...v0.20.0
-[0.19.1]: https://github.com/datlechin/tablepro/compare/v0.19.0...v0.19.1
-[0.19.0]: https://github.com/datlechin/tablepro/compare/v0.18.1...v0.19.0
-[0.18.1]: https://github.com/datlechin/tablepro/compare/v0.18.0...v0.18.1
-[0.18.0]: https://github.com/datlechin/tablepro/compare/v0.17.0...v0.18.0
-[0.17.0]: https://github.com/datlechin/tablepro/compare/v0.16.1...v0.17.0
-[0.16.1]: https://github.com/datlechin/tablepro/compare/v0.16.0...v0.16.1
-[0.16.0]: https://github.com/datlechin/tablepro/compare/v0.15.0...v0.16.0
-[0.15.0]: https://github.com/datlechin/tablepro/compare/v0.14.1...v0.15.0
-[0.14.1]: https://github.com/datlechin/tablepro/compare/v0.14.0...v0.14.1
-[0.14.0]: https://github.com/datlechin/tablepro/compare/v0.13.0...v0.14.0
-[0.13.0]: https://github.com/datlechin/tablepro/compare/v0.12.0...v0.13.0
-[0.12.0]: https://github.com/datlechin/tablepro/compare/v0.11.1...v0.12.0
-[0.11.1]: https://github.com/datlechin/tablepro/compare/v0.11.0...v0.11.1
-[0.11.0]: https://github.com/datlechin/tablepro/compare/v0.10.0...v0.11.0
-[0.10.0]: https://github.com/datlechin/tablepro/compare/v0.9.2...v0.10.0
-[0.9.2]: https://github.com/datlechin/tablepro/compare/v0.9.1...v0.9.2
-[0.9.1]: https://github.com/datlechin/tablepro/compare/v0.9.0...v0.9.1
-[0.9.0]: https://github.com/datlechin/tablepro/compare/v0.8.0...v0.9.0
-[0.8.0]: https://github.com/datlechin/tablepro/compare/v0.7.0...v0.8.0
-[0.7.0]: https://github.com/datlechin/tablepro/compare/v0.6.4...v0.7.0
-[0.6.4]: https://github.com/datlechin/tablepro/compare/v0.6.3...v0.6.4
-[0.6.3]: https://github.com/datlechin/tablepro/compare/v0.6.2...v0.6.3
-[0.6.2]: https://github.com/datlechin/tablepro/compare/v0.6.1...v0.6.2
-[0.6.1]: https://github.com/datlechin/tablepro/compare/v0.6.0...v0.6.1
-[0.6.0]: https://github.com/datlechin/tablepro/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/datlechin/tablepro/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/datlechin/tablepro/compare/v0.3.2...v0.4.0
-[0.3.2]: https://github.com/datlechin/tablepro/compare/v0.3.1...v0.3.2
-[0.3.1]: https://github.com/datlechin/tablepro/compare/v0.3.0...v0.3.1
-[0.3.0]: https://github.com/datlechin/tablepro/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/datlechin/tablepro/compare/v0.1.1...v0.2.0
-[0.1.1]: https://github.com/datlechin/tablepro/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/datlechin/tablepro/releases/tag/v0.1.0
+[Unreleased]: https://github.com/TableProApp/TablePro/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/TableProApp/TablePro/compare/v0.24.2...v0.25.0
+[0.24.2]: https://github.com/TableProApp/TablePro/compare/v0.24.1...v0.24.2
+[0.24.1]: https://github.com/TableProApp/TablePro/compare/v0.24.0...v0.24.1
+[0.24.0]: https://github.com/TableProApp/TablePro/compare/v0.23.2...v0.24.0
+[0.23.2]: https://github.com/TableProApp/TablePro/compare/v0.23.1...v0.23.2
+[0.23.1]: https://github.com/TableProApp/TablePro/compare/v0.23.0...v0.23.1
+[0.23.0]: https://github.com/TableProApp/TablePro/compare/v0.22.1...v0.23.0
+[0.22.1]: https://github.com/TableProApp/TablePro/compare/v0.22.0...v0.22.1
+[0.22.0]: https://github.com/TableProApp/TablePro/compare/v0.21.0...v0.22.0
+[0.21.0]: https://github.com/TableProApp/TablePro/compare/v0.20.4...v0.21.0
+[0.20.4]: https://github.com/TableProApp/TablePro/compare/v0.20.3...v0.20.4
+[0.20.3]: https://github.com/TableProApp/TablePro/compare/v0.20.2...v0.20.3
+[0.20.2]: https://github.com/TableProApp/TablePro/compare/v0.20.1...v0.20.2
+[0.20.1]: https://github.com/TableProApp/TablePro/compare/v0.20.0...v0.20.1
+[0.20.0]: https://github.com/TableProApp/TablePro/compare/v0.19.1...v0.20.0
+[0.19.1]: https://github.com/TableProApp/TablePro/compare/v0.19.0...v0.19.1
+[0.19.0]: https://github.com/TableProApp/TablePro/compare/v0.18.1...v0.19.0
+[0.18.1]: https://github.com/TableProApp/TablePro/compare/v0.18.0...v0.18.1
+[0.18.0]: https://github.com/TableProApp/TablePro/compare/v0.17.0...v0.18.0
+[0.17.0]: https://github.com/TableProApp/TablePro/compare/v0.16.1...v0.17.0
+[0.16.1]: https://github.com/TableProApp/TablePro/compare/v0.16.0...v0.16.1
+[0.16.0]: https://github.com/TableProApp/TablePro/compare/v0.15.0...v0.16.0
+[0.15.0]: https://github.com/TableProApp/TablePro/compare/v0.14.1...v0.15.0
+[0.14.1]: https://github.com/TableProApp/TablePro/compare/v0.14.0...v0.14.1
+[0.14.0]: https://github.com/TableProApp/TablePro/compare/v0.13.0...v0.14.0
+[0.13.0]: https://github.com/TableProApp/TablePro/compare/v0.12.0...v0.13.0
+[0.12.0]: https://github.com/TableProApp/TablePro/compare/v0.11.1...v0.12.0
+[0.11.1]: https://github.com/TableProApp/TablePro/compare/v0.11.0...v0.11.1
+[0.11.0]: https://github.com/TableProApp/TablePro/compare/v0.10.0...v0.11.0
+[0.10.0]: https://github.com/TableProApp/TablePro/compare/v0.9.2...v0.10.0
+[0.9.2]: https://github.com/TableProApp/TablePro/compare/v0.9.1...v0.9.2
+[0.9.1]: https://github.com/TableProApp/TablePro/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/TableProApp/TablePro/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/TableProApp/TablePro/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/TableProApp/TablePro/compare/v0.6.4...v0.7.0
+[0.6.4]: https://github.com/TableProApp/TablePro/compare/v0.6.3...v0.6.4
+[0.6.3]: https://github.com/TableProApp/TablePro/compare/v0.6.2...v0.6.3
+[0.6.2]: https://github.com/TableProApp/TablePro/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/TableProApp/TablePro/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/TableProApp/TablePro/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/TableProApp/TablePro/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/TableProApp/TablePro/compare/v0.3.2...v0.4.0
+[0.3.2]: https://github.com/TableProApp/TablePro/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/TableProApp/TablePro/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/TableProApp/TablePro/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/TableProApp/TablePro/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/TableProApp/TablePro/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/TableProApp/TablePro/releases/tag/v0.1.0

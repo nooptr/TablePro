@@ -12,7 +12,7 @@ import TableProPluginKit
 @MainActor @Observable
 final class PluginManager {
     static let shared = PluginManager()
-    static let currentPluginKitVersion = 2
+    static let currentPluginKitVersion = 3
     private static let disabledPluginsKey = "com.TablePro.disabledPlugins"
     private static let legacyDisabledPluginsKey = "disabledPlugins"
 
@@ -269,6 +269,7 @@ final class PluginManager {
 
         if let builtInDir = builtInPluginsDir {
             discoverPlugins(from: builtInDir, source: .builtIn)
+            removeUserInstalledDuplicates(builtInDir: builtInDir)
         }
 
         discoverPlugins(from: userPluginsDir, source: .userInstalled)
@@ -316,6 +317,41 @@ final class PluginManager {
                 try discoverPlugin(at: itemURL, source: source)
             } catch {
                 Self.logger.error("Failed to discover plugin at \(itemURL.lastPathComponent): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Remove user-installed plugins that now ship as built-in to avoid dead weight.
+    private func removeUserInstalledDuplicates(builtInDir: URL) {
+        let fm = FileManager.default
+        guard let builtInBundles = try? fm.contentsOfDirectory(
+            at: builtInDir,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        var builtInBundleIds = Set<String>()
+        for url in builtInBundles where url.pathExtension == "tableplugin" {
+            if let bundle = Bundle(url: url), let id = bundle.bundleIdentifier {
+                builtInBundleIds.insert(id)
+            }
+        }
+
+        guard let userPlugins = try? fm.contentsOfDirectory(
+            at: userPluginsDir,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        for url in userPlugins where url.pathExtension == "tableplugin" {
+            guard let bundle = Bundle(url: url), let id = bundle.bundleIdentifier else { continue }
+            if builtInBundleIds.contains(id) {
+                do {
+                    try fm.removeItem(at: url)
+                    Self.logger.info("Removed user-installed '\(id)' — now ships as built-in")
+                } catch {
+                    Self.logger.warning("Failed to remove duplicate plugin '\(id)': \(error.localizedDescription)")
+                }
             }
         }
     }
@@ -830,6 +866,11 @@ final class PluginManager {
             .capabilities.supportsSSL ?? true
     }
 
+    func supportsColumnReorder(for databaseType: DatabaseType) -> Bool {
+        PluginMetadataRegistry.shared.snapshot(forTypeId: databaseType.pluginTypeId)?
+            .supportsColumnReorder ?? false
+    }
+
     func autoLimitStyle(for databaseType: DatabaseType) -> AutoLimitStyle {
         guard let snapshot = PluginMetadataRegistry.shared.snapshot(forTypeId: databaseType.pluginTypeId) else {
             return .limit
@@ -968,6 +1009,7 @@ final class PluginManager {
         replaceExistingPlugin(bundleId: newBundleId)
 
         let fm = FileManager.default
+        try fm.createDirectory(at: userPluginsDir, withIntermediateDirectories: true)
         let destURL = userPluginsDir.appendingPathComponent(url.lastPathComponent)
 
         if url.standardizedFileURL != destURL.standardizedFileURL {
@@ -1039,6 +1081,7 @@ final class PluginManager {
 
             replaceExistingPlugin(bundleId: newBundleId)
 
+            try fm.createDirectory(at: userPluginsDir, withIntermediateDirectories: true)
             let destURL = userPluginsDir.appendingPathComponent(extracted.lastPathComponent)
 
             if fm.fileExists(atPath: destURL.path) {

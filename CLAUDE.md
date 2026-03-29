@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 TablePro is a native macOS database client (SwiftUI + AppKit) — a fast, lightweight alternative to TablePlus. macOS 14.0+, Swift 5.9, Universal Binary (arm64 + x86_64).
 
 - **Source**: `TablePro/` — `Core/` (business logic, services), `Views/` (UI), `Models/` (data structures), `ViewModels/`, `Extensions/`, `Theme/`
-- **Plugins**: `Plugins/` — `.tableplugin` bundles + `TableProPluginKit` shared framework. Built-in (bundled in app): MySQL, PostgreSQL, SQLite, CSV, JSON, SQL export. Separately distributed via plugin registry: ClickHouse, MSSQL, MongoDB, Redis, Oracle, DuckDB, XLSX, MQL, SQLImport
+- **Plugins**: `Plugins/` — `.tableplugin` bundles + `TableProPluginKit` shared framework. Built-in (bundled in app): MySQL, PostgreSQL, SQLite, ClickHouse, MSSQL, Redis, DynamoDB, CSV, JSON, SQL export, XLSX, MQL, SQLImport. Separately distributed via plugin registry: MongoDB, Oracle, DuckDB, Cassandra, Etcd, CloudflareD1, BigQuery
 - **C bridges**: Each plugin contains its own C bridge module (e.g., `Plugins/MySQLDriverPlugin/CMariaDB/`, `Plugins/PostgreSQLDriverPlugin/CLibPQ/`)
 - **Static libs**: `Libs/` — pre-built `libmariadb*.a`, `libpq*.a`, etc. Downloaded from GitHub Releases via `scripts/download-libs.sh` (not in git)
 - **SPM deps**: CodeEditSourceEditor (`main` branch, tree-sitter editor), Sparkle (2.8.1, auto-update), OracleNIO. Managed via Xcode, no `Package.swift`.
@@ -55,7 +55,7 @@ Static libs (`Libs/*.a`) are hosted on the `libs-v1` GitHub Release (not in git)
 shasum -a 256 Libs/*.a > Libs/checksums.sha256
 # 3. Recreate and upload the archive
 tar czf /tmp/tablepro-libs-v1.tar.gz -C Libs .
-gh release upload libs-v1 /tmp/tablepro-libs-v1.tar.gz --clobber --repo datlechin/TablePro
+gh release upload libs-v1 /tmp/tablepro-libs-v1.tar.gz --clobber --repo TableProApp/TablePro
 # 4. Commit the updated checksums
 git add Libs/checksums.sha256 && git commit -m "build: update static library checksums"
 ```
@@ -79,16 +79,23 @@ Plugin bundles under `Plugins/`:
 | MySQLDriverPlugin      | MySQL, MariaDB       | CMariaDB             | Built-in     |
 | PostgreSQLDriverPlugin | PostgreSQL, Redshift | CLibPQ               | Built-in     |
 | SQLiteDriverPlugin     | SQLite               | (Foundation sqlite3) | Built-in     |
-| ClickHouseDriverPlugin | ClickHouse           | (URLSession HTTP)    | Registry     |
-| MSSQLDriverPlugin      | SQL Server           | CFreeTDS             | Registry     |
+| ClickHouseDriverPlugin | ClickHouse           | (URLSession HTTP)    | Built-in     |
+| MSSQLDriverPlugin      | SQL Server           | CFreeTDS             | Built-in     |
+| RedisDriverPlugin      | Redis                | CRedis               | Built-in     |
 | MongoDBDriverPlugin    | MongoDB              | CLibMongoc           | Registry     |
-| RedisDriverPlugin      | Redis                | CRedis               | Registry     |
 | DuckDBDriverPlugin     | DuckDB               | CDuckDB              | Registry     |
 | OracleDriverPlugin     | Oracle               | OracleNIO (SPM)      | Registry     |
+| CassandraDriverPlugin  | Cassandra, ScyllaDB  | CCassandra           | Registry     |
+| EtcdDriverPlugin       | Etcd                 | (gRPC/HTTP)          | Registry     |
+| CloudflareD1Plugin     | Cloudflare D1        | (URLSession HTTP)    | Registry     |
+| DynamoDBDriverPlugin   | DynamoDB             | (AWS SDK)            | Built-in     |
+| BigQueryDriverPlugin   | BigQuery             | (URLSession REST)    | Registry     |
 
 When adding a new driver: create a new plugin bundle under `Plugins/`, implement `DriverPlugin` + `PluginDatabaseDriver`, add target to pbxproj. See `docs/development/plugin-system/` for details.
 
 When adding a new method to the driver protocol: add to `PluginDatabaseDriver` (with default implementation), then update `PluginDriverAdapter` to bridge it to `DatabaseDriver`.
+
+**PluginKit ABI versioning**: When `DriverPlugin` or `PluginDatabaseDriver` protocol changes (new methods, changed signatures), bump `currentPluginKitVersion` in `PluginManager.swift` AND `TableProPluginKitVersion` in every plugin's `Info.plist`. Stale user-installed plugins with mismatched versions crash on load with `EXC_BAD_INSTRUCTION` (not catchable in Swift).
 
 ### DatabaseType (String-Based Struct)
 
@@ -239,3 +246,5 @@ Write like a developer, not a marketing AI. Be specific (numbers, tech names) ov
 ## CI/CD
 
 GitHub Actions (`.github/workflows/build.yml`) triggered by `v*` tags: lint → build arm64 → build x86_64 → release (DMG/ZIP + Sparkle signatures). Release notes auto-extracted from `CHANGELOG.md`.
+
+**Plugin CI** (`.github/workflows/build-plugin.yml`): triggered by `plugin-*-v*` tags. GitHub only fires one workflow per multi-tag `git push` — push tags individually or use `workflow_dispatch` with comma-separated tags for bulk releases.

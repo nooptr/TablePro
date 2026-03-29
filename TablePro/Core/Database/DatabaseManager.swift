@@ -5,6 +5,7 @@
 //  Created by Ngo Quoc Dat on 16/12/25.
 //
 
+import AppKit
 import Foundation
 import Observation
 import os
@@ -49,6 +50,8 @@ final class DatabaseManager {
     /// The health monitor skips pings while a query is running to avoid
     /// racing on non-thread-safe driver connections.
     @ObservationIgnored private var queriesInFlight: [UUID: Int] = [:]
+    /// Tracks when the first query started for each session (used for staleness detection).
+    @ObservationIgnored private var queryStartTimes: [UUID: Date] = [:]
 
     /// Current session (computed from currentSessionId)
     var currentSession: ConnectionSession? {
@@ -90,6 +93,14 @@ final class DatabaseManager {
             return
         }
 
+        // Resolve environment variable references in connection fields (Pro feature)
+        let resolvedConnection: DatabaseConnection
+        if LicenseManager.shared.isFeatureAvailable(.envVarReferences) {
+            resolvedConnection = EnvVarResolver.resolveConnection(connection)
+        } else {
+            resolvedConnection = connection
+        }
+
         // Create new session (or reuse a prepared one)
         if activeSessions[connection.id] == nil {
             var session = ConnectionSession(connection: connection)
@@ -101,7 +112,7 @@ final class DatabaseManager {
         // Create SSH tunnel if needed and build effective connection
         let effectiveConnection: DatabaseConnection
         do {
-            effectiveConnection = try await buildEffectiveConnection(for: connection)
+            effectiveConnection = try await buildEffectiveConnection(for: resolvedConnection)
         } catch {
             // Remove failed session
             removeSessionEntry(for: connection.id)
@@ -110,7 +121,7 @@ final class DatabaseManager {
         }
 
         // Run pre-connect hook if configured (only on explicit connect, not auto-reconnect)
-        if let script = connection.preConnectScript,
+        if let script = resolvedConnection.preConnectScript,
            !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         {
             do {
@@ -130,7 +141,11 @@ final class DatabaseManager {
             // Close tunnel if SSH was established
             if connection.sshConfig.enabled {
                 Task {
-                    try? await SSHTunnelManager.shared.closeTunnel(connectionId: connection.id)
+                    do {
+                        try await SSHTunnelManager.shared.closeTunnel(connectionId: connection.id)
+                    } catch {
+                        Self.logger.warning("SSH tunnel cleanup failed for \(connection.name): \(error.localizedDescription)")
+                    }
                 }
             }
             removeSessionEntry(for: connection.id)
@@ -149,7 +164,7 @@ final class DatabaseManager {
 
             // Run startup commands before schema init
             await executeStartupCommands(
-                connection.startupCommands, on: driver, connectionName: connection.name
+                resolvedConnection.startupCommands, on: driver, connectionName: connection.name
             )
 
             // Initialize schema for drivers that support schema switching
@@ -166,7 +181,7 @@ final class DatabaseManager {
                 switch action {
                 case .selectDatabaseFromLastSession:
                     // Restore saved database (e.g. MSSQL) only when no explicit database is configured
-                    if connection.database.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                    if resolvedConnection.database.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                        let adapter = driver as? PluginDriverAdapter,
                        let savedDb = AppSettingsStorage.shared.loadLastDatabase(for: connection.id) {
                         try? await adapter.switchDatabase(to: savedDb)
@@ -177,11 +192,11 @@ final class DatabaseManager {
                     // Check additionalFields first, then legacy dedicated properties, then
                     // fall back to parsing the main database field.
                     let initialDb: Int
-                    if let fieldValue = connection.additionalFields[fieldId], let parsed = Int(fieldValue) {
+                    if let fieldValue = resolvedConnection.additionalFields[fieldId], let parsed = Int(fieldValue) {
                         initialDb = parsed
-                    } else if fieldId == "redisDatabase", let legacy = connection.redisDatabase {
+                    } else if fieldId == "redisDatabase", let legacy = resolvedConnection.redisDatabase {
                         initialDb = legacy
-                    } else if let fallback = Int(connection.database) {
+                    } else if let fallback = Int(resolvedConnection.database) {
                         initialDb = fallback
                     } else {
                         initialDb = 0
@@ -220,7 +235,11 @@ final class DatabaseManager {
             // Close tunnel if connection failed
             if connection.sshConfig.enabled {
                 Task {
-                    try? await SSHTunnelManager.shared.closeTunnel(connectionId: connection.id)
+                    do {
+                        try await SSHTunnelManager.shared.closeTunnel(connectionId: connection.id)
+                    } catch {
+                        Self.logger.warning("SSH tunnel cleanup failed for \(connection.name): \(error.localizedDescription)")
+                    }
                 }
             }
 
@@ -256,7 +275,11 @@ final class DatabaseManager {
 
         // Close SSH tunnel if exists
         if session.connection.sshConfig.enabled {
-            try? await SSHTunnelManager.shared.closeTunnel(connectionId: session.connection.id)
+            do {
+                try await SSHTunnelManager.shared.closeTunnel(connectionId: session.connection.id)
+            } catch {
+                Self.logger.warning("SSH tunnel cleanup failed for \(session.connection.name): \(error.localizedDescription)")
+            }
         }
 
         // Stop health monitoring
@@ -343,11 +366,15 @@ final class DatabaseManager {
         operation: () async throws -> T
     ) async throws -> T {
         queriesInFlight[sessionId, default: 0] += 1
+        if queriesInFlight[sessionId] == 1 {
+            queryStartTimes[sessionId] = Date()
+        }
         defer {
             if let count = queriesInFlight[sessionId], count > 1 {
                 queriesInFlight[sessionId] = count - 1
             } else {
                 queriesInFlight.removeValue(forKey: sessionId)
+                queryStartTimes.removeValue(forKey: sessionId)
             }
         }
         return try await operation()
@@ -402,13 +429,21 @@ final class DatabaseManager {
             result = try await driver.testConnection()
         } catch {
             if connection.sshConfig.enabled {
-                try? await SSHTunnelManager.shared.closeTunnel(connectionId: connection.id)
+                do {
+                    try await SSHTunnelManager.shared.closeTunnel(connectionId: connection.id)
+                } catch {
+                    Self.logger.warning("SSH tunnel cleanup failed for \(connection.name): \(error.localizedDescription)")
+                }
             }
             throw error
         }
 
         if connection.sshConfig.enabled {
-            try? await SSHTunnelManager.shared.closeTunnel(connectionId: connection.id)
+            do {
+                try await SSHTunnelManager.shared.closeTunnel(connectionId: connection.id)
+            } catch {
+                Self.logger.warning("SSH tunnel cleanup failed for \(connection.name): \(error.localizedDescription)")
+            }
         }
 
         return result
@@ -429,20 +464,10 @@ final class DatabaseManager {
         sshPasswordOverride: String? = nil
     ) async throws -> DatabaseConnection {
         // Resolve SSH configuration: profile takes priority over inline
-        let sshConfig: SSHConfiguration
-        let isProfile: Bool
-        let secretOwnerId: UUID
-
-        if let profileId = connection.sshProfileId,
-           let profile = SSHProfileStorage.shared.profile(for: profileId) {
-            sshConfig = profile.toSSHConfiguration()
-            secretOwnerId = profileId
-            isProfile = true
-        } else {
-            sshConfig = connection.sshConfig
-            secretOwnerId = connection.id
-            isProfile = false
-        }
+        let profile = connection.sshProfileId.flatMap { SSHProfileStorage.shared.profile(for: $0) }
+        let sshConfig = connection.effectiveSSHConfig(profile: profile)
+        let isProfile = connection.sshProfileId != nil && profile != nil
+        let secretOwnerId = (isProfile ? connection.sshProfileId : nil) ?? connection.id
 
         guard sshConfig.enabled else {
             return connection
@@ -532,7 +557,16 @@ final class DatabaseManager {
                 guard let self else { return false }
                 // Skip ping while a user query is in-flight to avoid racing
                 // on the same non-thread-safe driver connection.
-                guard await self.queriesInFlight[connectionId] == nil else { return true }
+                // Allow ping if the query appears stuck (exceeds timeout + grace period).
+                if await self.queriesInFlight[connectionId] != nil {
+                    let queryTimeout = await TimeInterval(AppSettingsManager.shared.general.queryTimeoutSeconds)
+                    let maxStale = max(queryTimeout, 300) // At least 5 minutes
+                    if let startTime = await self.queryStartTimes[connectionId],
+                       Date().timeIntervalSince(startTime) < maxStale {
+                        return true // Query still within expected time
+                    }
+                    // Query appears stuck — fall through to ping
+                }
                 guard let mainDriver = await self.activeSessions[connectionId]?.driver else {
                     return false
                 }
@@ -547,12 +581,13 @@ final class DatabaseManager {
                 guard let self else { return false }
                 guard let session = await self.activeSessions[connectionId] else { return false }
                 do {
-                    let driver = try await self.reconnectDriver(for: session)
+                    let driver = try await self.trackOperation(sessionId: connectionId) {
+                        try await self.reconnectDriver(for: session)
+                    }
                     await self.updateSession(connectionId) { session in
                         session.driver = driver
                         session.status = .connected
                     }
-
                     return true
                 } catch {
                     return false
@@ -619,13 +654,21 @@ final class DatabaseManager {
 
         if let savedSchema = session.currentSchema,
            let schemaDriver = driver as? SchemaSwitchable {
-            try? await schemaDriver.switchSchema(to: savedSchema)
+            do {
+                try await schemaDriver.switchSchema(to: savedSchema)
+            } catch {
+                Self.logger.warning("Failed to restore schema '\(savedSchema)' on reconnect: \(error.localizedDescription)")
+            }
         }
 
         // Restore database for MSSQL if session had a non-default database
         if let savedDatabase = session.currentDatabase,
            let adapter = driver as? PluginDriverAdapter {
-            try? await adapter.switchDatabase(to: savedDatabase)
+            do {
+                try await adapter.switchDatabase(to: savedDatabase)
+            } catch {
+                Self.logger.warning("Failed to restore database '\(savedDatabase)' on reconnect: \(error.localizedDescription)")
+            }
         }
 
         return driver
@@ -659,8 +702,8 @@ final class DatabaseManager {
         await stopHealthMonitor(for: sessionId)
 
         do {
-            // Disconnect existing drivers
-            session.driver?.disconnect()
+            // Disconnect existing driver (re-fetch to avoid stale local reference)
+            activeSessions[sessionId]?.driver?.disconnect()
 
             // Recreate SSH tunnel if needed and build effective connection
             let effectiveConnection = try await buildEffectiveConnection(for: session.connection)
@@ -681,13 +724,21 @@ final class DatabaseManager {
 
             if let savedSchema = activeSessions[sessionId]?.currentSchema,
                let schemaDriver = driver as? SchemaSwitchable {
-                try? await schemaDriver.switchSchema(to: savedSchema)
+                do {
+                    try await schemaDriver.switchSchema(to: savedSchema)
+                } catch {
+                    Self.logger.warning("Failed to restore schema '\(savedSchema)' on reconnect: \(error.localizedDescription)")
+                }
             }
 
             // Restore database for MSSQL if session had a non-default database
             if let savedDatabase = activeSessions[sessionId]?.currentDatabase,
                let adapter = driver as? PluginDriverAdapter {
-                try? await adapter.switchDatabase(to: savedDatabase)
+                do {
+                    try await adapter.switchDatabase(to: savedDatabase)
+                } catch {
+                    Self.logger.warning("Failed to restore database '\(savedDatabase)' on reconnect: \(error.localizedDescription)")
+                }
             }
 
             // Update session
@@ -741,8 +792,7 @@ final class DatabaseManager {
 
         let maxRetries = 5
         for retryCount in 0..<maxRetries {
-            // Exponential backoff: 2s, 4s, 8s, 16s, 32s (capped at 60s)
-            let delay = min(60.0, 2.0 * pow(2.0, Double(retryCount)))
+            let delay = ExponentialBackoff.delay(for: retryCount + 1, maxDelay: 60)
             Self.logger.info("SSH reconnect attempt \(retryCount + 1)/\(maxRetries) in \(delay)s for: \(session.connection.name)")
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
 
@@ -768,11 +818,12 @@ final class DatabaseManager {
 
     nonisolated private static let startupLogger = Logger(subsystem: "com.TablePro", category: "DatabaseManager")
 
+    @discardableResult
     nonisolated private func executeStartupCommands(
         _ commands: String?, on driver: DatabaseDriver, connectionName: String
-    ) async {
+    ) async -> [(statement: String, error: String)] {
         guard let commands, !commands.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return
+            return []
         }
 
         let statements = commands
@@ -780,6 +831,7 @@ final class DatabaseManager {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
 
+        var failures: [(statement: String, error: String)] = []
         for statement in statements {
             do {
                 _ = try await driver.execute(query: statement)
@@ -790,8 +842,10 @@ final class DatabaseManager {
                 Self.startupLogger.warning(
                     "Startup command failed for '\(connectionName)': \(statement) — \(error.localizedDescription)"
                 )
+                failures.append((statement: statement, error: error.localizedDescription))
             }
         }
+        return failures
     }
 
     // MARK: - Schema Changes

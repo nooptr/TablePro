@@ -33,7 +33,7 @@ extension TableViewCoordinator {
 
     func copyRows(at indices: Set<Int>) {
         let sortedIndices = indices.sorted()
-        let columnTypes = (rowProvider as? InMemoryRowProvider)?.columnTypes
+        let columnTypes = rowProvider.columnTypes
         var lines: [String] = []
 
         for index in sortedIndices {
@@ -48,7 +48,7 @@ extension TableViewCoordinator {
 
     func copyRowsWithHeaders(at indices: Set<Int>) {
         let sortedIndices = indices.sorted()
-        let columnTypes = (rowProvider as? InMemoryRowProvider)?.columnTypes
+        let columnTypes = rowProvider.columnTypes
         var lines: [String] = []
 
         // Add header row
@@ -102,8 +102,8 @@ extension TableViewCoordinator {
         guard columnIndex >= 0 && columnIndex < rowProvider.columns.count else { return }
 
         let value = rowProvider.value(atRow: rowIndex, column: columnIndex) ?? "NULL"
-        let columnTypes = (rowProvider as? InMemoryRowProvider)?.columnTypes
-        let columnType = columnTypes.flatMap { $0.indices.contains(columnIndex) ? $0[columnIndex] : nil }
+        let columnTypes = rowProvider.columnTypes
+        let columnType = columnTypes.indices.contains(columnIndex) ? columnTypes[columnIndex] : nil
         let copyValue = BlobFormattingService.shared.formatIfNeeded(value, columnType: columnType, for: .copy)
         ClipboardService.shared.writeText(copyValue)
     }
@@ -143,8 +143,7 @@ extension TableViewCoordinator {
     func copyRowsAsJson(at indices: Set<Int>) {
         let rows = indices.sorted().compactMap { rowProvider.rowValues(at: $0) }
         guard !rows.isEmpty else { return }
-        let columnTypes = (rowProvider as? InMemoryRowProvider)?.columnTypes
-            ?? Array(repeating: ColumnType.text(rawType: nil), count: rowProvider.columns.count)
+        let columnTypes = rowProvider.columnTypes
         let converter = JsonRowConverter(columns: rowProvider.columns, columnTypes: columnTypes)
         ClipboardService.shared.writeText(converter.generateJson(rows: rows))
     }
@@ -160,5 +159,49 @@ extension TableViewCoordinator {
     private func resolveDriver() -> (any DatabaseDriver)? {
         guard let connectionId else { return nil }
         return DatabaseManager.shared.driver(for: connectionId)
+    }
+
+    // MARK: - Row Drag and Drop
+
+    private static let rowDragType = NSPasteboard.PasteboardType("com.TablePro.rowDrag")
+
+    func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
+        guard onMoveRow != nil else { return nil }
+        let item = NSPasteboardItem()
+        item.setString(String(row), forType: Self.rowDragType)
+        return item
+    }
+
+    func tableView(
+        _ tableView: NSTableView,
+        validateDrop info: any NSDraggingInfo,
+        proposedRow row: Int,
+        proposedDropOperation dropOperation: NSTableView.DropOperation
+    ) -> NSDragOperation {
+        guard onMoveRow != nil else { return [] }
+        guard info.draggingSource as? NSTableView === tableView else { return [] }
+        guard info.draggingPasteboard.availableType(from: [Self.rowDragType]) != nil else { return [] }
+        guard dropOperation == .above else {
+            tableView.setDropRow(row, dropOperation: .above)
+            return .move
+        }
+        return .move
+    }
+
+    func tableView(
+        _ tableView: NSTableView,
+        acceptDrop info: any NSDraggingInfo,
+        row: Int,
+        dropOperation: NSTableView.DropOperation
+    ) -> Bool {
+        guard let onMoveRow else { return false }
+        guard let item = info.draggingPasteboard.pasteboardItems?.first,
+              let rowString = item.string(forType: Self.rowDragType),
+              let fromRow = Int(rowString) else {
+            return false
+        }
+        guard fromRow != row && fromRow != row - 1 else { return false }
+        onMoveRow(fromRow, row)
+        return true
     }
 }

@@ -239,6 +239,16 @@ struct AppMenuCommands: Commands {
 
             Divider()
 
+            Button(String(localized: "Export Connections...")) {
+                NotificationCenter.default.post(name: .exportConnections, object: nil)
+            }
+
+            Button(String(localized: "Import Connections...")) {
+                NotificationCenter.default.post(name: .importConnections, object: nil)
+            }
+
+            Divider()
+
             Button("Export...") {
                 actions?.exportTables()
             }
@@ -405,7 +415,7 @@ struct AppMenuCommands: Commands {
             Divider()
 
             Button("GitHub Repository") {
-                if let url = URL(string: "https://github.com/datlechin/TablePro") { NSWorkspace.shared.open(url) }
+                if let url = URL(string: "https://github.com/TableProApp/TablePro") { NSWorkspace.shared.open(url) }
             }
 
             Button(String(localized: "Sponsor TablePro")) {
@@ -458,6 +468,7 @@ struct TableProApp: App {
                 .background(OpenWindowHandler())
         }
         .windowStyle(.automatic)
+        .windowToolbarStyle(.unified)
         .defaultSize(width: 1_200, height: 800)
 
         // Settings Window - opens with Cmd+,
@@ -544,7 +555,6 @@ private struct OpenWindowHandler: View {
                 if let payload = notification.object as? EditorTabPayload {
                     openWindow(id: "main", value: payload)
                 } else if let connectionId = notification.object as? UUID {
-                    // Legacy: connection ID only — open default query tab
                     openWindow(id: "main", value: EditorTabPayload(connectionId: connectionId))
                 }
             }

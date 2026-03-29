@@ -21,6 +21,7 @@ extension MainContentCoordinator {
         let columnNullable: [String: Bool]
         let primaryKeyColumn: String?
         let approximateRowCount: Int?
+        let columnEnumValues: [String: [String]]
     }
 
     /// Schema result from parallel or sequential metadata fetch
@@ -38,12 +39,22 @@ extension MainContentCoordinator {
         for fk in schema.fkInfo {
             fks[fk.column] = fk
         }
+        // Parse enum/set values from column type definitions (MySQL, MariaDB, ClickHouse)
+        var enumValues: [String: [String]] = [:]
+        for col in schema.columnInfo {
+            if let values = ColumnType.parseEnumValues(from: col.dataType) {
+                enumValues[col.name] = values
+            } else if let values = ColumnType.parseClickHouseEnumValues(from: col.dataType) {
+                enumValues[col.name] = values
+            }
+        }
         return ParsedSchemaMetadata(
             columnDefaults: defaults,
             columnForeignKeys: fks,
             columnNullable: nullable,
             primaryKeyColumn: schema.columnInfo.first(where: { $0.isPrimaryKey })?.name,
-            approximateRowCount: schema.approximateRowCount
+            approximateRowCount: schema.approximateRowCount,
+            columnEnumValues: enumValues
         )
     }
 
@@ -100,6 +111,7 @@ extension MainContentCoordinator {
         rows: [[String?]],
         executionTime: TimeInterval,
         rowsAffected: Int,
+        statusMessage: String?,
         tableName: String?,
         isEditable: Bool,
         metadata: ParsedSchemaMetadata?,
@@ -116,6 +128,7 @@ extension MainContentCoordinator {
         updatedTab.resultVersion += 1
         updatedTab.executionTime = executionTime
         updatedTab.rowsAffected = rowsAffected
+        updatedTab.statusMessage = statusMessage
         updatedTab.isExecuting = false
         updatedTab.lastExecutedAt = Date()
         updatedTab.tableName = tableName
@@ -132,6 +145,9 @@ extension MainContentCoordinator {
             updatedTab.columnDefaults = metadata.columnDefaults
             updatedTab.columnForeignKeys = metadata.columnForeignKeys
             updatedTab.columnNullable = metadata.columnNullable
+            for (col, vals) in metadata.columnEnumValues {
+                updatedTab.columnEnumValues[col] = vals
+            }
             if let approxCount = metadata.approximateRowCount, approxCount > 0 {
                 updatedTab.pagination.totalRowCount = approxCount
                 updatedTab.pagination.isApproximateRowCount = true
@@ -192,8 +208,8 @@ extension MainContentCoordinator {
         // Clear stale edit state immediately so the save banner
         // doesn't linger while Phase 2 metadata loads in background.
         // Only clear if there are no pending edits from the user.
-        if isEditable && !changeManager.hasChanges {
-            changeManager.clearChanges()
+        if tabManager.selectedTabId == tabId, isEditable, !changeManager.hasChanges {
+            changeManager.clearChangesAndUndoHistory()
         }
     }
 
@@ -278,8 +294,16 @@ extension MainContentCoordinator {
                 guard capturedGeneration == queryGeneration else { return }
                 guard !Task.isCancelled else { return }
                 if let idx = tabManager.tabs.firstIndex(where: { $0.id == tabId }) {
-                    tabManager.tabs[idx].columnEnumValues = columnEnumValues
-                    tabManager.tabs[idx].metadataVersion += 1
+                    let existing = tabManager.tabs[idx].columnEnumValues
+                    let hasNewValues = columnEnumValues.contains { key, value in
+                        existing[key] != value
+                    }
+                    if hasNewValues {
+                        for (col, vals) in columnEnumValues {
+                            tabManager.tabs[idx].columnEnumValues[col] = vals
+                        }
+                        tabManager.tabs[idx].metadataVersion += 1
+                    }
                 }
             }
         }
@@ -355,18 +379,26 @@ extension MainContentCoordinator {
             errorMessage: error.localizedDescription
         )
 
-        // Show error alert with AI fix option
+        // Show error alert (with AI fix option when AI is enabled)
         let errorMessage = error.localizedDescription
         let queryCopy = sql
         Task { @MainActor in
-            let wantsAIFix = await AlertHelper.showQueryErrorWithAIOption(
-                title: String(localized: "Query Execution Failed"),
-                message: errorMessage,
-                window: NSApp.keyWindow
-            )
-            if wantsAIFix {
-                showAIChatPanel()
-                aiViewModel?.handleFixError(query: queryCopy, error: errorMessage)
+            if AppSettingsManager.shared.ai.enabled {
+                let wantsAIFix = await AlertHelper.showQueryErrorWithAIOption(
+                    title: String(localized: "Query Execution Failed"),
+                    message: errorMessage,
+                    window: NSApp.keyWindow
+                )
+                if wantsAIFix {
+                    showAIChatPanel()
+                    aiViewModel?.handleFixError(query: queryCopy, error: errorMessage)
+                }
+            } else {
+                AlertHelper.showErrorSheet(
+                    title: String(localized: "Query Execution Failed"),
+                    message: errorMessage,
+                    window: NSApp.keyWindow
+                )
             }
         }
     }

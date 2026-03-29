@@ -295,7 +295,8 @@ final class MainContentCommandActions {
         let payload = EditorTabPayload(
             connectionId: connection.id,
             tabType: .query,
-            initialQuery: initialQuery
+            initialQuery: initialQuery,
+            isNewTab: true
         )
         WindowOpener.shared.openNativeTab(payload)
     }
@@ -375,7 +376,7 @@ final class MainContentCommandActions {
     }
 
     private func discardAndClose() {
-        coordinator?.changeManager.clearChanges()
+        coordinator?.changeManager.clearChangesAndUndoHistory()
         pendingTruncates.wrappedValue.removeAll()
         pendingDeletes.wrappedValue.removeAll()
         rightPanelState.editState.clearEdits()

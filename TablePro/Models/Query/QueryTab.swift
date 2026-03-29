@@ -7,6 +7,7 @@
 
 import Foundation
 import Observation
+import os
 import TableProPluginKit
 
 /// Type of tab
@@ -269,6 +270,13 @@ final class RowBuffer {
         self.rows = newRows
         isEvicted = false
     }
+
+    deinit {
+        #if DEBUG
+        Logger(subsystem: "com.TablePro", category: "RowBuffer")
+            .debug("RowBuffer deallocated — columns: \(self.columns.count), evicted: \(self.isEvicted)")
+        #endif
+    }
 }
 
 /// Represents a single tab (query or table)
@@ -320,6 +328,7 @@ struct QueryTab: Identifiable, Equatable {
     }
 
     var executionTime: TimeInterval?
+    var statusMessage: String?
     var rowsAffected: Int  // Number of rows affected by non-SELECT queries
     var errorMessage: String?
     var isExecuting: Bool
@@ -382,6 +391,7 @@ struct QueryTab: Identifiable, Equatable {
         self.lastExecutedAt = nil
         self.rowBuffer = RowBuffer()
         self.executionTime = nil
+        self.statusMessage = nil
         self.rowsAffected = 0
         self.errorMessage = nil
         self.isExecuting = false
@@ -417,6 +427,7 @@ struct QueryTab: Identifiable, Equatable {
         self.lastExecutedAt = nil
         self.rowBuffer = RowBuffer()
         self.executionTime = nil
+        self.statusMessage = nil
         self.rowsAffected = 0
         self.errorMessage = nil
         self.isExecuting = false
@@ -653,6 +664,7 @@ final class QueryTabManager {
         tab.query = query
         tab.resultVersion += 1
         tab.executionTime = nil
+        tab.statusMessage = nil
         tab.errorMessage = nil
         tab.lastExecutedAt = nil
         tab.showStructure = false
@@ -675,5 +687,12 @@ final class QueryTabManager {
         if let index = tabs.firstIndex(where: { $0.id == tab.id }) {
             tabs[index] = tab
         }
+    }
+
+    deinit {
+        #if DEBUG
+        Logger(subsystem: "com.TablePro", category: "QueryTabManager")
+            .debug("QueryTabManager deallocated")
+        #endif
     }
 }
