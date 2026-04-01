@@ -8,6 +8,7 @@
 import SwiftUI
 
 struct SyncStatusIndicator: View {
+    @Environment(\.openSettings) private var openSettings
     private let syncCoordinator = SyncCoordinator.shared
     @State private var showActivationSheet = false
 
@@ -120,9 +121,7 @@ struct SyncStatusIndicator: View {
             showActivationSheet = true
         default:
             UserDefaults.standard.set(SettingsTab.sync.rawValue, forKey: "selectedSettingsTab")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-            }
+            openSettings()
         }
     }
 }

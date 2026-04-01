@@ -14,6 +14,7 @@ import TableProPluginKit
 enum TabType: Equatable, Codable, Hashable {
     case query       // SQL editor tab
     case table       // Direct table view tab
+    case createTable // Create new table tab
 }
 
 /// Minimal representation of a tab for persistence
@@ -25,6 +26,7 @@ struct PersistedTab: Codable {
     let tableName: String?
     var isView: Bool = false
     var databaseName: String = ""
+    var schemaName: String?
     var sourceFileURL: URL?
 }
 
@@ -339,6 +341,7 @@ struct QueryTab: Identifiable, Equatable {
     var isEditable: Bool
     var isView: Bool  // True for database views (read-only)
     var databaseName: String  // Database this tab was opened in (for multi-database restore)
+    var schemaName: String?  // Schema this tab was opened in (for multi-schema restore, e.g. PostgreSQL)
     var showStructure: Bool  // Toggle to show structure view instead of data
     var explainText: String?
     var explainExecutionTime: TimeInterval?
@@ -368,14 +371,39 @@ struct QueryTab: Identifiable, Equatable {
     // Whether this tab is a preview (temporary) tab that gets replaced on next navigation
     var isPreview: Bool
 
+    // Multi-result-set support (Phase 0: added alongside existing single-result properties)
+    var resultSets: [ResultSet] = []
+    var activeResultSetId: UUID?
+    var isResultsCollapsed: Bool = false
+
+    var activeResultSet: ResultSet? {
+        guard let id = activeResultSetId else { return resultSets.last }
+        return resultSets.first { $0.id == id }
+    }
+
     // Source file URL for .sql files opened from disk (used for deduplication)
     var sourceFileURL: URL?
+
+    // Snapshot of file content at last save/load (nil for non-file tabs).
+    // Used to detect unsaved changes via isFileDirty.
+    var savedFileContent: String?
 
     // Version counter incremented when resultRows changes (used for sort caching)
     var resultVersion: Int
 
     // Version counter incremented when FK/metadata arrives (Phase 2), used to invalidate caches
     var metadataVersion: Int
+
+    /// Whether the editor content differs from the last saved/loaded file content.
+    /// Returns false for tabs not backed by a file.
+    /// Uses O(1) length pre-check to avoid O(n) string comparison on every keystroke.
+    var isFileDirty: Bool {
+        guard sourceFileURL != nil, let saved = savedFileContent else { return false }
+        let queryNS = query as NSString
+        let savedNS = saved as NSString
+        if queryNS.length != savedNS.length { return true }
+        return queryNS != savedNS
+    }
 
     init(
         id: UUID = UUID(),
@@ -397,9 +425,10 @@ struct QueryTab: Identifiable, Equatable {
         self.isExecuting = false
         self.tableName = tableName
         self.primaryKeyColumn = nil
-        self.isEditable = tabType == .table  // Table tabs are editable by default
+        self.isEditable = tabType == .table
         self.isView = false
         self.databaseName = ""
+        self.schemaName = nil
         self.showStructure = false
         self.pendingChanges = TabPendingChanges()
         self.selectedRowIndices = []
@@ -434,6 +463,7 @@ struct QueryTab: Identifiable, Equatable {
         self.isEditable = persisted.tabType == .table && !persisted.isView
         self.isView = persisted.isView
         self.databaseName = persisted.databaseName
+        self.schemaName = persisted.schemaName
         self.showStructure = false
         self.pendingChanges = TabPendingChanges()
         self.selectedRowIndices = []
@@ -453,6 +483,7 @@ struct QueryTab: Identifiable, Equatable {
     @MainActor static func buildBaseTableQuery(
         tableName: String,
         databaseType: DatabaseType,
+        schemaName: String? = nil,
         quoteIdentifier: ((String) -> String)? = nil
     ) -> String {
         let quote = quoteIdentifier ?? quoteIdentifierFromDialect(PluginManager.shared.sqlDialect(for: databaseType))
@@ -473,13 +504,18 @@ struct QueryTab: Identifiable, Equatable {
         case .bash:
             return "SCAN 0 MATCH * COUNT \(pageSize)"
         default:
-            let quotedName = quote(tableName)
+            let qualifiedName: String
+            if let schema = schemaName, !schema.isEmpty {
+                qualifiedName = "\(quote(schema)).\(quote(tableName))"
+            } else {
+                qualifiedName = quote(tableName)
+            }
             switch PluginManager.shared.paginationStyle(for: databaseType) {
             case .offsetFetch:
                 let orderBy = PluginManager.shared.offsetFetchOrderBy(for: databaseType)
-                return "SELECT * FROM \(quotedName) \(orderBy) OFFSET 0 ROWS FETCH NEXT \(pageSize) ROWS ONLY;"
+                return "SELECT * FROM \(qualifiedName) \(orderBy) OFFSET 0 ROWS FETCH NEXT \(pageSize) ROWS ONLY;"
             case .limit:
-                return "SELECT * FROM \(quotedName) LIMIT \(pageSize);"
+                return "SELECT * FROM \(qualifiedName) LIMIT \(pageSize);"
             }
         }
     }
@@ -506,6 +542,7 @@ struct QueryTab: Identifiable, Equatable {
             tableName: tableName,
             isView: isView,
             databaseName: databaseName,
+            schemaName: schemaName,
             sourceFileURL: sourceFileURL
         )
     }
@@ -526,25 +563,41 @@ struct QueryTab: Identifiable, Equatable {
             && lhs.rowsAffected == rhs.rowsAffected
             && lhs.isPreview == rhs.isPreview
             && lhs.hasUserInteraction == rhs.hasUserInteraction
+            && lhs.isResultsCollapsed == rhs.isResultsCollapsed
+            && lhs.resultSets.map(\.id) == rhs.resultSets.map(\.id)
+            && lhs.activeResultSetId == rhs.activeResultSetId
     }
 }
 
 /// Manager for query tabs
 @MainActor @Observable
 final class QueryTabManager {
-    var tabs: [QueryTab] = []
+    var tabs: [QueryTab] = [] {
+        didSet { _tabIndexMapDirty = true }
+    }
+
     var selectedTabId: UUID?
+
+    @ObservationIgnored private var _tabIndexMap: [UUID: Int] = [:]
+    @ObservationIgnored private var _tabIndexMapDirty = true
+
+    private func rebuildTabIndexMapIfNeeded() {
+        guard _tabIndexMapDirty else { return }
+        _tabIndexMap = Dictionary(uniqueKeysWithValues: tabs.enumerated().map { ($1.id, $0) })
+        _tabIndexMapDirty = false
+    }
 
     var tabIds: [UUID] { tabs.map(\.id) }
 
     var selectedTab: QueryTab? {
-        guard let id = selectedTabId else { return tabs.first }
-        return tabs.first { $0.id == id }
+        if let index = selectedTabIndex { return tabs[index] }
+        return selectedTabId == nil ? tabs.first : nil
     }
 
     var selectedTabIndex: Int? {
         guard let id = selectedTabId else { return nil }
-        return tabs.firstIndex { $0.id == id }
+        rebuildTabIndexMapIfNeeded()
+        return _tabIndexMap[id]
     }
 
     init() {
@@ -576,6 +629,9 @@ final class QueryTabManager {
 
         newTab.databaseName = databaseName
         newTab.sourceFileURL = sourceFileURL
+        if sourceFileURL != nil {
+            newTab.savedFileContent = newTab.query
+        }
         tabs.append(newTab)
         selectedTabId = newTab.id
     }
@@ -610,6 +666,16 @@ final class QueryTabManager {
         selectedTabId = newTab.id
     }
 
+    func addCreateTableTab(databaseName: String = "") {
+        let tabTitle = String(localized: "Create Table")
+        var newTab = QueryTab(title: tabTitle, tabType: .createTable)
+        newTab.databaseName = databaseName
+        newTab.isEditable = false
+        newTab.hasUserInteraction = true
+        tabs.append(newTab)
+        selectedTabId = newTab.id
+    }
+
     func addPreviewTableTab(
         tableName: String,
         databaseType: DatabaseType = .mysql,
@@ -640,7 +706,7 @@ final class QueryTabManager {
     func replaceTabContent(
         tableName: String, databaseType: DatabaseType = .mysql,
         isView: Bool = false, databaseName: String = "",
-        isPreview: Bool = false,
+        schemaName: String? = nil, isPreview: Bool = false,
         quoteIdentifier: ((String) -> String)? = nil
     ) -> Bool {
         guard let selectedId = selectedTabId,
@@ -652,6 +718,7 @@ final class QueryTabManager {
         let query = QueryTab.buildBaseTableQuery(
             tableName: tableName,
             databaseType: databaseType,
+            schemaName: schemaName,
             quoteIdentifier: quoteIdentifier
         )
         let pageSize = AppSettingsManager.shared.dataGrid.defaultPageSize
@@ -678,6 +745,7 @@ final class QueryTabManager {
         tab.columnLayout = ColumnLayoutState()
         tab.pagination = PaginationState(pageSize: pageSize)
         tab.databaseName = databaseName
+        tab.schemaName = schemaName
         tab.isPreview = isPreview
         tabs[selectedIndex] = tab
         return true

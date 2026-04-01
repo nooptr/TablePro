@@ -86,6 +86,10 @@ final class MainContentCoordinator {
     /// Direct reference to right panel state — enables showing AI panel programmatically
     @ObservationIgnored weak var rightPanelState: RightPanelState?
 
+    /// Direct reference to this coordinator's content window, used for presenting alerts.
+    /// Avoids NSApp.keyWindow which may return a sheet window, causing stuck dialogs.
+    @ObservationIgnored weak var contentWindow: NSWindow?
+
     // MARK: - Published State
 
     var schemaProvider: SQLSchemaProvider
@@ -97,7 +101,7 @@ final class MainContentCoordinator {
     var needsLazyLoad = false
 
     /// Cache for async-sorted query tab rows (large datasets sorted on background thread)
-    private(set) var querySortCache: [UUID: QuerySortCacheEntry] = [:]
+    @ObservationIgnored private(set) var querySortCache: [UUID: QuerySortCacheEntry] = [:]
 
     // MARK: - Internal State
 
@@ -134,7 +138,7 @@ final class MainContentCoordinator {
 
     /// True while a database switch is in progress. Guards against
     /// side-effect window creation during the switch cascade.
-    var isSwitchingDatabase = false
+    @ObservationIgnored var isSwitchingDatabase = false
 
     /// True once the coordinator's view has appeared (onAppear fired).
     /// Coordinators that SwiftUI creates during body re-evaluation but never
@@ -841,6 +845,11 @@ final class MainContentCoordinator {
         if usesNoSQLBrowsing {
             tableName = tabManager.selectedTab?.tableName
             isEditable = tableName != nil
+        } else if tab.tabType == .table, let existingName = tab.tableName {
+            // Table tabs already know their table name — don't re-extract from SQL
+            // which can fail for schema-qualified or quoted identifiers
+            tableName = existingName
+            isEditable = true
         } else {
             tableName = extractTableName(from: effectiveSQL)
             isEditable = tableName != nil
@@ -902,6 +911,7 @@ final class MainContentCoordinator {
                         if let idx = tabManager.tabs.firstIndex(where: { $0.id == tabId }) {
                             tabManager.tabs[idx].isExecuting = false
                         }
+                        currentQueryTask = nil
                         toolbarState.setExecuting(false)
                         toolbarState.lastQueryDuration = safeExecutionTime
                     }
@@ -930,8 +940,13 @@ final class MainContentCoordinator {
                     toolbarState.setExecuting(false)
                     toolbarState.lastQueryDuration = safeExecutionTime
 
-                    guard capturedGeneration == queryGeneration else { return }
-                    guard !Task.isCancelled else { return }
+                    // Always reset isExecuting even if generation is stale
+                    if capturedGeneration != queryGeneration || Task.isCancelled {
+                        if let idx = tabManager.tabs.firstIndex(where: { $0.id == tabId }) {
+                            tabManager.tabs[idx].isExecuting = false
+                        }
+                        return
+                    }
 
                     applyPhase1Result(
                         tabId: tabId,
@@ -978,10 +993,17 @@ final class MainContentCoordinator {
                     }
                 }
             } catch {
-                guard capturedGeneration == queryGeneration else { return }
-
+                // Always reset isExecuting even if generation is stale —
+                // skipping this leaves the tab permanently stuck in "executing"
+                // state, requiring a reconnect to recover.
                 await MainActor.run { [weak self] in
                     guard let self else { return }
+                    if let idx = tabManager.tabs.firstIndex(where: { $0.id == tabId }) {
+                        tabManager.tabs[idx].isExecuting = false
+                    }
+                    currentQueryTask = nil
+                    toolbarState.setExecuting(false)
+                    guard capturedGeneration == queryGeneration else { return }
                     handleQueryExecutionError(error, sql: sql, tabId: tabId, connection: conn)
                 }
             }
@@ -1170,8 +1192,8 @@ final class MainContentCoordinator {
             let sortColumns = currentSort.columns
             let colTypes = tab.columnTypes
 
-            if rows.count > 10_000 {
-                // Large dataset: sort on background thread to avoid UI freeze
+            if rows.count > 1_000 {
+                // Sort on background thread to avoid UI freeze
                 activeSortTasks[tabId]?.cancel()
                 activeSortTasks.removeValue(forKey: tabId)
                 tabManager.tabs[tabIndex].isExecuting = true

@@ -8,17 +8,16 @@
 import SwiftUI
 
 struct SyncSettingsView: View {
+    @Bindable private var settingsManager = AppSettingsManager.shared
     @Bindable private var syncCoordinator = SyncCoordinator.shared
-    @State private var syncSettings: SyncSettings = AppSettingsStorage.shared.loadSync()
 
     private let licenseManager = LicenseManager.shared
 
     var body: some View {
         Form {
             Section("iCloud Sync") {
-                Toggle("iCloud Sync:", isOn: $syncSettings.enabled)
-                    .onChange(of: syncSettings.enabled) { _, newValue in
-                        persistSettings()
+                Toggle("iCloud Sync:", isOn: $settingsManager.sync.enabled)
+                    .onChange(of: settingsManager.sync.enabled) { _, newValue in
                         updatePasswordSyncFlag()
                         if newValue {
                             syncCoordinator.enableSync()
@@ -27,12 +26,12 @@ struct SyncSettingsView: View {
                         }
                     }
 
-                Text("Syncs connections, settings, and history across your Macs via iCloud.")
+                Text("Syncs connections, settings, and SSH profiles across your Macs via iCloud.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            if syncSettings.enabled {
+            if settingsManager.sync.enabled {
                 statusSection
 
                 syncCategoriesSection
@@ -106,20 +105,17 @@ struct SyncSettingsView: View {
 
     private var syncCategoriesSection: some View {
         Section("Sync Categories") {
-            Toggle("Connections:", isOn: $syncSettings.syncConnections)
-                .onChange(of: syncSettings.syncConnections) { _, newValue in
-                    persistSettings()
-                    if !newValue, syncSettings.syncPasswords {
-                        syncSettings.syncPasswords = false
-                        persistSettings()
+            Toggle("Connections:", isOn: $settingsManager.sync.syncConnections)
+                .onChange(of: settingsManager.sync.syncConnections) { _, newValue in
+                    if !newValue, settingsManager.sync.syncPasswords {
+                        settingsManager.sync.syncPasswords = false
                         onPasswordSyncChanged(false)
                     }
                 }
 
-            if syncSettings.syncConnections {
-                Toggle("Passwords:", isOn: $syncSettings.syncPasswords)
-                    .onChange(of: syncSettings.syncPasswords) { _, newValue in
-                        persistSettings()
+            if settingsManager.sync.syncConnections {
+                Toggle("Passwords:", isOn: $settingsManager.sync.syncPasswords)
+                    .onChange(of: settingsManager.sync.syncPasswords) { _, newValue in
                         onPasswordSyncChanged(newValue)
                     }
                     .padding(.leading, 20)
@@ -130,26 +126,11 @@ struct SyncSettingsView: View {
                     .padding(.leading, 20)
             }
 
-            Toggle("Groups & Tags:", isOn: $syncSettings.syncGroupsAndTags)
-                .onChange(of: syncSettings.syncGroupsAndTags) { _, _ in persistSettings() }
+            Toggle("Groups & Tags:", isOn: $settingsManager.sync.syncGroupsAndTags)
 
-            Toggle("SSH Profiles:", isOn: $syncSettings.syncSSHProfiles)
-                .onChange(of: syncSettings.syncSSHProfiles) { _, _ in persistSettings() }
+            Toggle("SSH Profiles:", isOn: $settingsManager.sync.syncSSHProfiles)
 
-            Toggle("Settings:", isOn: $syncSettings.syncSettings)
-                .onChange(of: syncSettings.syncSettings) { _, _ in persistSettings() }
-
-            Toggle("Query History:", isOn: $syncSettings.syncQueryHistory)
-                .onChange(of: syncSettings.syncQueryHistory) { _, _ in persistSettings() }
-
-            if syncSettings.syncQueryHistory {
-                Picker("History Limit:", selection: $syncSettings.historySyncLimit) {
-                    ForEach(HistorySyncLimit.allCases, id: \.self) { limit in
-                        Text(limit.displayName).tag(limit)
-                    }
-                }
-                .onChange(of: syncSettings.historySyncLimit) { _, _ in persistSettings() }
-            }
+            Toggle("Settings:", isOn: $settingsManager.sync.syncSettings)
         }
     }
 
@@ -179,12 +160,8 @@ struct SyncSettingsView: View {
 
     // MARK: - Helpers
 
-    private func persistSettings() {
-        AppSettingsStorage.shared.saveSync(syncSettings)
-    }
-
     private func onPasswordSyncChanged(_ enabled: Bool) {
-        let effective = syncSettings.enabled && syncSettings.syncConnections && enabled
+        let effective = settingsManager.sync.enabled && settingsManager.sync.syncConnections && enabled
         Task.detached {
             KeychainHelper.shared.migratePasswordSyncState(synchronizable: effective)
             UserDefaults.standard.set(effective, forKey: KeychainHelper.passwordSyncEnabledKey)
@@ -192,7 +169,8 @@ struct SyncSettingsView: View {
     }
 
     private func updatePasswordSyncFlag() {
-        let effective = syncSettings.enabled && syncSettings.syncConnections && syncSettings.syncPasswords
+        let sync = settingsManager.sync
+        let effective = sync.enabled && sync.syncConnections && sync.syncPasswords
         let current = UserDefaults.standard.bool(forKey: KeychainHelper.passwordSyncEnabledKey)
         guard effective != current else { return }
         Task.detached {
@@ -202,10 +180,7 @@ struct SyncSettingsView: View {
     }
 
     private func openLicenseSettings() {
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            UserDefaults.standard.set(SettingsTab.license.rawValue, forKey: "selectedSettingsTab")
-        }
+        UserDefaults.standard.set(SettingsTab.license.rawValue, forKey: "selectedSettingsTab")
     }
 }
 

@@ -238,6 +238,7 @@ extension DatabaseType {
     static let etcd = DatabaseType(rawValue: "etcd")
     static let cloudflareD1 = DatabaseType(rawValue: "Cloudflare D1")
     static let dynamodb = DatabaseType(rawValue: "DynamoDB")
+    static let bigQuery = DatabaseType(rawValue: "BigQuery")
 }
 
 extension DatabaseType: Codable {
@@ -426,6 +427,11 @@ struct DatabaseConnection: Identifiable, Hashable {
     var usePgpass: Bool {
         get { additionalFields["usePgpass"] == "true" }
         set { additionalFields["usePgpass"] = newValue ? "true" : "" }
+    }
+
+    var promptForPassword: Bool {
+        get { additionalFields["promptForPassword"] == "true" }
+        set { additionalFields["promptForPassword"] = newValue ? "true" : "" }
     }
 
     var preConnectScript: String? {

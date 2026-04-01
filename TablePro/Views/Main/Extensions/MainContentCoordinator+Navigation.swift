@@ -34,6 +34,8 @@ extension MainContentCoordinator {
             currentDatabase = connection.database
         }
 
+        let currentSchema = DatabaseManager.shared.session(for: connectionId)?.currentSchema
+
         // Fast path: if this table is already the active tab in the same database, skip all work
         if let current = tabManager.selectedTab,
            current.tabType == .table,
@@ -60,8 +62,10 @@ extension MainContentCoordinator {
 
         // Check if another native window tab already has this table open — switch to it
         if let keyWindow = NSApp.keyWindow {
+            let ownWindows = Set(WindowLifecycleMonitor.shared.windows(for: connectionId).map { ObjectIdentifier($0) })
             let tabbedWindows = keyWindow.tabbedWindows ?? [keyWindow]
-            for window in tabbedWindows where window.title == tableName {
+            for window in tabbedWindows
+                where window.title == tableName && ownWindows.contains(ObjectIdentifier(window)) {
                 window.makeKeyAndOrderFront(nil)
                 return
             }
@@ -90,6 +94,7 @@ extension MainContentCoordinator {
             if let tabIndex = tabManager.selectedTabIndex {
                 tabManager.tabs[tabIndex].isView = isView
                 tabManager.tabs[tabIndex].isEditable = !isView
+                tabManager.tabs[tabIndex].schemaName = currentSchema
                 tabManager.tabs[tabIndex].pagination.reset()
                 AppState.shared.isCurrentTabEditable = !isView && tableName.isEmpty == false
                 toolbarState.isTableTab = true
@@ -98,6 +103,7 @@ extension MainContentCoordinator {
             // In-place navigation needs selectRedisDatabaseAndQuery to ensure the correct
             // database is SELECTed and session state is updated before querying.
             restoreColumnLayoutForTable(tableName)
+            restoreFiltersForTable(tableName)
             if navigationModel == .inPlace, let dbIndex = Int(currentDatabase) {
                 selectRedisDatabaseAndQuery(dbIndex)
             } else {
@@ -109,10 +115,14 @@ extension MainContentCoordinator {
         // In-place navigation: replace current tab content rather than
         // opening new native window tabs (e.g. Redis database switching).
         if navigationModel == .inPlace {
+            if let oldTab = tabManager.selectedTab, let oldTableName = oldTab.tableName {
+                filterStateManager.saveLastFilters(for: oldTableName)
+            }
             if tabManager.replaceTabContent(
                 tableName: tableName,
                 databaseType: connection.type,
-                databaseName: currentDatabase
+                databaseName: currentDatabase,
+                schemaName: currentSchema
             ) {
                 filterStateManager.clearAll()
                 if let tabIndex = tabManager.selectedTabIndex {
@@ -121,6 +131,7 @@ extension MainContentCoordinator {
                 AppState.shared.isTableTab = true
                 }
                 restoreColumnLayoutForTable(tableName)
+                restoreFiltersForTable(tableName)
                 if let dbIndex = Int(currentDatabase) {
                     selectRedisDatabaseAndQuery(dbIndex)
                 }
@@ -128,23 +139,27 @@ extension MainContentCoordinator {
             return
         }
 
-        // Preview tab mode: reuse or create a preview tab instead of a new native window
-        if AppSettingsManager.shared.tabs.enablePreviewTabs {
-            openPreviewTab(tableName, isView: isView, databaseName: currentDatabase, showStructure: showStructure)
-            return
-        }
-
-        // If current tab has unsaved changes, open in a new native tab instead of replacing
-        if changeManager.hasChanges {
+        // If current tab has unsaved changes, active filters, or sorting, open in a new native tab
+        let hasActiveWork = changeManager.hasChanges
+            || filterStateManager.hasAppliedFilters
+            || (tabManager.selectedTab?.sortState.isSorting ?? false)
+        if hasActiveWork {
             let payload = EditorTabPayload(
                 connectionId: connection.id,
                 tabType: .table,
                 tableName: tableName,
                 databaseName: currentDatabase,
+                schemaName: currentSchema,
                 isView: isView,
                 showStructure: showStructure
             )
             WindowOpener.shared.openNativeTab(payload)
+            return
+        }
+
+        // Preview tab mode: reuse or create a preview tab instead of a new native window
+        if AppSettingsManager.shared.tabs.enablePreviewTabs {
+            openPreviewTab(tableName, isView: isView, databaseName: currentDatabase, schemaName: currentSchema, showStructure: showStructure)
             return
         }
 
@@ -154,6 +169,7 @@ extension MainContentCoordinator {
             tabType: .table,
             tableName: tableName,
             databaseName: currentDatabase,
+            schemaName: currentSchema,
             isView: isView,
             showStructure: showStructure
         )
@@ -164,7 +180,8 @@ extension MainContentCoordinator {
 
     func openPreviewTab(
         _ tableName: String, isView: Bool = false,
-        databaseName: String = "", showStructure: Bool = false
+        databaseName: String = "", schemaName: String? = nil,
+        showStructure: Bool = false
     ) {
         // Check if a preview window already exists for this connection
         if let preview = WindowLifecycleMonitor.shared.previewWindow(for: connectionId) {
@@ -176,11 +193,16 @@ extension MainContentCoordinator {
                     preview.window.makeKeyAndOrderFront(nil)
                     return
                 }
+                if let oldTab = previewCoordinator.tabManager.selectedTab,
+                   let oldTableName = oldTab.tableName {
+                    previewCoordinator.filterStateManager.saveLastFilters(for: oldTableName)
+                }
                 previewCoordinator.tabManager.replaceTabContent(
                     tableName: tableName,
                     databaseType: connection.type,
                     isView: isView,
                     databaseName: databaseName,
+                    schemaName: schemaName,
                     isPreview: true
                 )
                 previewCoordinator.filterStateManager.clearAll()
@@ -193,22 +215,62 @@ extension MainContentCoordinator {
                 }
                 preview.window.makeKeyAndOrderFront(nil)
                 previewCoordinator.restoreColumnLayoutForTable(tableName)
+                previewCoordinator.restoreFiltersForTable(tableName)
                 previewCoordinator.runQuery()
                 return
             }
         }
 
-        // No preview window exists but current tab is already a preview: replace in-place
-        if let selectedTab = tabManager.selectedTab, selectedTab.isPreview {
+        // No preview window exists but current tab can be reused: replace in-place.
+        // This covers: preview tabs, non-preview table tabs with no active work,
+        // and empty/default query tabs (no user-entered content).
+        let isReusableTab: Bool = {
+            guard let tab = tabManager.selectedTab else { return false }
+            if tab.isPreview { return true }
+            // Table tab with no active work
+            if tab.tabType == .table && !changeManager.hasChanges
+                && !filterStateManager.hasAppliedFilters && !tab.sortState.isSorting {
+                return true
+            }
+            // Empty/default query tab (no user content, no results, never executed)
+            if tab.tabType == .query && tab.lastExecutedAt == nil
+                && tab.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return true
+            }
+            return false
+        }()
+        if let selectedTab = tabManager.selectedTab, isReusableTab {
             // Skip if already showing this table
             if selectedTab.tableName == tableName, selectedTab.databaseName == databaseName {
                 return
+            }
+            // If preview tab has active work, promote it and open new tab instead
+            let previewHasWork = changeManager.hasChanges
+                || filterStateManager.hasAppliedFilters
+                || selectedTab.sortState.isSorting
+            if previewHasWork {
+                promotePreviewTab()
+                let payload = EditorTabPayload(
+                    connectionId: connection.id,
+                    tabType: .table,
+                    tableName: tableName,
+                    databaseName: databaseName,
+                    schemaName: schemaName,
+                    isView: isView,
+                    showStructure: showStructure
+                )
+                WindowOpener.shared.openNativeTab(payload)
+                return
+            }
+            if let oldTableName = selectedTab.tableName {
+                filterStateManager.saveLastFilters(for: oldTableName)
             }
             tabManager.replaceTabContent(
                 tableName: tableName,
                 databaseType: connection.type,
                 isView: isView,
                 databaseName: databaseName,
+                schemaName: schemaName,
                 isPreview: true
             )
             filterStateManager.clearAll()
@@ -220,6 +282,7 @@ extension MainContentCoordinator {
                 AppState.shared.isTableTab = true
             }
             restoreColumnLayoutForTable(tableName)
+            restoreFiltersForTable(tableName)
             runQuery()
             return
         }
@@ -230,6 +293,7 @@ extension MainContentCoordinator {
             tabType: .table,
             tableName: tableName,
             databaseName: databaseName,
+            schemaName: schemaName,
             isView: isView,
             showStructure: showStructure,
             isPreview: true
@@ -260,8 +324,9 @@ extension MainContentCoordinator {
     }
 
     private func currentSchemaName(fallback: String) -> String {
-        if let schemaDriver = DatabaseManager.shared.driver(for: connectionId) as? SchemaSwitchable {
-            return schemaDriver.escapedSchema
+        if let schemaDriver = DatabaseManager.shared.driver(for: connectionId) as? SchemaSwitchable,
+           let schema = schemaDriver.escapedSchema {
+            return schema
         }
         return fallback
     }
@@ -300,7 +365,11 @@ extension MainContentCoordinator {
     private func closeSiblingNativeWindows() {
         guard let keyWindow = NSApp.keyWindow else { return }
         let siblings = keyWindow.tabbedWindows ?? []
+        let ownWindows = Set(WindowLifecycleMonitor.shared.windows(for: connectionId).map { ObjectIdentifier($0) })
         for sibling in siblings where sibling !== keyWindow {
+            // Only close windows belonging to this connection to avoid
+            // destroying tabs from other connections when groupAllConnectionTabs is ON
+            guard ownWindows.contains(ObjectIdentifier(sibling)) else { continue }
             sibling.close()
         }
     }
@@ -343,6 +412,7 @@ extension MainContentCoordinator {
                     session.currentDatabase = database
                     session.currentSchema = nil
                 }
+                AppSettingsStorage.shared.saveLastSchema(nil, for: connectionId)
                 await DatabaseManager.shared.reconnectSession(connectionId)
             } else if pm.supportsSchemaSwitching(for: connection.type) {
                 // Redshift, Oracle: schema switching
@@ -379,7 +449,7 @@ extension MainContentCoordinator {
             AlertHelper.showErrorSheet(
                 title: String(localized: "Database Switch Failed"),
                 message: error.localizedDescription,
-                window: NSApplication.shared.keyWindow
+                window: contentWindow
             )
         }
     }
@@ -412,6 +482,7 @@ extension MainContentCoordinator {
             DatabaseManager.shared.updateSession(connectionId) { session in
                 session.currentSchema = schema
             }
+            AppSettingsStorage.shared.saveLastSchema(schema, for: connectionId)
 
             await loadSchema()
 
@@ -425,7 +496,7 @@ extension MainContentCoordinator {
             AlertHelper.showErrorSheet(
                 title: String(localized: "Schema Switch Failed"),
                 message: error.localizedDescription,
-                window: NSApplication.shared.keyWindow
+                window: contentWindow
             )
         }
     }

@@ -196,6 +196,7 @@ private final class FreeTDSConnection: @unchecked Sendable {
         _ = dbsetlname(login, user, Int32(DBSETUSER))
         _ = dbsetlname(login, password, Int32(DBSETPWD))
         _ = dbsetlname(login, "TablePro", Int32(DBSETAPP))
+        _ = dbsetlname(login, "UTF-8", Int32(DBSETCHARSET))
         _ = dbsetlversion(login, UInt8(DBVERSION_74))
 
         freetdsLastError = ""
@@ -371,10 +372,12 @@ private final class FreeTDSConnection: @unchecked Sendable {
             return String(bytes: UnsafeBufferPointer(start: ptr, count: Int(srcLen)), encoding: .utf8)
                 ?? String(bytes: UnsafeBufferPointer(start: ptr, count: Int(srcLen)), encoding: .isoLatin1)
         case Int32(SYBNCHAR), Int32(SYBNVARCHAR), Int32(SYBNTEXT):
-            let data = Data(bytes: ptr, count: Int(srcLen))
-            return String(data: data, encoding: .utf16LittleEndian)
+            // With client charset UTF-8, FreeTDS converts UTF-16 wire data to UTF-8
+            // but may still report the original nvarchar type token
+            return String(bytes: UnsafeBufferPointer(start: ptr, count: Int(srcLen)), encoding: .utf8)
+                ?? String(data: Data(bytes: ptr, count: Int(srcLen)), encoding: .utf16LittleEndian)
         default:
-            let bufSize: DBINT = 64
+            let bufSize: DBINT = 256
             var buf = [BYTE](repeating: 0, count: Int(bufSize))
             let converted = buf.withUnsafeMutableBufferPointer { bufPtr in
                 dbconvert(proc, srcType, ptr, srcLen, Int32(SYBCHAR), bufPtr.baseAddress, bufSize)
@@ -1237,67 +1240,6 @@ final class MSSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         return query
     }
 
-    func buildQuickSearchQuery(
-        table: String,
-        searchText: String,
-        columns: [String],
-        sortColumns: [(columnIndex: Int, ascending: Bool)],
-        limit: Int,
-        offset: Int
-    ) -> String? {
-        let quotedTable = mssqlQuoteIdentifier(table)
-        var query = "SELECT * FROM \(quotedTable)"
-        let escapedSearch = mssqlEscapeForLike(searchText)
-        let conditions = columns.map { column -> String in
-            let quotedColumn = mssqlQuoteIdentifier(column)
-            return "CAST(\(quotedColumn) AS NVARCHAR(MAX)) LIKE '%\(escapedSearch)%' ESCAPE '\\'"
-        }
-        if !conditions.isEmpty {
-            query += " WHERE (" + conditions.joined(separator: " OR ") + ")"
-        }
-        let orderBy = mssqlBuildOrderByClause(sortColumns: sortColumns, columns: columns)
-            ?? "ORDER BY (SELECT NULL)"
-        query += " \(orderBy) OFFSET \(offset) ROWS FETCH NEXT \(limit) ROWS ONLY"
-        return query
-    }
-
-    func buildCombinedQuery(
-        table: String,
-        filters: [(column: String, op: String, value: String)],
-        logicMode: String,
-        searchText: String,
-        searchColumns: [String],
-        sortColumns: [(columnIndex: Int, ascending: Bool)],
-        columns: [String],
-        limit: Int,
-        offset: Int
-    ) -> String? {
-        let quotedTable = mssqlQuoteIdentifier(table)
-        var query = "SELECT * FROM \(quotedTable)"
-        let filterConditions = mssqlBuildWhereClause(filters: filters, logicMode: logicMode)
-        let escapedSearch = mssqlEscapeForLike(searchText)
-        let searchConditions = searchColumns.map { column -> String in
-            let quotedColumn = mssqlQuoteIdentifier(column)
-            return "CAST(\(quotedColumn) AS NVARCHAR(MAX)) LIKE '%\(escapedSearch)%' ESCAPE '\\'"
-        }
-        let searchClause = searchConditions.isEmpty
-            ? "" : "(" + searchConditions.joined(separator: " OR ") + ")"
-        var whereParts: [String] = []
-        if !filterConditions.isEmpty {
-            whereParts.append("(\(filterConditions))")
-        }
-        if !searchClause.isEmpty {
-            whereParts.append(searchClause)
-        }
-        if !whereParts.isEmpty {
-            query += " WHERE " + whereParts.joined(separator: " AND ")
-        }
-        let orderBy = mssqlBuildOrderByClause(sortColumns: sortColumns, columns: columns)
-            ?? "ORDER BY (SELECT NULL)"
-        query += " \(orderBy) OFFSET \(offset) ROWS FETCH NEXT \(limit) ROWS ONLY"
-        return query
-    }
-
     // MARK: - Query Building Helpers
 
     private func mssqlQuoteIdentifier(_ identifier: String) -> String {
@@ -1487,6 +1429,94 @@ final class MSSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             i -= 1
         }
         return false
+    }
+
+    // MARK: - Create Table DDL
+
+    func generateCreateTableSQL(definition: PluginCreateTableDefinition) -> String? {
+        guard !definition.columns.isEmpty else { return nil }
+
+        let schema = _currentSchema
+        let qualifiedTable = "\(quoteIdentifier(schema)).\(quoteIdentifier(definition.tableName))"
+        let pkColumns = definition.columns.filter { $0.isPrimaryKey }
+        let inlinePK = pkColumns.count == 1
+        var parts: [String] = definition.columns.map { mssqlColumnDefinition($0, inlinePK: inlinePK) }
+
+        if pkColumns.count > 1 {
+            let pkCols = pkColumns.map { quoteIdentifier($0.name) }.joined(separator: ", ")
+            parts.append("PRIMARY KEY (\(pkCols))")
+        }
+
+        for fk in definition.foreignKeys {
+            parts.append(mssqlForeignKeyDefinition(fk))
+        }
+
+        var sql = "CREATE TABLE \(qualifiedTable) (\n  " +
+            parts.joined(separator: ",\n  ") +
+            "\n);"
+
+        var indexStatements: [String] = []
+        for index in definition.indexes {
+            indexStatements.append(mssqlIndexDefinition(index, qualifiedTable: qualifiedTable))
+        }
+        if !indexStatements.isEmpty {
+            sql += "\n\n" + indexStatements.joined(separator: ";\n") + ";"
+        }
+
+        return sql
+    }
+
+    private func mssqlColumnDefinition(_ col: PluginColumnDefinition, inlinePK: Bool) -> String {
+        var def = "\(quoteIdentifier(col.name)) \(col.dataType)"
+        if col.autoIncrement {
+            def += " IDENTITY(1,1)"
+        }
+        if col.isNullable {
+            def += " NULL"
+        } else {
+            def += " NOT NULL"
+        }
+        if let defaultValue = col.defaultValue {
+            def += " DEFAULT \(mssqlDefaultValue(defaultValue))"
+        }
+        if inlinePK && col.isPrimaryKey {
+            def += " PRIMARY KEY"
+        }
+        return def
+    }
+
+    private func mssqlDefaultValue(_ value: String) -> String {
+        let upper = value.uppercased()
+        if upper == "NULL" || upper == "GETDATE()" || upper == "NEWID()" || upper == "GETUTCDATE()"
+            || value.hasPrefix("'") || value.hasPrefix("(") || Int64(value) != nil || Double(value) != nil {
+            return value
+        }
+        return "'\(escapeStringLiteral(value))'"
+    }
+
+    private func mssqlIndexDefinition(_ index: PluginIndexDefinition, qualifiedTable: String) -> String {
+        let cols = index.columns.map { quoteIdentifier($0) }.joined(separator: ", ")
+        let unique = index.isUnique ? "UNIQUE " : ""
+        var def = "CREATE \(unique)INDEX \(quoteIdentifier(index.name)) ON \(qualifiedTable) (\(cols))"
+        if let type = index.indexType?.uppercased(), type == "CLUSTERED" {
+            def = "CREATE \(unique)CLUSTERED INDEX \(quoteIdentifier(index.name)) ON \(qualifiedTable) (\(cols))"
+        } else if let type = index.indexType?.uppercased(), type == "NONCLUSTERED" {
+            def = "CREATE \(unique)NONCLUSTERED INDEX \(quoteIdentifier(index.name)) ON \(qualifiedTable) (\(cols))"
+        }
+        return def
+    }
+
+    private func mssqlForeignKeyDefinition(_ fk: PluginForeignKeyDefinition) -> String {
+        let cols = fk.columns.map { quoteIdentifier($0) }.joined(separator: ", ")
+        let refCols = fk.referencedColumns.map { quoteIdentifier($0) }.joined(separator: ", ")
+        var def = "CONSTRAINT \(quoteIdentifier(fk.name)) FOREIGN KEY (\(cols)) REFERENCES \(quoteIdentifier(fk.referencedTable)) (\(refCols))"
+        if fk.onDelete != "NO ACTION" {
+            def += " ON DELETE \(fk.onDelete)"
+        }
+        if fk.onUpdate != "NO ACTION" {
+            def += " ON UPDATE \(fk.onUpdate)"
+        }
+        return def
     }
 
     private func stripMSSQLOffsetFetch(from query: String) -> String {

@@ -9,11 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Option to group all connection tabs in one window instead of separate windows per connection
+
+## [0.27.1] - 2026-04-01
+
+### Fixed
+
+- Table queries incorrectly prefixed with connection username as schema name on non-schema databases (MySQL, MariaDB, ClickHouse, Redis, etc.), causing "Table 'username.table' doesn't exist" errors when opening a second table tab
+
+## [0.27.0] - 2026-03-31
+
+### Added
+
+- Option to prompt for database password on every connection instead of saving to Keychain
+- Autocompletion for filter fields: column names and SQL keywords suggested as you type (Raw SQL and Value fields)
+- Multi-line support for Raw SQL filter field (Option+Enter for newline)
+- Visual Create Table UI with multi-database support (sidebar → "Create New Table...")
+- Auto-fit column width: double-click column divider or right-click → "Size to Fit"
+- Collapsible results panel (`Cmd+Opt+R`), multiple result tabs for multi-statement queries, result pinning
+- Inline error banner for query errors
+- JSON syntax highlighting and brace matching in Details sidebar and JSON editor popover
+- Database-aware SQL functions in field menu (MySQL, PostgreSQL, SQLite, SQL Server, ClickHouse)
+
+### Changed
+
+- Replace GCD dispatch patterns with Swift structured concurrency
+- Refactor Details sidebar into modular field editor architecture with extracted editor components
+
+### Fixed
+
+- PostgreSQL: Schema name lost after app restart, causing "relation does not exist" errors for non-public schemas
+- Error dialog OK button not dismissing when a SwiftUI sheet is active, making the app unusable
+- SQL Server: Unicode characters (Thai, CJK, etc.) in nvarchar/nchar/ntext columns displaying as question marks
+- Globe+F (fn+F) fullscreen shortcut not working in SwiftUI lifecycle app
+
+## [0.26.0] - 2026-03-29
+
+### Added
+
 - Global toggle to disable all AI features (Settings > AI)
 - Drag to reorder columns in the Structure tab (MySQL/MariaDB)
 - Nested hierarchical groups for connection list (up to 3 levels deep)
 - Confirmation dialogs for deep link queries, connection imports, and pre-connect scripts
 - JSON fields in Row Details sidebar now display in a scrollable monospaced text area
+- Open, save, and save-as for SQL files with native macOS title bar integration (#475)
+- BigQuery plugin support (Google BigQuery analytics via REST API)
+
+### Changed
+
+- Removed query history sync from iCloud Sync (connections, groups, settings, and SSH profiles still sync)
 
 ### Fixed
 
@@ -1084,7 +1128,10 @@ TablePro is a native macOS database client built with SwiftUI and AppKit, design
     - Custom SQL query templates
     - Performance optimized for large datasets
 
-[Unreleased]: https://github.com/TableProApp/TablePro/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/TableProApp/TablePro/compare/v0.27.1...HEAD
+[0.27.1]: https://github.com/TableProApp/TablePro/compare/v0.27.0...v0.27.1
+[0.27.0]: https://github.com/TableProApp/TablePro/compare/v0.26.0...v0.27.0
+[0.26.0]: https://github.com/TableProApp/TablePro/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/TableProApp/TablePro/compare/v0.24.2...v0.25.0
 [0.24.2]: https://github.com/TableProApp/TablePro/compare/v0.24.1...v0.24.2
 [0.24.1]: https://github.com/TableProApp/TablePro/compare/v0.24.0...v0.24.1

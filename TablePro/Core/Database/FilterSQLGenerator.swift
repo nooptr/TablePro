@@ -38,30 +38,6 @@ struct FilterSQLGenerator {
         return conditions.joined(separator: separator)
     }
 
-    /// Generate WHERE clause for quick search across multiple columns
-    func generateQuickSearchWhereClause(searchText: String, columns: [String]) -> String {
-        let conditions = generateQuickSearchConditions(searchText: searchText, columns: columns)
-        guard !conditions.isEmpty else { return "" }
-        return "WHERE (\(conditions))"
-    }
-
-    /// Generate OR-joined LIKE conditions for quick search (without WHERE keyword)
-    func generateQuickSearchConditions(searchText: String, columns: [String]) -> String {
-        guard !searchText.isEmpty, !columns.isEmpty else { return "" }
-        let escapedValue = escapeLikeWildcards(searchText)
-        let pattern = "%\(escapedValue)%"
-        let quotedPattern = escapeSQLQuote(pattern)
-        let escape = likeEscapeClause
-        // CAST to TEXT for databases like PostgreSQL where LIKE on non-text columns fails
-        let needsCast = dialect.regexSyntax == .tilde
-        let conditions = columns.map { column in
-            let quoted = quoteIdentifierFn(column)
-            let target = needsCast ? "CAST(\(quoted) AS TEXT)" : quoted
-            return "\(target) LIKE '\(quotedPattern)'\(escape)"
-        }
-        return conditions.joined(separator: " OR ")
-    }
-
     /// Generate a single filter condition
     func generateCondition(from filter: TableFilter) -> String? {
         guard filter.isValid else { return nil }
@@ -278,6 +254,7 @@ extension FilterSQLGenerator {
     func generatePreviewSQL(
         tableName: String,
         filters: [TableFilter],
+        logicMode: FilterLogicMode = .and,
         limit: Int = 1_000,
         pluginDriver: (any PluginDatabaseDriver)? = nil
     ) -> String {
@@ -288,7 +265,8 @@ extension FilterSQLGenerator {
                 .map { ($0.columnName, $0.filterOperator.rawValue, $0.value) }
             if let result = pluginDriver.buildFilteredQuery(
                 table: tableName, filters: filterTuples,
-                logicMode: "and", sortColumns: [], columns: [],
+                logicMode: logicMode == .and ? "and" : "or",
+                sortColumns: [], columns: [],
                 limit: limit, offset: 0
             ) {
                 return result
@@ -298,7 +276,7 @@ extension FilterSQLGenerator {
         let quotedTable = quoteIdentifierFn(tableName)
         var sql = "SELECT * FROM \(quotedTable)"
 
-        let whereClause = generateWhereClause(from: filters)
+        let whereClause = generateWhereClause(from: filters, logicMode: logicMode)
         if !whereClause.isEmpty {
             sql += "\n\(whereClause)"
         }

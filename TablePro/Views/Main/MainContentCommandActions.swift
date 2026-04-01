@@ -270,7 +270,8 @@ final class MainContentCommandActions {
         let hasPendingTableOps = !pendingTruncates.wrappedValue.isEmpty
             || !pendingDeletes.wrappedValue.isEmpty
         let hasSidebarEdits = rightPanelState.editState.hasEdits
-        return hasEditedCells || hasPendingTableOps || hasSidebarEdits
+        let hasFileDirty = coordinator?.tabManager.selectedTab?.isFileDirty ?? false
+        return hasEditedCells || hasPendingTableOps || hasSidebarEdits || hasFileDirty
     }
 
     // MARK: - Editor Query Loading (Group A — Called Directly)
@@ -375,6 +376,24 @@ final class MainContentCommandActions {
         }
     }
 
+    private func saveFileToSourceURL() {
+        guard let tab = coordinator?.tabManager.selectedTab,
+              let url = tab.sourceFileURL else { return }
+        let content = tab.query
+        Task { @MainActor in
+            do {
+                try await SQLFileService.writeFile(content: content, to: url)
+                if let index = coordinator?.tabManager.tabs.firstIndex(where: { $0.id == tab.id }) {
+                    coordinator?.tabManager.tabs[index].savedFileContent = content
+                }
+            } catch {
+                // File may have been deleted or become inaccessible
+                Self.logger.error("Failed to save file: \(error.localizedDescription)")
+                saveFileAs()
+            }
+        }
+    }
+
     private func discardAndClose() {
         coordinator?.changeManager.clearChangesAndUndoHistory()
         pendingTruncates.wrappedValue.removeAll()
@@ -394,6 +413,10 @@ final class MainContentCommandActions {
 
     func createView() {
         coordinator?.createView()
+    }
+
+    func createNewTable() {
+        coordinator?.createNewTable()
     }
 
     // MARK: - Tab Navigation (Group A — Called Directly)
@@ -441,6 +464,44 @@ final class MainContentCommandActions {
             // Save sidebar-only edits (edits made directly in the right panel)
             rightPanelState.onSave?()
         }
+        // File save: write query back to source file
+        else if let tab = coordinator?.tabManager.selectedTab,
+                tab.sourceFileURL != nil, tab.isFileDirty {
+            saveFileToSourceURL()
+        }
+        // Save As: untitled query tab with content
+        else if let tab = coordinator?.tabManager.selectedTab,
+                tab.tabType == .query, tab.sourceFileURL == nil,
+                !tab.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            saveFileAs()
+        }
+    }
+
+    func saveFileAs() {
+        guard let tab = coordinator?.tabManager.selectedTab,
+              tab.tabType == .query else { return }
+        let content = tab.query
+        let suggestedName = tab.sourceFileURL?.lastPathComponent ?? "\(tab.title).sql"
+        Task { @MainActor in
+            guard let url = await SQLFileService.showSavePanel(suggestedName: suggestedName) else { return }
+            do {
+                try await SQLFileService.writeFile(content: content, to: url)
+                if let index = coordinator?.tabManager.tabs.firstIndex(where: { $0.id == tab.id }) {
+                    coordinator?.tabManager.tabs[index].sourceFileURL = url
+                    coordinator?.tabManager.tabs[index].savedFileContent = content
+                    coordinator?.tabManager.tabs[index].title = url.deletingPathExtension().lastPathComponent
+                }
+            } catch {
+                Self.logger.error("Failed to save file: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func openSQLFile() {
+        Task { @MainActor in
+            guard let urls = await SQLFileService.showOpenPanel() else { return }
+            NotificationCenter.default.post(name: .openSQLFiles, object: urls)
+        }
     }
 
     func explainQuery() {
@@ -475,6 +536,39 @@ final class MainContentCommandActions {
 
     func toggleRightSidebar() {
         rightPanelState.isPresented.toggle()
+    }
+
+    func toggleResults() {
+        guard let coordinator, let tabIndex = coordinator.tabManager.selectedTabIndex else { return }
+        coordinator.tabManager.tabs[tabIndex].isResultsCollapsed.toggle()
+        coordinator.toolbarState.isResultsCollapsed = coordinator.tabManager.tabs[tabIndex].isResultsCollapsed
+    }
+
+    func previousResultTab() {
+        guard let coordinator, let tabIndex = coordinator.tabManager.selectedTabIndex else { return }
+        let tab = coordinator.tabManager.tabs[tabIndex]
+        guard tab.resultSets.count > 1,
+              let currentId = tab.activeResultSetId ?? tab.resultSets.last?.id,
+              let currentIndex = tab.resultSets.firstIndex(where: { $0.id == currentId }),
+              currentIndex > 0 else { return }
+        coordinator.tabManager.tabs[tabIndex].activeResultSetId = tab.resultSets[currentIndex - 1].id
+    }
+
+    func nextResultTab() {
+        guard let coordinator, let tabIndex = coordinator.tabManager.selectedTabIndex else { return }
+        let tab = coordinator.tabManager.tabs[tabIndex]
+        guard tab.resultSets.count > 1,
+              let currentId = tab.activeResultSetId ?? tab.resultSets.last?.id,
+              let currentIndex = tab.resultSets.firstIndex(where: { $0.id == currentId }),
+              currentIndex < tab.resultSets.count - 1 else { return }
+        coordinator.tabManager.tabs[tabIndex].activeResultSetId = tab.resultSets[currentIndex + 1].id
+    }
+
+    func closeResultTab() {
+        guard let coordinator else { return }
+        let tab = coordinator.tabManager.selectedTab
+        guard let activeId = tab?.activeResultSetId ?? tab?.resultSets.last?.id else { return }
+        coordinator.closeResultSet(id: activeId)
     }
 
     // MARK: - Database Operations (Group A — Called Directly)

@@ -50,16 +50,20 @@ final class ConnectionStorage {
 
     /// Save all connections
     func saveConnections(_ connections: [DatabaseConnection]) {
-        cachedConnections = connections
-
         let storedConnections = connections.map { StoredConnection(from: $0) }
 
         do {
             let data = try encoder.encode(storedConnections)
             defaults.set(data, forKey: connectionsKey)
+            cachedConnections = nil
         } catch {
             Self.logger.error("Failed to save connections: \(error)")
         }
+    }
+
+    /// Invalidate the in-memory cache so the next load reads fresh from UserDefaults.
+    func invalidateCache() {
+        cachedConnections = nil
     }
 
     /// Add a new connection
@@ -159,8 +163,8 @@ final class ConnectionStorage {
         saveConnections(connections)
         SyncChangeTracker.shared.markDirty(.connection, id: duplicate.id.uuidString)
 
-        // Copy all passwords from source to duplicate
-        if let password = loadPassword(for: connection.id) {
+        // Copy all passwords from source to duplicate (skip DB password in prompt mode)
+        if !connection.promptForPassword, let password = loadPassword(for: connection.id) {
             savePassword(password, for: newId)
         }
         if let sshPassword = loadSSHPassword(for: connection.id) {

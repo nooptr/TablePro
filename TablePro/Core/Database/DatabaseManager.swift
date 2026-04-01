@@ -133,10 +133,32 @@ final class DatabaseManager {
             }
         }
 
+        // Resolve password override for prompt-for-password connections
+        var passwordOverride: String?
+        if connection.promptForPassword {
+            if let cached = activeSessions[connection.id]?.cachedPassword {
+                passwordOverride = cached
+            } else {
+                let isApiOnly = PluginManager.shared.connectionMode(for: connection.type) == .apiOnly
+                guard let prompted = PasswordPromptHelper.prompt(
+                    connectionName: connection.name,
+                    isAPIToken: isApiOnly
+                ) else {
+                    removeSessionEntry(for: connection.id)
+                    currentSessionId = nil
+                    throw CancellationError()
+                }
+                passwordOverride = prompted
+            }
+        }
+
         // Create appropriate driver with effective connection
         let driver: DatabaseDriver
         do {
-            driver = try DatabaseDriverFactory.createDriver(for: effectiveConnection)
+            driver = try DatabaseDriverFactory.createDriver(
+                for: effectiveConnection,
+                passwordOverride: passwordOverride
+            )
         } catch {
             // Close tunnel if SSH was established
             if connection.sshConfig.enabled {
@@ -170,50 +192,34 @@ final class DatabaseManager {
             // Initialize schema for drivers that support schema switching
             if let schemaDriver = driver as? SchemaSwitchable {
                 activeSessions[connection.id]?.currentSchema = schemaDriver.currentSchema
+
+                // Restore user's last schema if different from default
+                if let savedSchema = AppSettingsStorage.shared.loadLastSchema(for: connection.id),
+                   savedSchema != schemaDriver.currentSchema {
+                    do {
+                        try await schemaDriver.switchSchema(to: savedSchema)
+                        activeSessions[connection.id]?.currentSchema = savedSchema
+                    } catch {
+                        Self.logger.warning(
+                            "Failed to restore saved schema '\(savedSchema, privacy: .public)' for \(connection.id): \(error.localizedDescription, privacy: .public)"
+                        )
+                    }
+                }
             }
 
             // Run post-connect actions declared by the plugin
-            let postConnectActions = PluginMetadataRegistry.shared.snapshot(
-                forTypeId: connection.type.pluginTypeId
-            )?.postConnectActions ?? []
-
-            for action in postConnectActions {
-                switch action {
-                case .selectDatabaseFromLastSession:
-                    // Restore saved database (e.g. MSSQL) only when no explicit database is configured
-                    if resolvedConnection.database.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                       let adapter = driver as? PluginDriverAdapter,
-                       let savedDb = AppSettingsStorage.shared.loadLastDatabase(for: connection.id) {
-                        try? await adapter.switchDatabase(to: savedDb)
-                        activeSessions[connection.id]?.currentDatabase = savedDb
-                    }
-                case .selectDatabaseFromConnectionField(let fieldId):
-                    // Select database from a connection field (e.g. Redis database index).
-                    // Check additionalFields first, then legacy dedicated properties, then
-                    // fall back to parsing the main database field.
-                    let initialDb: Int
-                    if let fieldValue = resolvedConnection.additionalFields[fieldId], let parsed = Int(fieldValue) {
-                        initialDb = parsed
-                    } else if fieldId == "redisDatabase", let legacy = resolvedConnection.redisDatabase {
-                        initialDb = legacy
-                    } else if let fallback = Int(resolvedConnection.database) {
-                        initialDb = fallback
-                    } else {
-                        initialDb = 0
-                    }
-                    if initialDb != 0 {
-                        try? await (driver as? PluginDriverAdapter)?.switchDatabase(to: String(initialDb))
-                    }
-                    activeSessions[connection.id]?.currentDatabase = String(initialDb)
-                }
-            }
+            await executePostConnectActions(
+                for: connection, resolvedConnection: resolvedConnection, driver: driver
+            )
 
             // Batch all session mutations into a single write to fire objectWillChange once
             if var session = activeSessions[connection.id] {
                 session.driver = driver
                 session.status = driver.status
                 session.effectiveConnection = effectiveConnection
-
+                if let passwordOverride {
+                    session.cachedPassword = passwordOverride
+                }
                 setSession(session, for: connection.id)
             }
 
@@ -257,6 +263,47 @@ final class DatabaseManager {
             }
 
             throw error
+        }
+    }
+
+    private func executePostConnectActions(
+        for connection: DatabaseConnection,
+        resolvedConnection: DatabaseConnection,
+        driver: DatabaseDriver
+    ) async {
+        let postConnectActions = PluginMetadataRegistry.shared.snapshot(
+            forTypeId: connection.type.pluginTypeId
+        )?.postConnectActions ?? []
+
+        for action in postConnectActions {
+            switch action {
+            case .selectDatabaseFromLastSession:
+                if resolvedConnection.database.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                   let adapter = driver as? PluginDriverAdapter,
+                   let savedDb = AppSettingsStorage.shared.loadLastDatabase(for: connection.id) {
+                    do {
+                        try await adapter.switchDatabase(to: savedDb)
+                        activeSessions[connection.id]?.currentDatabase = savedDb
+                    } catch {
+                        Self.logger.warning("Failed to restore saved database '\(savedDb, privacy: .public)' for \(connection.id): \(error.localizedDescription, privacy: .public)")
+                    }
+                }
+            case .selectDatabaseFromConnectionField(let fieldId):
+                let initialDb: Int
+                if let fieldValue = resolvedConnection.additionalFields[fieldId], let parsed = Int(fieldValue) {
+                    initialDb = parsed
+                } else if fieldId == "redisDatabase", let legacy = resolvedConnection.redisDatabase {
+                    initialDb = legacy
+                } else if let fallback = Int(resolvedConnection.database) {
+                    initialDb = fallback
+                } else {
+                    initialDb = 0
+                }
+                if initialDb != 0 {
+                    try? await (driver as? PluginDriverAdapter)?.switchDatabase(to: String(initialDb))
+                }
+                activeSessions[connection.id]?.currentDatabase = String(initialDb)
+            }
         }
     }
 
@@ -414,9 +461,11 @@ final class DatabaseManager {
     }
 
     /// Test a connection without keeping it open
-    func testConnection(_ connection: DatabaseConnection, sshPassword: String? = nil) async throws
-        -> Bool
-    {
+    func testConnection(
+        _ connection: DatabaseConnection,
+        sshPassword: String? = nil,
+        passwordOverride: String? = nil
+    ) async throws -> Bool {
         // Build effective connection (creates SSH tunnel if needed)
         let testConnection = try await buildEffectiveConnection(
             for: connection,
@@ -425,7 +474,10 @@ final class DatabaseManager {
 
         let result: Bool
         do {
-            let driver = try DatabaseDriverFactory.createDriver(for: testConnection)
+            let driver = try DatabaseDriverFactory.createDriver(
+                for: testConnection,
+                passwordOverride: passwordOverride
+            )
             result = try await driver.testConnection()
         } catch {
             if connection.sshConfig.enabled {
@@ -639,7 +691,10 @@ final class DatabaseManager {
 
         // Use effective connection (tunneled) if available, otherwise original
         let connectionForDriver = session.effectiveConnection ?? session.connection
-        let driver = try DatabaseDriverFactory.createDriver(for: connectionForDriver)
+        let driver = try DatabaseDriverFactory.createDriver(
+            for: connectionForDriver,
+            passwordOverride: session.cachedPassword
+        )
         try await driver.connect()
 
         // Apply timeout
@@ -708,8 +763,25 @@ final class DatabaseManager {
             // Recreate SSH tunnel if needed and build effective connection
             let effectiveConnection = try await buildEffectiveConnection(for: session.connection)
 
+            // Resolve password for prompt-for-password connections
+            var passwordOverride = activeSessions[sessionId]?.cachedPassword
+            if session.connection.promptForPassword && passwordOverride == nil {
+                let isApiOnly = PluginManager.shared.connectionMode(for: session.connection.type) == .apiOnly
+                guard let prompted = PasswordPromptHelper.prompt(
+                    connectionName: session.connection.name,
+                    isAPIToken: isApiOnly
+                ) else {
+                    updateSession(sessionId) { $0.status = .disconnected }
+                    return
+                }
+                passwordOverride = prompted
+            }
+
             // Create new driver and connect
-            let driver = try DatabaseDriverFactory.createDriver(for: effectiveConnection)
+            let driver = try DatabaseDriverFactory.createDriver(
+                for: effectiveConnection,
+                passwordOverride: passwordOverride
+            )
             try await driver.connect()
 
             // Apply timeout
@@ -746,6 +818,9 @@ final class DatabaseManager {
                 session.driver = driver
                 session.status = .connected
                 session.effectiveConnection = effectiveConnection
+                if let passwordOverride {
+                    session.cachedPassword = passwordOverride
+                }
             }
 
             // Restart health monitoring if the plugin supports it
@@ -941,8 +1016,9 @@ final class DatabaseManager {
         // Query the actual constraint name from pg_constraint
         let escapedTable = tableName.replacingOccurrences(of: "'", with: "''")
         let schema: String
-        if let schemaDriver = driver as? SchemaSwitchable {
-            schema = schemaDriver.escapedSchema
+        if let schemaDriver = driver as? SchemaSwitchable,
+           let escaped = schemaDriver.escapedSchema {
+            schema = escaped
         } else {
             schema = "public"
         }

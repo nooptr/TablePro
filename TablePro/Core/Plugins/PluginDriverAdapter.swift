@@ -47,8 +47,15 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
         }
         return pluginDriver
     }
-    var currentSchema: String { pluginDriver.currentSchema ?? connection.username }
-    var escapedSchema: String { pluginDriver.escapeStringLiteral(currentSchema) }
+    var currentSchema: String? {
+        guard pluginDriver.supportsSchemas else { return nil }
+        return pluginDriver.currentSchema
+    }
+
+    var escapedSchema: String? {
+        guard let schema = currentSchema else { return nil }
+        return pluginDriver.escapeStringLiteral(schema)
+    }
 
     private static let logger = Logger(subsystem: "com.TablePro", category: "PluginDriverAdapter")
 
@@ -336,6 +343,10 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
 
     func generateMoveColumnSQL(table: String, column: PluginColumnDefinition, afterColumn: String?) -> String? {
         pluginDriver.generateMoveColumnSQL(table: table, column: column, afterColumn: afterColumn)
+    }
+
+    func generateCreateTableSQL(definition: PluginCreateTableDefinition) -> String? {
+        pluginDriver.generateCreateTableSQL(definition: definition)
     }
 
     // MARK: - Table Operations

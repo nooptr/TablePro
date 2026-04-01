@@ -26,6 +26,9 @@ extension MainContentCoordinator {
                 tabManager.tabs[oldIndex].pendingChanges = changeManager.saveState()
             }
             tabManager.tabs[oldIndex].filterState = filterStateManager.saveToTabState()
+            if let tableName = tabManager.tabs[oldIndex].tableName {
+                filterStateManager.saveLastFilters(for: tableName)
+            }
             saveColumnVisibilityToTab()
             saveColumnLayoutForTable()
         }
@@ -48,6 +51,7 @@ extension MainContentCoordinator {
             selectedRowIndices = newTab.selectedRowIndices
             AppState.shared.isCurrentTabEditable = newTab.isEditable && !newTab.isView && newTab.tableName != nil
             toolbarState.isTableTab = newTab.tabType == .table
+            toolbarState.isResultsCollapsed = newTab.isResultsCollapsed
             AppState.shared.isTableTab = newTab.tabType == .table
 
             // Configure change manager without triggering reload yet — we'll fire a single
@@ -119,6 +123,7 @@ extension MainContentCoordinator {
         } else {
             AppState.shared.isCurrentTabEditable = false
             toolbarState.isTableTab = false
+            toolbarState.isResultsCollapsed = false
             AppState.shared.isTableTab = false
         }
     }

@@ -10,6 +10,48 @@ import Foundation
 import UniformTypeIdentifiers
 
 extension MainContentCoordinator {
+    // MARK: - Result Set Operations
+
+    func closeResultSet(id: UUID) {
+        guard let tabIdx = tabManager.selectedTabIndex else { return }
+        let rs = tabManager.tabs[tabIdx].resultSets.first { $0.id == id }
+        guard rs?.isPinned != true else { return }
+        tabManager.tabs[tabIdx].resultSets.removeAll { $0.id == id }
+        if tabManager.tabs[tabIdx].activeResultSetId == id {
+            tabManager.tabs[tabIdx].activeResultSetId = tabManager.tabs[tabIdx].resultSets.last?.id
+        }
+        if tabManager.tabs[tabIdx].resultSets.isEmpty {
+            tabManager.tabs[tabIdx].rowBuffer = RowBuffer()
+            tabManager.tabs[tabIdx].resultColumns = []
+            tabManager.tabs[tabIdx].columnTypes = []
+            tabManager.tabs[tabIdx].resultRows = []
+            tabManager.tabs[tabIdx].errorMessage = nil
+            tabManager.tabs[tabIdx].rowsAffected = 0
+            tabManager.tabs[tabIdx].executionTime = nil
+            tabManager.tabs[tabIdx].statusMessage = nil
+            tabManager.tabs[tabIdx].resultVersion += 1
+            tabManager.tabs[tabIdx].isResultsCollapsed = true
+            toolbarState.isResultsCollapsed = true
+        }
+    }
+
+    // MARK: - Table Operations
+
+    func createNewTable() {
+        guard !safeModeLevel.blocksAllWrites else { return }
+
+        if tabManager.tabs.isEmpty {
+            tabManager.addCreateTableTab(databaseName: connection.database)
+        } else {
+            let payload = EditorTabPayload(
+                connectionId: connection.id,
+                tabType: .createTable,
+                databaseName: connection.database
+            )
+            WindowOpener.shared.openNativeTab(payload)
+        }
+    }
+
     // MARK: - View Operations
 
     func createView() {

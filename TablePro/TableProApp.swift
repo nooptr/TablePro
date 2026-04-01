@@ -182,6 +182,12 @@ struct AppMenuCommands: Commands {
             .optionalKeyboardShortcut(shortcut(for: .openDatabase))
             .disabled(!appState.isConnected || !appState.supportsDatabaseSwitching)
 
+            Button(String(localized: "Open File...")) {
+                actions?.openSQLFile()
+            }
+            .optionalKeyboardShortcut(shortcut(for: .openFile))
+            .disabled(!appState.isConnected)
+
             Button("Switch Connection...") {
                 NotificationCenter.default.post(name: .openConnectionSwitcher, object: nil)
             }
@@ -201,6 +207,12 @@ struct AppMenuCommands: Commands {
             }
             .optionalKeyboardShortcut(shortcut(for: .saveChanges))
             .disabled(!appState.isConnected || appState.isReadOnly)
+
+            Button(String(localized: "Save As...")) {
+                actions?.saveFileAs()
+            }
+            .optionalKeyboardShortcut(shortcut(for: .saveAs))
+            .disabled(!appState.isConnected)
 
             Button {
                 actions?.previewSQL()
@@ -355,6 +367,44 @@ struct AppMenuCommands: Commands {
             }
             .optionalKeyboardShortcut(shortcut(for: .toggleHistory))
             .disabled(!appState.isConnected)
+
+            Divider()
+
+            Button("Toggle Results") {
+                actions?.toggleResults()
+            }
+            .optionalKeyboardShortcut(shortcut(for: .toggleResults))
+            .disabled(!appState.isConnected)
+
+            Button("Previous Result") {
+                actions?.previousResultTab()
+            }
+            .optionalKeyboardShortcut(shortcut(for: .previousResultTab))
+            .disabled(!appState.isConnected)
+
+            Button("Next Result") {
+                actions?.nextResultTab()
+            }
+            .optionalKeyboardShortcut(shortcut(for: .nextResultTab))
+            .disabled(!appState.isConnected)
+
+            Button("Close Result Tab") {
+                actions?.closeResultTab()
+            }
+            .optionalKeyboardShortcut(shortcut(for: .closeResultTab))
+            .disabled(!appState.isConnected)
+
+            Divider()
+
+            Button("Zoom In") {
+                ThemeEngine.shared.adjustEditorFontSize(by: 1)
+            }
+            .keyboardShortcut("=", modifiers: .command)
+
+            Button("Zoom Out") {
+                ThemeEngine.shared.adjustEditorFontSize(by: -1)
+            }
+            .keyboardShortcut("-", modifiers: .command)
         }
 
         // Tab navigation shortcuts — native macOS window tabs
@@ -540,6 +590,8 @@ struct CheckForUpdatesView: View {
 private struct OpenWindowHandler: View {
     @Environment(\.openWindow)
     private var openWindow
+    @Environment(\.openSettings)
+    private var openSettings
 
     var body: some View {
         Color.clear
@@ -557,6 +609,9 @@ private struct OpenWindowHandler: View {
                 } else if let connectionId = notification.object as? UUID {
                     openWindow(id: "main", value: EditorTabPayload(connectionId: connectionId))
                 }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openSettingsWindow)) { _ in
+                openSettings()
             }
     }
 }

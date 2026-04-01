@@ -71,6 +71,7 @@ enum SessionStateFactory {
                     if let index = tabMgr.selectedTabIndex {
                         tabMgr.tabs[index].isView = payload.isView
                         tabMgr.tabs[index].isEditable = !payload.isView
+                        tabMgr.tabs[index].schemaName = payload.schemaName
                         if payload.showStructure {
                             tabMgr.tabs[index].showStructure = true
                         }
@@ -87,6 +88,10 @@ enum SessionStateFactory {
                     initialQuery: payload.initialQuery,
                     databaseName: payload.databaseName ?? connection.database,
                     sourceFileURL: payload.sourceFileURL
+                )
+            case .createTable:
+                tabMgr.addCreateTableTab(
+                    databaseName: payload.databaseName ?? connection.database
                 )
             }
         } else if payload?.isNewTab == true {

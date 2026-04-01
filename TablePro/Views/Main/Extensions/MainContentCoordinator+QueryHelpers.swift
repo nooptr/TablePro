@@ -157,6 +157,33 @@ extension MainContentCoordinator {
             updatedTab.metadataVersion += 1
         }
 
+        // Create a ResultSet for this single-statement execution
+        let rs = ResultSet(label: tableName ?? "Result")
+        rs.rowBuffer = updatedTab.rowBuffer
+        rs.executionTime = updatedTab.executionTime
+        rs.rowsAffected = updatedTab.rowsAffected
+        rs.statusMessage = updatedTab.statusMessage
+        rs.tableName = updatedTab.tableName
+        rs.isEditable = updatedTab.isEditable
+        rs.resultVersion = updatedTab.resultVersion
+        rs.metadataVersion = updatedTab.metadataVersion
+        rs.columnTypes = updatedTab.columnTypes
+        rs.columnDefaults = updatedTab.columnDefaults
+        rs.columnForeignKeys = updatedTab.columnForeignKeys
+        rs.columnEnumValues = updatedTab.columnEnumValues
+        rs.columnNullable = updatedTab.columnNullable
+
+        // Keep pinned results, replace unpinned
+        let pinned = updatedTab.resultSets.filter(\.isPinned)
+        updatedTab.resultSets = pinned + [rs]
+        updatedTab.activeResultSetId = rs.id
+
+        // Auto-expand results panel when new data arrives
+        if updatedTab.isResultsCollapsed {
+            updatedTab.isResultsCollapsed = false
+        }
+        toolbarState.isResultsCollapsed = false
+
         tabManager.tabs[idx] = updatedTab
 
         // Cache column types for selective queries on subsequent page/filter/sort reloads.
@@ -387,7 +414,7 @@ extension MainContentCoordinator {
                 let wantsAIFix = await AlertHelper.showQueryErrorWithAIOption(
                     title: String(localized: "Query Execution Failed"),
                     message: errorMessage,
-                    window: NSApp.keyWindow
+                    window: contentWindow
                 )
                 if wantsAIFix {
                     showAIChatPanel()
@@ -397,10 +424,35 @@ extension MainContentCoordinator {
                 AlertHelper.showErrorSheet(
                     title: String(localized: "Query Execution Failed"),
                     message: errorMessage,
-                    window: NSApp.keyWindow
+                    window: contentWindow
                 )
             }
         }
+    }
+
+    /// Restore schema on the driver and run the query for the current tab.
+    /// Unlike `switchSchema`, this does NOT clear tabs or sidebar — it only
+    /// switches the driver's search_path so the restored tab's query succeeds.
+    func restoreSchemaAndRunQuery(_ schema: String) async {
+        guard let driver = DatabaseManager.shared.driver(for: connectionId),
+              let schemaDriver = driver as? SchemaSwitchable,
+              schemaDriver.currentSchema != nil else {
+            runQuery()
+            return
+        }
+        do {
+            try await schemaDriver.switchSchema(to: schema)
+            DatabaseManager.shared.updateSession(connectionId) { session in
+                session.currentSchema = schema
+            }
+            toolbarState.databaseName = schema
+            await loadSchema()
+            reloadSidebar()
+        } catch {
+            Self.logger.warning("Failed to restore schema '\(schema, privacy: .public)': \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        runQuery()
     }
 
     /// Build column exclusions for a table using cached column type info.

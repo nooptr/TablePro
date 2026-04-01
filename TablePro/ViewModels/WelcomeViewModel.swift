@@ -215,6 +215,10 @@ final class WelcomeViewModel {
         Task {
             do {
                 try await dbManager.connectToSession(connection)
+            } catch is CancellationError {
+                // User cancelled password prompt — return to welcome
+                closeConnectionWindows(for: connection.id)
+                self.openWindow?(id: "welcome")
             } catch {
                 if case PluginError.pluginNotInstalled = error {
                     Self.logger.info("Plugin not installed for \(connection.type.rawValue), prompting install")
@@ -222,7 +226,7 @@ final class WelcomeViewModel {
                 } else {
                     Self.logger.error(
                         "Failed to connect: \(error.localizedDescription, privacy: .public)")
-                    handleConnectionFailure(error: error)
+                    handleConnectionFailure(error: error, connectionId: connection.id)
                 }
             }
         }
@@ -237,10 +241,13 @@ final class WelcomeViewModel {
         Task {
             do {
                 try await dbManager.connectToSession(connection)
+            } catch is CancellationError {
+                closeConnectionWindows(for: connection.id)
+                self.openWindow?(id: "welcome")
             } catch {
                 Self.logger.error(
                     "Failed to connect after plugin install: \(error.localizedDescription, privacy: .public)")
-                handleConnectionFailure(error: error)
+                handleConnectionFailure(error: error, connectionId: connection.id)
             }
         }
     }
@@ -504,9 +511,9 @@ final class WelcomeViewModel {
 
     // MARK: - Private Helpers
 
-    private func handleConnectionFailure(error: Error) {
+    private func handleConnectionFailure(error: Error, connectionId: UUID) {
         guard let openWindow else { return }
-        NSApplication.shared.closeWindows(withId: "main")
+        closeConnectionWindows(for: connectionId)
         openWindow(id: "welcome")
 
         AlertHelper.showErrorSheet(
@@ -518,8 +525,15 @@ final class WelcomeViewModel {
 
     private func handleMissingPlugin(connection: DatabaseConnection) {
         guard let openWindow else { return }
-        NSApplication.shared.closeWindows(withId: "main")
+        closeConnectionWindows(for: connection.id)
         openWindow(id: "welcome")
         pluginInstallConnection = connection
+    }
+
+    /// Close windows for a specific connection only, preserving other connections' windows.
+    private func closeConnectionWindows(for connectionId: UUID) {
+        for window in WindowLifecycleMonitor.shared.windows(for: connectionId) {
+            window.close()
+        }
     }
 }

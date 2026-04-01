@@ -78,7 +78,9 @@ final class InMemoryRowProvider: RowProvider {
 
     /// Lazy per-cell cache for formatted display values.
     /// Keyed by source row index (buffer index or offset appended index).
+    /// Evicted when exceeding maxDisplayCacheSize to bound memory.
     private var displayCache: [Int: [String?]] = [:]
+    private static let maxDisplayCacheSize = 20_000
     private(set) var columnDefaults: [String: String?]
     private(set) var columnTypes: [ColumnType]
     private(set) var columnForeignKeys: [String: ForeignKeyInfo]
@@ -214,7 +216,31 @@ final class InMemoryRowProvider: RowProvider {
             rowCache[col] = CellDisplayFormatter.format(src[col], columnType: ct)
         }
         displayCache[cacheKey] = rowCache
+        evictDisplayCacheIfNeeded(nearKey: cacheKey)
         return columnIndex < rowCache.count ? rowCache[columnIndex] : nil
+    }
+
+    private func evictDisplayCacheIfNeeded(nearKey: Int) {
+        guard displayCache.count > Self.maxDisplayCacheSize else { return }
+        let halfSize = Self.maxDisplayCacheSize / 2
+        displayCache = displayCache.filter { abs($0.key - nearKey) <= halfSize }
+    }
+
+    @MainActor
+    func preWarmDisplayCache(upTo rowCount: Int) {
+        let count = min(rowCount, totalRowCount)
+        for row in 0..<count {
+            let cacheKey = resolveCacheKey(for: row)
+            guard displayCache[cacheKey] == nil else { continue }
+            let src = sourceRow(at: row)
+            let columnCount = columns.count
+            var rowCache = [String?](repeating: nil, count: columnCount)
+            for col in 0..<min(src.count, columnCount) {
+                let ct = col < columnTypes.count ? columnTypes[col] : nil
+                rowCache[col] = CellDisplayFormatter.format(src[col], columnType: ct)
+            }
+            displayCache[cacheKey] = rowCache
+        }
     }
 
     /// Invalidate entire display cache (after settings change, full reload).

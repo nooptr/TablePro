@@ -230,8 +230,12 @@ final class DataGridCellFactory {
             isNewCell = true
         }
 
-        // Re-apply single-line properties (editing may reset these on reused cells)
-        if !isNewCell {
+        if !isNewCell && (
+            cell.lineBreakMode != .byTruncatingTail ||
+            cell.maximumNumberOfLines != 1 ||
+            cell.cell?.truncatesLastVisibleLine != true ||
+            cell.cell?.usesSingleLineMode != true
+        ) {
             cell.lineBreakMode = .byTruncatingTail
             cell.maximumNumberOfLines = 1
             cell.cell?.truncatesLastVisibleLine = true
@@ -402,6 +406,33 @@ final class DataGridCellFactory {
         }
 
         return min(max(maxWidth, Self.minColumnWidth), Self.maxColumnWidth)
+    }
+
+    /// Calculate column width to fit content without max-width or max-chars caps.
+    /// Used for user-initiated "Size to Fit" (double-click divider, context menu).
+    func calculateFitToContentWidth(
+        for columnName: String,
+        columnIndex: Int,
+        rowProvider: InMemoryRowProvider
+    ) -> CGFloat {
+        let headerCharCount = (columnName as NSString).length
+        var maxWidth = CGFloat(headerCharCount) * ThemeEngine.shared.dataGridFonts.monoCharWidth * 0.75 + 48
+
+        let totalRows = rowProvider.totalRowCount
+        let columnCount = rowProvider.columns.count
+        let effectiveSampleCount = columnCount > 50 ? 10 : Self.sampleRowCount
+        let step = max(1, totalRows / effectiveSampleCount)
+        let charWidth = ThemeEngine.shared.dataGridFonts.monoCharWidth
+
+        for i in stride(from: 0, to: totalRows, by: step) {
+            guard let value = rowProvider.value(atRow: i, column: columnIndex) else { continue }
+
+            let charCount = (value as NSString).length
+            let cellWidth = CGFloat(charCount) * charWidth + 16
+            maxWidth = max(maxWidth, cellWidth)
+        }
+
+        return max(maxWidth, Self.minColumnWidth)
     }
 }
 

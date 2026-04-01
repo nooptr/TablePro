@@ -4,6 +4,64 @@ description: "Product updates and announcements for TablePro"
 rss: true
 ---
 
+<Update label="April 1, 2026" description="v0.27.1">
+  ### Bug Fixes
+
+  - Fixed table queries being incorrectly prefixed with the connection username as a schema name on non-schema databases (MySQL, MariaDB, ClickHouse, Redis, etc.), causing "Table 'username.table' doesn't exist" errors when opening a second table tab
+</Update>
+
+<Update label="March 31, 2026" description="v0.27.0">
+  ### New Features
+
+  - **Password Prompt on Connect**: Option to prompt for database password on every connection instead of saving to Keychain
+  - **Visual Create Table UI**: Design tables visually with multi-database support (sidebar "Create New Table...")
+  - **Collapsible Results Panel**: Toggle with `Cmd+Opt+R`, multiple result tabs for multi-statement queries, and result pinning
+  - **Auto-fit Column Width**: Double-click column divider or right-click "Size to Fit" to auto-size columns
+  - **Filter Field Autocompletion**: Column names and SQL keywords suggested as you type in filter fields
+  - **Multi-line Raw SQL Filter**: Use Option+Enter for newlines in the Raw SQL filter field
+  - **Database-aware SQL Functions**: Field menu now shows SQL functions specific to your database engine
+  - **Inline Error Banner**: Query errors displayed inline instead of modal dialogs
+
+  ### Improvements
+
+  - JSON syntax highlighting and brace matching in Details sidebar and JSON editor popover
+  - Replaced GCD dispatch patterns with Swift structured concurrency
+  - Refactored Details sidebar into modular field editor architecture
+
+  ### Bug Fixes
+
+  - PostgreSQL schema name lost after app restart, causing "relation does not exist" errors for non-public schemas
+  - Error dialog OK button not dismissing when a SwiftUI sheet is active
+  - SQL Server Unicode characters (Thai, CJK, etc.) displaying as question marks in nvarchar/nchar/ntext columns
+  - Globe+F (fn+F) fullscreen shortcut not working
+</Update>
+
+<Update label="March 29, 2026" description="v0.26.0">
+  ### New Features
+
+  - **SQL File Management**: Open, save, and save-as for SQL files with native macOS title bar integration
+  - **BigQuery Support**: Google BigQuery analytics database via REST API (plugin)
+  - **AI Kill Switch**: Global toggle to disable all AI features (Settings > AI)
+  - **Column Reordering**: Drag to reorder columns in the Structure tab (MySQL/MariaDB)
+  - **Nested Groups**: Hierarchical connection groups up to 3 levels deep
+  - **Safety Dialogs**: Confirmation prompts for deep link queries, connection imports, and pre-connect scripts
+
+  ### Improvements
+
+  - JSON fields in Row Details sidebar now display in a scrollable monospaced text area
+  - Removed query history sync from iCloud Sync (history stays local-only)
+
+  ### Bug Fixes
+
+  - SQL editor not auto-focused on new tab and cursor missing after tab switch
+  - Long lines not scrollable horizontally in the SQL editor
+  - Home and End keys not moving cursor in the SQL editor
+  - SSH profile lost after app restart when iCloud Sync enabled
+  - MariaDB JSON columns showing as hex dumps instead of JSON text
+  - MongoDB Atlas TLS certificate verification failure
+  - ENUM/SET dropdown chevron buttons not showing on first table open
+</Update>
+
 <Update label="March 27, 2026" description="v0.25.0">
   ### New Features
 

@@ -56,7 +56,6 @@ extension MainContentCoordinator {
                 filters: [filter],
                 appliedFilters: [filter],
                 isVisible: true,
-                quickSearchText: "",
                 filterLogicMode: .and
             )
             let payload = EditorTabPayload(
@@ -72,11 +71,13 @@ extension MainContentCoordinator {
         }
 
         // Replace current tab content with the referenced table
+        let currentSchema = DatabaseManager.shared.session(for: connectionId)?.currentSchema
         let needsQuery = tabManager.replaceTabContent(
             tableName: referencedTable,
             databaseType: connection.type,
             isView: false,
-            databaseName: currentDatabase
+            databaseName: currentDatabase,
+            schemaName: currentSchema
         )
 
         if needsQuery, let tabIndex = tabManager.selectedTabIndex {
