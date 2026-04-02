@@ -53,7 +53,7 @@ else
   ')
 fi
 
-DOWNLOAD_PREFIX="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-TableProApp/TablePro}/releases/download/v${VERSION}"
+DOWNLOAD_PREFIX="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-TableProApp/TablePro}/releases/download/v${VERSION}/"
 
 KEY_FILE=$(mktemp)
 trap 'rm -rf "$KEY_FILE"' EXIT
@@ -117,7 +117,8 @@ else
   SECOND_APPCAST="${APPCAST_XMLS[1]}"
 
   # Extract <item>...</item> blocks for the current version from second appcast
-  NEW_ITEMS=$(awk "
+  ITEMS_FILE=$(mktemp)
+  awk "
     /<item>/ { capture=1; buf=\"\" }
     capture { buf = buf \$0 \"\\n\" }
     /<\\/item>/ {
@@ -126,32 +127,34 @@ else
         printf \"%s\", buf
       }
     }
-  " "$SECOND_APPCAST")
+  " "$SECOND_APPCAST" > "$ITEMS_FILE"
 
-  if [ -n "$NEW_ITEMS" ]; then
-    # Insert the new items after the first <item> block for this version
-    # (i.e., after the arm64 entry's closing </item>)
-    awk -v new_items="$NEW_ITEMS" -v version="$VERSION" '
-      BEGIN { inserted=0 }
-      /<\/item>/ {
-        print
-        if (!inserted && found_version) {
-          printf "%s", new_items
-          inserted=1
-        }
-        next
-      }
-      /<sparkle:shortVersionString>/ {
-        if (index($0, version) > 0) found_version=1
-      }
-      { print }
-    ' "$FINAL_APPCAST" > "${FINAL_APPCAST}.merged"
-    mv "${FINAL_APPCAST}.merged" "$FINAL_APPCAST"
+  if [ -s "$ITEMS_FILE" ]; then
+    # Find the line number of the first </item> in the base appcast and
+    # insert the second arch's item block right after it.
+    FIRST_CLOSE=$(grep -n '</item>' "$FINAL_APPCAST" | head -1 | cut -d: -f1)
+    if [ -n "$FIRST_CLOSE" ]; then
+      {
+        head -n "$FIRST_CLOSE" "$FINAL_APPCAST"
+        cat "$ITEMS_FILE"
+        tail -n +"$((FIRST_CLOSE + 1))" "$FINAL_APPCAST"
+      } > "${FINAL_APPCAST}.merged"
+      mv "${FINAL_APPCAST}.merged" "$FINAL_APPCAST"
+    fi
   fi
+  rm -f "$ITEMS_FILE"
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Copy result
+# 5. Fix download URLs
+# ---------------------------------------------------------------------------
+# Sparkle 2.9+ may ignore --download-url-prefix for new entries.
+# Ensure all archive URLs for this version point to the correct GitHub
+# Release download path: .../releases/download/v<VERSION>/<filename>
+sed -i '' -E "s|releases/download/(TablePro-${VERSION}-)|releases/download/v${VERSION}/\1|g" "$FINAL_APPCAST"
+
+# ---------------------------------------------------------------------------
+# 6. Copy result
 # ---------------------------------------------------------------------------
 mkdir -p appcast
 cp "$FINAL_APPCAST" appcast/appcast.xml
