@@ -2,108 +2,55 @@
 //  MainContentCoordinator+QueryHelpers.swift
 //  TablePro
 //
-//  Query execution helper methods: schema parsing, metadata caching,
-//  phase result application, and error handling.
-//
 
 import AppKit
 import Foundation
 import os
 import TableProPluginKit
 
-// MARK: - Query Execution Helpers
-
 extension MainContentCoordinator {
-    /// Parsed schema metadata ready to apply to a tab
-    struct ParsedSchemaMetadata {
-        let columnDefaults: [String: String?]
-        let columnForeignKeys: [String: ForeignKeyInfo]
-        let columnNullable: [String: Bool]
-        let primaryKeyColumn: String?
-        let approximateRowCount: Int?
-        let columnEnumValues: [String: [String]]
+    func resolveRowCap(sql: String, tabType: TabType) -> Int? {
+        QueryExecutor.resolveRowCap(sql: sql, tabType: tabType, databaseType: connection.type)
     }
 
-    /// Schema result from parallel or sequential metadata fetch
-    typealias SchemaResult = (columnInfo: [ColumnInfo], fkInfo: [ForeignKeyInfo], approximateRowCount: Int?)
-
-    /// Parse a SchemaResult into dictionaries ready for tab assignment
     func parseSchemaMetadata(_ schema: SchemaResult) -> ParsedSchemaMetadata {
-        var defaults: [String: String?] = [:]
-        var fks: [String: ForeignKeyInfo] = [:]
-        var nullable: [String: Bool] = [:]
-        for col in schema.columnInfo {
-            defaults[col.name] = col.defaultValue
-            nullable[col.name] = col.isNullable
-        }
-        for fk in schema.fkInfo {
-            fks[fk.column] = fk
-        }
-        // Parse enum/set values from column type definitions (MySQL, MariaDB, ClickHouse)
-        var enumValues: [String: [String]] = [:]
-        for col in schema.columnInfo {
-            if let values = ColumnType.parseEnumValues(from: col.dataType) {
-                enumValues[col.name] = values
-            } else if let values = ColumnType.parseClickHouseEnumValues(from: col.dataType) {
-                enumValues[col.name] = values
-            }
-        }
-        return ParsedSchemaMetadata(
-            columnDefaults: defaults,
-            columnForeignKeys: fks,
-            columnNullable: nullable,
-            primaryKeyColumn: schema.columnInfo.first(where: { $0.isPrimaryKey })?.name,
-            approximateRowCount: schema.approximateRowCount,
-            columnEnumValues: enumValues
+        QueryExecutor.parseSchemaMetadata(schema)
+    }
+
+    func awaitSchemaResult(
+        parallelTask: Task<SchemaResult, Error>?,
+        tableName: String
+    ) async -> SchemaResult? {
+        await QueryExecutor.awaitSchemaResult(
+            connectionId: connectionId,
+            parallelTask: parallelTask,
+            tableName: tableName
         )
     }
 
-    /// Check whether metadata is already cached for the given table in a tab
     func isMetadataCached(tabId: UUID, tableName: String) -> Bool {
         guard let idx = tabManager.tabs.firstIndex(where: { $0.id == tabId }) else {
             return false
         }
         let tab = tabManager.tabs[idx]
-        guard tab.tableName == tableName,
-              !tab.columnDefaults.isEmpty,
-              tab.primaryKeyColumn != nil else {
+        let tableRows = tabSessionRegistry.tableRows(for: tab.id)
+        guard tab.tableContext.tableName == tableName,
+              !tableRows.columnDefaults.isEmpty,
+              !tab.tableContext.primaryKeyColumns.isEmpty else {
             return false
         }
-        // Ensure every ENUM/SET column has its allowed values loaded
-        let enumSetColumnNames: [String] = tab.resultColumns.enumerated().compactMap { i, name in
-            guard i < tab.columnTypes.count,
-                  tab.columnTypes[i].isEnumType || tab.columnTypes[i].isSetType else { return nil }
+        let enumSetColumnNames: [String] = tableRows.columns.enumerated().compactMap { i, name in
+            guard i < tableRows.columnTypes.count,
+                  tableRows.columnTypes[i].isEnumType || tableRows.columnTypes[i].isSetType else { return nil }
             return name
         }
         if !enumSetColumnNames.isEmpty,
-           !enumSetColumnNames.allSatisfy({ tab.columnEnumValues[$0] != nil }) {
+           !enumSetColumnNames.allSatisfy({ tableRows.columnEnumValues[$0] != nil }) {
             return false
         }
         return true
     }
 
-    /// Await schema metadata from parallel task or fall back to sequential fetch
-    func awaitSchemaResult(
-        parallelTask: Task<SchemaResult, Error>?,
-        tableName: String
-    ) async -> SchemaResult? {
-        if let parallelTask {
-            return try? await parallelTask.value
-        }
-        guard let driver = DatabaseManager.shared.driver(for: connectionId) else { return nil }
-        do {
-            async let cols = driver.fetchColumns(table: tableName)
-            async let fks = driver.fetchForeignKeys(table: tableName)
-            let (c, f) = try await (cols, fks)
-            let approxCount = try? await driver.fetchApproximateRowCount(table: tableName)
-            return (columnInfo: c, fkInfo: f, approximateRowCount: approxCount)
-        } catch {
-            Self.logger.error("Phase 2 schema fetch failed: \(error.localizedDescription)")
-            return nil
-        }
-    }
-
-    /// Apply Phase 1 query result data and optional metadata to the tab
     func applyPhase1Result( // swiftlint:disable:this function_parameter_count
         tabId: UUID,
         columns: [String],
@@ -117,70 +64,90 @@ extension MainContentCoordinator {
         metadata: ParsedSchemaMetadata?,
         hasSchema: Bool,
         sql: String,
-        connection conn: DatabaseConnection
+        connection conn: DatabaseConnection,
+        isTruncated: Bool = false,
+        queryParameterValues: [QueryParameter]? = nil
     ) {
         guard let idx = tabManager.tabs.firstIndex(where: { $0.id == tabId }) else { return }
 
         var updatedTab = tabManager.tabs[idx]
-        updatedTab.resultColumns = columns
-        updatedTab.columnTypes = columnTypes
-        updatedTab.resultRows = rows
-        updatedTab.resultVersion += 1
-        updatedTab.executionTime = executionTime
-        updatedTab.rowsAffected = rowsAffected
-        updatedTab.statusMessage = statusMessage
-        updatedTab.isExecuting = false
-        updatedTab.lastExecutedAt = Date()
-        updatedTab.tableName = tableName
-        updatedTab.isEditable = isEditable
-        // Populate enum values from column types for the enum popover
-        for (index, colType) in updatedTab.columnTypes.enumerated() {
-            if case .enumType(_, let values) = colType, let vals = values, index < updatedTab.resultColumns.count {
-                updatedTab.columnEnumValues[updatedTab.resultColumns[index]] = vals
+        var columnEnumValues: [String: [String]] = [:]
+        var columnDefaults: [String: String?] = [:]
+        var columnForeignKeys: [String: ForeignKeyInfo] = [:]
+        var columnNullable: [String: Bool] = [:]
+        updatedTab.schemaVersion += 1
+        updatedTab.execution.executionTime = executionTime
+        updatedTab.execution.rowsAffected = rowsAffected
+        updatedTab.execution.statusMessage = statusMessage
+        updatedTab.execution.isExecuting = false
+        updatedTab.execution.lastExecutedAt = Date()
+        updatedTab.tableContext.tableName = tableName
+        updatedTab.tableContext.isEditable = isEditable
+        for (index, colType) in columnTypes.enumerated() {
+            if case .enumType(_, let values) = colType, let vals = values, index < columns.count {
+                columnEnumValues[columns[index]] = vals
             }
         }
 
-        // Merge FK metadata into the same update if available
         if let metadata {
-            updatedTab.columnDefaults = metadata.columnDefaults
-            updatedTab.columnForeignKeys = metadata.columnForeignKeys
-            updatedTab.columnNullable = metadata.columnNullable
+            columnDefaults = metadata.columnDefaults
+            columnForeignKeys = metadata.columnForeignKeys
+            columnNullable = metadata.columnNullable
             for (col, vals) in metadata.columnEnumValues {
-                updatedTab.columnEnumValues[col] = vals
+                columnEnumValues[col] = vals
             }
             if let approxCount = metadata.approximateRowCount, approxCount > 0 {
                 updatedTab.pagination.totalRowCount = approxCount
                 updatedTab.pagination.isApproximateRowCount = true
+            }
+        } else {
+            let existing = tabSessionRegistry.tableRows(for: updatedTab.id)
+            columnDefaults = existing.columnDefaults
+            columnForeignKeys = existing.columnForeignKeys
+            columnNullable = existing.columnNullable
+            for (col, vals) in existing.columnEnumValues where columnEnumValues[col] == nil {
+                columnEnumValues[col] = vals
             }
         }
         if hasSchema {
             updatedTab.metadataVersion += 1
         }
 
-        // Create a ResultSet for this single-statement execution
-        let rs = ResultSet(label: tableName ?? "Result")
-        rs.rowBuffer = updatedTab.rowBuffer
-        rs.executionTime = updatedTab.executionTime
-        rs.rowsAffected = updatedTab.rowsAffected
-        rs.statusMessage = updatedTab.statusMessage
-        rs.tableName = updatedTab.tableName
-        rs.isEditable = updatedTab.isEditable
-        rs.resultVersion = updatedTab.resultVersion
+        let newTableRows = TableRows.from(
+            queryRows: rows,
+            columns: columns,
+            columnTypes: columnTypes,
+            columnDefaults: columnDefaults,
+            columnForeignKeys: columnForeignKeys,
+            columnEnumValues: columnEnumValues,
+            columnNullable: columnNullable
+        )
+        setActiveTableRows(newTableRows, for: updatedTab.id)
+
+        let rs = ResultSet(label: tableName ?? "Result", tableRows: newTableRows)
+        rs.executionTime = updatedTab.execution.executionTime
+        rs.rowsAffected = updatedTab.execution.rowsAffected
+        rs.statusMessage = updatedTab.execution.statusMessage
+        rs.tableName = updatedTab.tableContext.tableName
+        rs.isEditable = updatedTab.tableContext.isEditable
         rs.metadataVersion = updatedTab.metadataVersion
-        rs.columnTypes = updatedTab.columnTypes
-        rs.columnDefaults = updatedTab.columnDefaults
-        rs.columnForeignKeys = updatedTab.columnForeignKeys
-        rs.columnEnumValues = updatedTab.columnEnumValues
-        rs.columnNullable = updatedTab.columnNullable
 
         // Keep pinned results, replace unpinned
-        let pinned = updatedTab.resultSets.filter(\.isPinned)
-        updatedTab.resultSets = pinned + [rs]
-        updatedTab.activeResultSetId = rs.id
+        let pinned = updatedTab.display.resultSets.filter(\.isPinned)
+        updatedTab.display.resultSets = pinned + [rs]
+        updatedTab.display.activeResultSetId = rs.id
+
+        if isTruncated {
+            updatedTab.pagination.hasMoreRows = true
+            updatedTab.pagination.baseQueryForMore = sql
+            updatedTab.pagination.isLoadingMore = false
+        } else {
+            updatedTab.pagination.resetLoadMore()
+        }
 
         // Auto-expand results panel when new data arrives
-        if updatedTab.isResultsCollapsed {
-            updatedTab.isResultsCollapsed = false
+        if updatedTab.display.isResultsCollapsed {
+            updatedTab.display.isResultsCollapsed = false
         }
         toolbarState.isResultsCollapsed = false
 
@@ -189,35 +156,30 @@ extension MainContentCoordinator {
         // Cache column types for selective queries on subsequent page/filter/sort reloads.
         // Only cache from schema-backed table loads (not arbitrary SELECTs which may have partial columns).
         if let tbl = tableName, !tbl.isEmpty, hasSchema {
-            let cacheKey = "\(conn.id):\(conn.database):\(tbl)"
+            let cacheKey = "\(conn.id):\(activeDatabaseName):\(tbl)"
             cachedTableColumnTypes[cacheKey] = columnTypes
             cachedTableColumnNames[cacheKey] = columns
         }
 
-        AppState.shared.isCurrentTabEditable = updatedTab.isEditable
-            && !updatedTab.isView && updatedTab.tableName != nil
-        toolbarState.isTableTab = updatedTab.tabType == .table
-        AppState.shared.isTableTab = updatedTab.tabType == .table
-
-        let resolvedPK: String?
-        if let pk = metadata?.primaryKeyColumn {
-            resolvedPK = pk
+        let resolvedPKs: [String]
+        if let pks = metadata?.primaryKeyColumns, !pks.isEmpty {
+            resolvedPKs = pks
         } else if let defaultPK = PluginManager.shared.defaultPrimaryKeyColumn(for: conn.type) {
-            resolvedPK = defaultPK
+            resolvedPKs = [defaultPK]
         } else {
-            // Preserve existing PK when metadata is cached and not re-fetched
-            resolvedPK = tabManager.tabs[idx].primaryKeyColumn
+            // Preserve existing PKs when metadata is cached and not re-fetched
+            resolvedPKs = tabManager.tabs[idx].tableContext.primaryKeyColumns
         }
 
-        if let pk = resolvedPK {
-            tabManager.tabs[idx].primaryKeyColumn = pk
+        if !resolvedPKs.isEmpty {
+            tabManager.tabs[idx].tableContext.primaryKeyColumns = resolvedPKs
         }
 
         if tabManager.selectedTabId == tabId {
             changeManager.configureForTable(
                 tableName: tableName ?? "",
                 columns: columns,
-                primaryKeyColumn: resolvedPK,
+                primaryKeyColumns: resolvedPKs,
                 databaseType: conn.type
             )
         }
@@ -225,11 +187,12 @@ extension MainContentCoordinator {
         QueryHistoryManager.shared.recordQuery(
             query: sql,
             connectionId: conn.id,
-            databaseName: conn.database,
+            databaseName: activeDatabaseName,
             executionTime: executionTime,
             rowCount: rows.count,
             wasSuccessful: true,
-            errorMessage: nil
+            errorMessage: nil,
+            parameterValues: queryParameterValues
         )
 
         // Clear stale edit state immediately so the save banner
@@ -250,28 +213,47 @@ extension MainContentCoordinator {
     ) {
         let isNonSQL = PluginManager.shared.editorLanguage(for: connectionType) != .sql
 
-        // Phase 2a: Exact row count
+        // Phase 2a: Exact row count (background priority to let Phase 1 render first)
         // Redis/non-SQL drivers don't support SELECT COUNT(*); use approximate count instead.
-        Task { [weak self] in
+        Task(priority: .background) { [weak self] in
             guard let self else { return }
-            try? await Task.sleep(nanoseconds: 200_000_000)
             guard !self.isTearingDown else { return }
             guard let mainDriver = DatabaseManager.shared.driver(for: connectionId) else { return }
 
             let count: Int?
+            let isApproximate: Bool
             if isNonSQL {
                 count = try? await mainDriver.fetchApproximateRowCount(table: tableName)
+                isApproximate = true
             } else {
+                // Skip exact COUNT(*) if the approximate count exceeds the threshold.
+                // PostgreSQL COUNT(*) requires a full sequential scan (MVCC) and can take
+                // 10-20+ seconds on multi-million-row tables. Industry standard (TablePlus,
+                // pgAdmin, DBeaver) is to use estimates for large tables.
+                let threshold = await AppSettingsManager.shared.dataGrid.countRowsIfEstimateLessThan
+                let approxCount = await MainActor.run {
+                    self.tabManager.tabs.first { $0.id == tabId }?.pagination.totalRowCount
+                }
+                if let approx = approxCount, approx >= threshold {
+                    return // Keep approximate count — skip expensive COUNT(*)
+                }
+
                 let quotedTable = mainDriver.quoteIdentifier(tableName)
-                let countResult = try? await mainDriver.execute(
-                    query: "SELECT COUNT(*) FROM \(quotedTable)"
-                )
-                if let firstRow = countResult?.rows.first,
-                   let countStr = firstRow.first.flatMap({ $0 }) {
-                    count = Int(countStr)
-                } else {
+                do {
+                    let countResult = try await mainDriver.execute(
+                        query: "SELECT COUNT(*) FROM \(quotedTable)"
+                    )
+                    if let firstRow = countResult.rows.first,
+                       let countStr = firstRow.first.flatMap({ $0 }) {
+                        count = Int(countStr)
+                    } else {
+                        count = nil
+                    }
+                } catch {
+                    Self.logger.warning("COUNT(*) query failed for \(tableName): \(error.localizedDescription)")
                     count = nil
                 }
+                isApproximate = false
             }
 
             if let count {
@@ -280,7 +262,7 @@ extension MainContentCoordinator {
                     guard capturedGeneration == queryGeneration else { return }
                     if let idx = tabManager.tabs.firstIndex(where: { $0.id == tabId }) {
                         tabManager.tabs[idx].pagination.totalRowCount = count
-                        tabManager.tabs[idx].pagination.isApproximateRowCount = isNonSQL
+                        tabManager.tabs[idx].pagination.isApproximateRowCount = isApproximate
                     }
                 }
             }
@@ -289,9 +271,8 @@ extension MainContentCoordinator {
         // Phase 2b: Fetch enum/set values (not applicable for non-SQL databases)
         guard !isNonSQL else { return }
         guard let enumDriver = DatabaseManager.shared.driver(for: connectionId) else { return }
-        Task { [weak self] in
+        Task(priority: .background) { [weak self] in
             guard let self else { return }
-            try? await Task.sleep(nanoseconds: 200_000_000)
             guard !self.isTearingDown else { return }
 
             // Use schema if available, otherwise fetch column info for enum parsing
@@ -321,15 +302,23 @@ extension MainContentCoordinator {
                 guard capturedGeneration == queryGeneration else { return }
                 guard !Task.isCancelled else { return }
                 if let idx = tabManager.tabs.firstIndex(where: { $0.id == tabId }) {
-                    let existing = tabManager.tabs[idx].columnEnumValues
+                    let existing = tabSessionRegistry.tableRows(for: tabId)
                     let hasNewValues = columnEnumValues.contains { key, value in
-                        existing[key] != value
+                        existing.columnEnumValues[key] != value
                     }
                     if hasNewValues {
-                        for (col, vals) in columnEnumValues {
-                            tabManager.tabs[idx].columnEnumValues[col] = vals
+                        mutateActiveTableRows(for: tabId) { rows in
+                            for (col, vals) in columnEnumValues {
+                                rows.columnEnumValues[col] = vals
+                            }
+                            return .columnsReplaced
                         }
                         tabManager.tabs[idx].metadataVersion += 1
+                        if let activeIdx = tabManager.selectedTabIndex,
+                           activeIdx < tabManager.tabs.count,
+                           tabManager.tabs[activeIdx].id == tabId {
+                            dataTabDelegate?.tableViewCoordinator?.refreshForeignKeyColumns()
+                        }
                     }
                 }
             }
@@ -353,19 +342,35 @@ extension MainContentCoordinator {
             guard let mainDriver = DatabaseManager.shared.driver(for: connectionId) else { return }
 
             let count: Int?
+            let isApproximate: Bool
             if isNonSQL {
                 count = try? await mainDriver.fetchApproximateRowCount(table: tableName)
+                isApproximate = true
             } else {
+                let threshold = await AppSettingsManager.shared.dataGrid.countRowsIfEstimateLessThan
+                let approxCount = await MainActor.run {
+                    self.tabManager.tabs.first { $0.id == tabId }?.pagination.totalRowCount
+                }
+                if let approx = approxCount, approx >= threshold {
+                    return
+                }
+
                 let quotedTable = mainDriver.quoteIdentifier(tableName)
-                let countResult = try? await mainDriver.execute(
-                    query: "SELECT COUNT(*) FROM \(quotedTable)"
-                )
-                if let firstRow = countResult?.rows.first,
-                   let countStr = firstRow.first.flatMap({ $0 }) {
-                    count = Int(countStr)
-                } else {
+                do {
+                    let countResult = try await mainDriver.execute(
+                        query: "SELECT COUNT(*) FROM \(quotedTable)"
+                    )
+                    if let firstRow = countResult.rows.first,
+                       let countStr = firstRow.first.flatMap({ $0 }) {
+                        count = Int(countStr)
+                    } else {
+                        count = nil
+                    }
+                } catch {
+                    Self.logger.warning("COUNT(*) query failed for \(tableName): \(error.localizedDescription)")
                     count = nil
                 }
+                isApproximate = false
             }
 
             if let count {
@@ -373,7 +378,7 @@ extension MainContentCoordinator {
                     guard let self else { return }
                     if let idx = tabManager.tabs.firstIndex(where: { $0.id == tabId }) {
                         tabManager.tabs[idx].pagination.totalRowCount = count
-                        tabManager.tabs[idx].pagination.isApproximateRowCount = isNonSQL
+                        tabManager.tabs[idx].pagination.isApproximateRowCount = isApproximate
                     }
                 }
             }
@@ -390,8 +395,9 @@ extension MainContentCoordinator {
         currentQueryTask = nil
         if let idx = tabManager.tabs.firstIndex(where: { $0.id == tabId }) {
             var errTab = tabManager.tabs[idx]
-            errTab.errorMessage = error.localizedDescription
-            errTab.isExecuting = false
+            errTab.execution.errorMessage = error.localizedDescription
+            errTab.execution.isExecuting = false
+            errTab.execution.lastExecutedAt = Date()
             tabManager.tabs[idx] = errTab
         }
         toolbarState.setExecuting(false)
@@ -399,7 +405,7 @@ extension MainContentCoordinator {
         QueryHistoryManager.shared.recordQuery(
             query: sql,
             connectionId: conn.id,
-            databaseName: conn.database,
+            databaseName: activeDatabaseName,
             executionTime: 0,
             rowCount: 0,
             wasSuccessful: false,
@@ -409,7 +415,7 @@ extension MainContentCoordinator {
         // Show error alert (with AI fix option when AI is enabled)
         let errorMessage = error.localizedDescription
         let queryCopy = sql
-        Task { @MainActor in
+        Task {
             if AppSettingsManager.shared.ai.enabled {
                 let wantsAIFix = await AlertHelper.showQueryErrorWithAIOption(
                     title: String(localized: "Query Execution Failed"),
@@ -446,8 +452,7 @@ extension MainContentCoordinator {
                 session.currentSchema = schema
             }
             toolbarState.databaseName = schema
-            await loadSchema()
-            reloadSidebar()
+            await refreshTables()
         } catch {
             Self.logger.warning("Failed to restore schema '\(schema, privacy: .public)': \(error.localizedDescription, privacy: .public)")
             return
@@ -458,7 +463,7 @@ extension MainContentCoordinator {
     /// Build column exclusions for a table using cached column type info.
     /// Returns empty if no cached types exist (first load uses SELECT *).
     func columnExclusions(for tableName: String) -> [ColumnExclusion] {
-        let cacheKey = "\(connectionId):\(connection.database):\(tableName)"
+        let cacheKey = "\(connectionId):\(activeDatabaseName):\(tableName)"
         guard let cachedTypes = cachedTableColumnTypes[cacheKey],
               let cachedCols = cachedTableColumnNames[cacheKey] else {
             return []

@@ -13,60 +13,85 @@ struct EmptyStateView: View {
     let title: String
     let description: String?
     let actionTitle: String?
+    let actionSystemImage: String?
     let action: (() -> Void)?
+    let secondaryActionTitle: String?
+    let secondaryActionSystemImage: String?
+    let secondaryAction: (() -> Void)?
+    let footerText: String?
 
     init(
         icon: String,
         title: String,
         description: String? = nil,
         actionTitle: String? = nil,
-        action: (() -> Void)? = nil
+        actionSystemImage: String? = nil,
+        action: (() -> Void)? = nil,
+        secondaryActionTitle: String? = nil,
+        secondaryActionSystemImage: String? = nil,
+        secondaryAction: (() -> Void)? = nil,
+        footerText: String? = nil
     ) {
         self.icon = icon
         self.title = title
         self.description = description
         self.actionTitle = actionTitle
+        self.actionSystemImage = actionSystemImage
         self.action = action
+        self.secondaryActionTitle = secondaryActionTitle
+        self.secondaryActionSystemImage = secondaryActionSystemImage
+        self.secondaryAction = secondaryAction
+        self.footerText = footerText
     }
 
     var body: some View {
-        VStack(spacing: ThemeEngine.shared.activeTheme.spacing.sm) {
-            // Icon
-            Image(systemName: icon)
-                .font(.system(size: ThemeEngine.shared.activeTheme.iconSizes.huge))
-                .foregroundStyle(ThemeEngine.shared.colors.ui.tertiaryTextSwiftUI)
-                .padding(.bottom, ThemeEngine.shared.activeTheme.spacing.xxs)
-
-            // Title
-            Text(title)
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.body, weight: .medium))
-                .foregroundStyle(ThemeEngine.shared.colors.ui.secondaryTextSwiftUI)
-
-            // Description (optional)
-            if let description = description {
+        ContentUnavailableView {
+            Label(title, systemImage: icon)
+        } description: {
+            if let description {
                 Text(description)
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
-                    .foregroundStyle(ThemeEngine.shared.colors.ui.tertiaryTextSwiftUI)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
             }
-
-            // Action button (optional)
-            if let actionTitle = actionTitle, let action = action {
-                Button(action: action) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "plus")
-                            .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
-                        Text(actionTitle)
-                            .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
+        } actions: {
+            VStack(spacing: 6) {
+                if let actionTitle, let action {
+                    Button(action: action) {
+                        primaryButtonLabel(title: actionTitle)
                     }
                 }
-                .buttonStyle(.borderless)
-                .padding(.top, ThemeEngine.shared.activeTheme.spacing.xxs)
+                if let secondaryActionTitle, let secondaryAction {
+                    Button(action: secondaryAction) {
+                        secondaryButtonLabel(title: secondaryActionTitle)
+                    }
+                    .buttonStyle(.borderless)
+                }
+                if let footerText {
+                    Text(footerText)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                        .padding(.top, 6)
+                        .frame(maxWidth: 320)
+                }
             }
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 40)
+    }
+
+    @ViewBuilder
+    private func primaryButtonLabel(title: String) -> some View {
+        if let actionSystemImage {
+            Label(title, systemImage: actionSystemImage)
+        } else {
+            Text(title)
+        }
+    }
+
+    @ViewBuilder
+    private func secondaryButtonLabel(title: String) -> some View {
+        if let secondaryActionSystemImage {
+            Label(title, systemImage: secondaryActionSystemImage)
+        } else {
+            Text(title)
+        }
     }
 }
 
@@ -87,7 +112,7 @@ extension EmptyStateView {
     /// Empty state for indexes
     static func indexes(onAdd: @escaping () -> Void) -> EmptyStateView {
         EmptyStateView(
-            icon: "list.bullet.indent",
+            icon: "list.bullet",
             title: String(localized: "No Indexes Defined"),
             description: String(localized: "Add indexes to improve query performance on frequently searched columns"),
             actionTitle: String(localized: "Add Index"),

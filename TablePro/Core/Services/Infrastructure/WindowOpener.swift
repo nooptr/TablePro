@@ -2,68 +2,114 @@
 //  WindowOpener.swift
 //  TablePro
 //
-//  Bridges SwiftUI's openWindow environment action to imperative code.
-//  Stored by ContentView on appear so MainContentCommandActions can open native tabs.
-//
 
+import AppKit
+import Observation
 import os
-import SwiftUI
 
 @MainActor
+@Observable
 internal final class WindowOpener {
-    private static let logger = Logger(subsystem: "com.TablePro", category: "WindowOpener")
-
     internal static let shared = WindowOpener()
 
-    /// Set by ContentView when it appears. Safe to store — OpenWindowAction is app-scoped, not view-scoped.
-    internal var openWindow: OpenWindowAction?
+    private static let logger = Logger(subsystem: "com.TablePro", category: "WindowOpener")
 
-    /// The connectionId for the next window about to be opened.
-    /// Set by `openNativeTab` before calling `openWindow`, consumed by
-    /// `AppDelegate.windowDidBecomeKey` to set the correct `tabbingIdentifier`.
-    internal var pendingConnectionId: UUID?
+    @ObservationIgnored private var openWelcomeAction: (() -> Void)?
+    @ObservationIgnored private var openConnectionFormAction: ((UUID?) -> Void)?
+    @ObservationIgnored private var openIntegrationsActivityAction: (() -> Void)?
+    @ObservationIgnored private var openSettingsAction: (() -> Void)?
+    @ObservationIgnored
+    private var presentTypeChooserAction: ((DatabaseType?, @escaping (DatabaseType) -> Void) -> Void)?
+    @ObservationIgnored private var pendingCalls: [() -> Void] = []
+    @ObservationIgnored private var isWired = false
 
-    /// Opens a new native window tab with the given payload.
-    /// Stores the connectionId so AppDelegate can set the correct tabbingIdentifier.
-    internal func openNativeTab(_ payload: EditorTabPayload) {
-        pendingConnectionId = payload.connectionId
-        guard let openWindow else {
-            Self.logger.warning("openNativeTab called before openWindow was set — payload dropped")
+    private init() {}
+
+    internal func openWelcome() {
+        run { $0.openWelcomeAction?() }
+    }
+
+    internal func openSettings(tab: SettingsTab? = nil) {
+        if let tab {
+            UserDefaults.standard.set(tab.rawValue, forKey: "selectedSettingsTab")
+        }
+        run { $0.openSettingsAction?() }
+    }
+
+    internal func orderOutWelcome() {
+        for window in NSApp.windows where AppLaunchCoordinator.isWelcomeWindow(window) {
+            window.orderOut(nil)
+        }
+    }
+
+    internal func closeWelcome() {
+        for window in NSApp.windows where AppLaunchCoordinator.isWelcomeWindow(window) {
+            window.close()
+        }
+    }
+
+    internal func openConnectionForm(editing connectionId: UUID? = nil) {
+        guard connectionId == nil else {
+            run { $0.openConnectionFormAction?(connectionId) }
             return
         }
-        openWindow(id: "main", value: payload)
+        run { opener in
+            opener.presentTypeChooser(initialType: nil) { selected in
+                opener.openConnectionForm(editing: nil, withType: selected)
+            }
+        }
     }
 
-    /// Returns and clears the pending connectionId (consume-once pattern).
-    internal func consumePendingConnectionId() -> UUID? {
-        defer { pendingConnectionId = nil }
-        return pendingConnectionId
+    internal func openConnectionForm(editing connectionId: UUID?, withType type: DatabaseType) {
+        PendingNewConnectionType.shared.set(type)
+        run { $0.openConnectionFormAction?(connectionId) }
     }
-}
 
-/// Pure logic for resolving the tabbingIdentifier for a new main window.
-/// Extracted for testability — no AppKit dependencies.
-internal enum TabbingIdentifierResolver {
-    /// Resolve the tabbingIdentifier for a new main window.
-    /// - Parameters:
-    ///   - pendingConnectionId: The connectionId from WindowOpener (if a tab was just opened)
-    ///   - existingIdentifier: The tabbingIdentifier from an existing visible main window (if any)
-    ///   - groupAllConnections: When true, all windows share one tab group regardless of connection
-    /// - Returns: The tabbingIdentifier to assign to the new window
-    internal static func resolve(
-        pendingConnectionId: UUID?,
-        existingIdentifier: String?,
-        groupAllConnections: Bool = false
-    ) -> String {
-        if groupAllConnections {
-            return "com.TablePro.main"
+    internal func openConnectionFormFromURL(_ parsed: ParsedConnectionURL) {
+        PendingNewConnectionImport.shared.set(parsed)
+        run { $0.openConnectionFormAction?(nil) }
+    }
+
+    internal func presentTypeChooser(
+        initialType: DatabaseType?,
+        onSelected: @escaping (DatabaseType) -> Void
+    ) {
+        run { $0.presentTypeChooserAction?(initialType, onSelected) }
+    }
+
+    internal func openIntegrationsActivity() {
+        run { $0.openIntegrationsActivityAction?() }
+    }
+
+    internal func wire(
+        openWelcome: @escaping () -> Void,
+        openConnectionForm: @escaping (UUID?) -> Void,
+        openIntegrationsActivity: @escaping () -> Void,
+        openSettings: @escaping () -> Void,
+        presentTypeChooser: @escaping (DatabaseType?, @escaping (DatabaseType) -> Void) -> Void
+    ) {
+        openWelcomeAction = openWelcome
+        openConnectionFormAction = openConnectionForm
+        openIntegrationsActivityAction = openIntegrationsActivity
+        openSettingsAction = openSettings
+        presentTypeChooserAction = presentTypeChooser
+        isWired = true
+        let drained = pendingCalls
+        pendingCalls.removeAll()
+        for call in drained {
+            call()
         }
-        if let connectionId = pendingConnectionId {
-            return "com.TablePro.main.\(connectionId.uuidString)"
+    }
+
+    private func run(_ block: @escaping (WindowOpener) -> Void) {
+        if isWired {
+            block(self)
+            return
         }
-        if let existing = existingIdentifier {
-            return existing
+        Self.logger.notice("WindowOpener call queued; bridge not yet wired")
+        pendingCalls.append { [weak self] in
+            guard let self else { return }
+            block(self)
         }
-        return "com.TablePro.main"
     }
 }

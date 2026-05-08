@@ -10,7 +10,25 @@ import Testing
 @testable import TablePro
 
 @Suite("SafeModeMigration")
+@MainActor
 struct SafeModeMigrationTests {
+    private let storage: ConnectionStorage
+    private let defaults: UserDefaults
+
+    init() {
+        let unique = UUID().uuidString
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tablepro-tests")
+            .appendingPathComponent("connections_\(unique).json")
+        try? FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let suiteName = "com.TablePro.tests.ConnectionStorage.\(unique)"
+        self.defaults = UserDefaults(suiteName: suiteName)!
+        self.storage = ConnectionStorage(fileURL: fileURL, userDefaults: defaults)
+    }
+
     // MARK: - Round-Trip Through ConnectionStorage API
 
     @Test("DatabaseConnection with silent level survives save and load cycle")
@@ -22,10 +40,9 @@ struct SafeModeMigrationTests {
             safeModeLevel: .silent
         )
 
-        ConnectionStorage.shared.addConnection(connection)
-        defer { ConnectionStorage.shared.deleteConnection(connection) }
+        storage.addConnection(connection)
 
-        let found = ConnectionStorage.shared.loadConnections().first { $0.id == id }
+        let found = storage.loadConnections().first { $0.id == id }
         #expect(found?.safeModeLevel == .silent)
     }
 
@@ -38,10 +55,9 @@ struct SafeModeMigrationTests {
             safeModeLevel: .alert
         )
 
-        ConnectionStorage.shared.addConnection(connection)
-        defer { ConnectionStorage.shared.deleteConnection(connection) }
+        storage.addConnection(connection)
 
-        let found = ConnectionStorage.shared.loadConnections().first { $0.id == id }
+        let found = storage.loadConnections().first { $0.id == id }
         #expect(found?.safeModeLevel == .alert)
     }
 
@@ -54,10 +70,9 @@ struct SafeModeMigrationTests {
             safeModeLevel: .alertFull
         )
 
-        ConnectionStorage.shared.addConnection(connection)
-        defer { ConnectionStorage.shared.deleteConnection(connection) }
+        storage.addConnection(connection)
 
-        let found = ConnectionStorage.shared.loadConnections().first { $0.id == id }
+        let found = storage.loadConnections().first { $0.id == id }
         #expect(found?.safeModeLevel == .alertFull)
     }
 
@@ -70,10 +85,9 @@ struct SafeModeMigrationTests {
             safeModeLevel: .safeMode
         )
 
-        ConnectionStorage.shared.addConnection(connection)
-        defer { ConnectionStorage.shared.deleteConnection(connection) }
+        storage.addConnection(connection)
 
-        let found = ConnectionStorage.shared.loadConnections().first { $0.id == id }
+        let found = storage.loadConnections().first { $0.id == id }
         #expect(found?.safeModeLevel == .safeMode)
     }
 
@@ -86,10 +100,9 @@ struct SafeModeMigrationTests {
             safeModeLevel: .safeModeFull
         )
 
-        ConnectionStorage.shared.addConnection(connection)
-        defer { ConnectionStorage.shared.deleteConnection(connection) }
+        storage.addConnection(connection)
 
-        let found = ConnectionStorage.shared.loadConnections().first { $0.id == id }
+        let found = storage.loadConnections().first { $0.id == id }
         #expect(found?.safeModeLevel == .safeModeFull)
     }
 
@@ -102,10 +115,9 @@ struct SafeModeMigrationTests {
             safeModeLevel: .readOnly
         )
 
-        ConnectionStorage.shared.addConnection(connection)
-        defer { ConnectionStorage.shared.deleteConnection(connection) }
+        storage.addConnection(connection)
 
-        let found = ConnectionStorage.shared.loadConnections().first { $0.id == id }
+        let found = storage.loadConnections().first { $0.id == id }
         #expect(found?.safeModeLevel == .readOnly)
     }
 

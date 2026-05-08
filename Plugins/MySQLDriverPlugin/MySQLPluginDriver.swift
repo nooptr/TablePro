@@ -18,7 +18,7 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     /// Detected server type from version string after connecting
     private var isMariaDB = false
 
-    private static let logger = Logger(subsystem: "com.TablePro", category: "MySQLPluginDriver")
+    internal static let logger = Logger(subsystem: "com.TablePro", category: "MySQLPluginDriver")
 
     var currentSchema: String? { nil }
     var serverVersion: String? { _serverVersion }
@@ -45,8 +45,6 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     }
 
     private static let tableNameRegex = try? NSRegularExpression(pattern: "(?i)\\bFROM\\s+[`\"']?([\\w]+)[`\"']?")
-    private static let limitRegex = try? NSRegularExpression(pattern: "(?i)\\s+LIMIT\\s+\\d+(\\s*,\\s*\\d+)?")
-    private static let offsetRegex = try? NSRegularExpression(pattern: "(?i)\\s+OFFSET\\s+\\d+")
 
     init(config: DriverConnectionConfig) {
         self.config = config
@@ -283,7 +281,7 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         let safeTable = table.replacingOccurrences(of: "`", with: "``")
         let result = try await execute(query: "SHOW INDEX FROM `\(safeTable)`")
 
-        var indexMap: [String: (columns: [String], isUnique: Bool, type: String)] = [:]
+        var indexMap: [String: (columns: [String], isUnique: Bool, type: String, prefixes: [String: Int])] = [:]
 
         for row in result.rows {
             guard let indexName = row[safe: 2] ?? nil,
@@ -292,12 +290,20 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
 
             let nonUnique = (row[safe: 1] ?? nil) == "1"
             let indexType = (row[safe: 10] ?? nil) ?? "BTREE"
+            let subPart = (row[safe: 7] ?? nil).flatMap { Int($0) }
 
             if var existing = indexMap[indexName] {
                 existing.columns.append(columnName)
+                if let subPart {
+                    existing.prefixes[columnName] = subPart
+                }
                 indexMap[indexName] = existing
             } else {
-                indexMap[indexName] = (columns: [columnName], isUnique: !nonUnique, type: indexType)
+                var prefixes: [String: Int] = [:]
+                if let subPart {
+                    prefixes[columnName] = subPart
+                }
+                indexMap[indexName] = (columns: [columnName], isUnique: !nonUnique, type: indexType, prefixes: prefixes)
             }
         }
 
@@ -305,7 +311,8 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             .map { name, info in
                 PluginIndexInfo(
                     name: name, columns: info.columns, isUnique: info.isUnique,
-                    isPrimary: name == "PRIMARY", type: info.type
+                    isPrimary: name == "PRIMARY", type: info.type,
+                    columnPrefixes: info.prefixes.isEmpty ? nil : info.prefixes
                 )
             }
             .sorted { $0.isPrimary && !$1.isPrimary }
@@ -322,6 +329,7 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 kcu.COLUMN_NAME,
                 kcu.REFERENCED_TABLE_NAME,
                 kcu.REFERENCED_COLUMN_NAME,
+                kcu.REFERENCED_TABLE_SCHEMA,
                 rc.DELETE_RULE,
                 rc.UPDATE_RULE
             FROM information_schema.KEY_COLUMN_USAGE kcu
@@ -346,8 +354,9 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             return PluginForeignKeyInfo(
                 name: name, column: column,
                 referencedTable: refTable, referencedColumn: refColumn,
-                onDelete: (row[safe: 4] ?? nil) ?? "NO ACTION",
-                onUpdate: (row[safe: 5] ?? nil) ?? "NO ACTION"
+                referencedSchema: row[safe: 4] ?? nil,
+                onDelete: (row[safe: 5] ?? nil) ?? "NO ACTION",
+                onUpdate: (row[safe: 6] ?? nil) ?? "NO ACTION"
             )
         }
     }
@@ -363,6 +372,7 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 kcu.COLUMN_NAME,
                 kcu.REFERENCED_TABLE_NAME,
                 kcu.REFERENCED_COLUMN_NAME,
+                kcu.REFERENCED_TABLE_SCHEMA,
                 rc.DELETE_RULE,
                 rc.UPDATE_RULE
             FROM information_schema.KEY_COLUMN_USAGE kcu
@@ -387,8 +397,9 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             let fk = PluginForeignKeyInfo(
                 name: name, column: column,
                 referencedTable: refTable, referencedColumn: refColumn,
-                onDelete: (row[safe: 5] ?? nil) ?? "NO ACTION",
-                onUpdate: (row[safe: 6] ?? nil) ?? "NO ACTION"
+                referencedSchema: row[safe: 5] ?? nil,
+                onDelete: (row[safe: 6] ?? nil) ?? "NO ACTION",
+                onUpdate: (row[safe: 7] ?? nil) ?? "NO ACTION"
             )
             grouped[tableName, default: []].append(fk)
         }
@@ -472,25 +483,13 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         )
     }
 
-    // MARK: - Paginated Query Support
+    // MARK: - Streaming
 
-    func fetchRowCount(query: String) async throws -> Int {
-        let baseQuery = stripLimitOffset(from: query)
-        let countQuery = "SELECT COUNT(*) AS cnt FROM (\(baseQuery)) AS __count_subquery__"
-        let result = try await execute(query: countQuery)
-
-        guard let firstRow = result.rows.first,
-              let countStr = firstRow[safe: 0] ?? nil,
-              let count = Int(countStr)
-        else { return 0 }
-
-        return count
-    }
-
-    func fetchRows(query: String, offset: Int, limit: Int) async throws -> PluginQueryResult {
-        let baseQuery = stripLimitOffset(from: query)
-        let paginatedQuery = "\(baseQuery) LIMIT \(limit) OFFSET \(offset)"
-        return try await execute(query: paginatedQuery)
+    func streamRows(query: String) -> AsyncThrowingStream<PluginStreamElement, Error> {
+        guard let conn = mariadbConnection else {
+            return AsyncThrowingStream { $0.finish(throwing: MariaDBPluginError.notConnected) }
+        }
+        return conn.streamQuery(query)
     }
 
     // MARK: - Database Operations
@@ -553,26 +552,9 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         }
     }
 
-    func createDatabase(name: String, charset: String, collation: String?) async throws {
+    func dropDatabase(name: String) async throws {
         let escapedName = name.replacingOccurrences(of: "`", with: "``")
-
-        let validCharsets = ["utf8mb4", "utf8", "latin1", "ascii"]
-        guard validCharsets.contains(charset) else {
-            throw MariaDBPluginError(code: 0, message: "Invalid character set: \(charset)", sqlState: nil)
-        }
-
-        var query = "CREATE DATABASE `\(escapedName)` CHARACTER SET \(charset)"
-
-        if let collation = collation {
-            let allowedChars = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_"))
-            let isSafe = collation.unicodeScalars.allSatisfy { allowedChars.contains($0) }
-            guard collation.hasPrefix(charset), isSafe else {
-                throw MariaDBPluginError(code: 0, message: "Invalid collation for charset", sqlState: nil)
-            }
-            query += " COLLATE \(collation)"
-        }
-
-        _ = try await execute(query: query)
+        _ = try await execute(query: "DROP DATABASE `\(escapedName)`")
     }
 
     // MARK: - Database Switching
@@ -603,6 +585,26 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
 
     func buildExplainQuery(_ sql: String) -> String? {
         "EXPLAIN \(sql)"
+    }
+
+    // MARK: - Maintenance
+
+    func supportedMaintenanceOperations() -> [String]? {
+        ["OPTIMIZE TABLE", "ANALYZE TABLE", "CHECK TABLE", "REPAIR TABLE"]
+    }
+
+    func maintenanceStatements(operation: String, table: String?, schema: String?, options: [String: String]) -> [String]? {
+        guard let table else { return nil }
+        let quoted = quoteIdentifier(table)
+        switch operation {
+        case "OPTIMIZE TABLE": return ["OPTIMIZE TABLE \(quoted)"]
+        case "ANALYZE TABLE": return ["ANALYZE TABLE \(quoted)"]
+        case "CHECK TABLE":
+            let mode = options["mode"] ?? "MEDIUM"
+            return ["CHECK TABLE \(quoted) \(mode)"]
+        case "REPAIR TABLE": return ["REPAIR TABLE \(quoted)"]
+        default: return nil
+        }
     }
 
     // MARK: - Create Table DDL
@@ -663,6 +665,12 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         if column.unsigned {
             def += " UNSIGNED"
         }
+        if let charset = column.charset, !charset.isEmpty {
+            def += " CHARACTER SET \(charset)"
+        }
+        if let collation = column.collation, !collation.isEmpty {
+            def += " COLLATE \(collation)"
+        }
         if column.isNullable {
             def += " NULL"
         } else {
@@ -697,7 +705,13 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     }
 
     private func buildIndexDefinitionSQL(_ index: PluginIndexDefinition) -> String {
-        let cols = index.columns.map { quoteIdentifier($0) }.joined(separator: ", ")
+        let cols = index.columns.map { col -> String in
+            let quoted = quoteIdentifier(col)
+            if let prefixes = index.columnPrefixes, let prefix = prefixes[col] {
+                return "\(quoted)(\(prefix))"
+            }
+            return quoted
+        }.joined(separator: ", ")
         var def = ""
 
         let upperType = index.indexType?.uppercased() ?? ""
@@ -723,7 +737,12 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     private func buildForeignKeyDefinitionSQL(_ fk: PluginForeignKeyDefinition) -> String {
         let cols = fk.columns.map { quoteIdentifier($0) }.joined(separator: ", ")
         let refCols = fk.referencedColumns.map { quoteIdentifier($0) }.joined(separator: ", ")
-        let refTable = quoteIdentifier(fk.referencedTable)
+        let refTable: String
+        if let schema = fk.referencedSchema, !schema.isEmpty {
+            refTable = "\(quoteIdentifier(schema)).\(quoteIdentifier(fk.referencedTable))"
+        } else {
+            refTable = quoteIdentifier(fk.referencedTable)
+        }
 
         var def = "CONSTRAINT \(quoteIdentifier(fk.name)) FOREIGN KEY (\(cols)) REFERENCES \(refTable) (\(refCols))"
 
@@ -754,6 +773,53 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         buildForeignKeyDefinitionSQL(fk)
     }
 
+    // MARK: - ALTER TABLE DDL
+
+    func generateAddColumnSQL(table: String, column: PluginColumnDefinition) -> String? {
+        "ALTER TABLE \(quoteIdentifier(table)) ADD COLUMN \(buildColumnDefinitionSQL(column))"
+    }
+
+    func generateModifyColumnSQL(table: String, oldColumn: PluginColumnDefinition, newColumn: PluginColumnDefinition) -> String? {
+        let tableName = quoteIdentifier(table)
+        if oldColumn.name != newColumn.name {
+            return "ALTER TABLE \(tableName) CHANGE COLUMN \(quoteIdentifier(oldColumn.name)) \(buildColumnDefinitionSQL(newColumn))"
+        }
+        return "ALTER TABLE \(tableName) MODIFY COLUMN \(buildColumnDefinitionSQL(newColumn))"
+    }
+
+    func generateDropColumnSQL(table: String, columnName: String) -> String? {
+        "ALTER TABLE \(quoteIdentifier(table)) DROP COLUMN \(quoteIdentifier(columnName))"
+    }
+
+    func generateAddIndexSQL(table: String, index: PluginIndexDefinition) -> String? {
+        "ALTER TABLE \(quoteIdentifier(table)) ADD \(buildIndexDefinitionSQL(index))"
+    }
+
+    func generateDropIndexSQL(table: String, indexName: String) -> String? {
+        "ALTER TABLE \(quoteIdentifier(table)) DROP INDEX \(quoteIdentifier(indexName))"
+    }
+
+    func generateAddForeignKeySQL(table: String, fk: PluginForeignKeyDefinition) -> String? {
+        "ALTER TABLE \(quoteIdentifier(table)) ADD \(buildForeignKeyDefinitionSQL(fk))"
+    }
+
+    func generateDropForeignKeySQL(table: String, constraintName: String) -> String? {
+        "ALTER TABLE \(quoteIdentifier(table)) DROP FOREIGN KEY \(quoteIdentifier(constraintName))"
+    }
+
+    func generateModifyPrimaryKeySQL(table: String, oldColumns: [String], newColumns: [String], constraintName: String?) -> [String]? {
+        let tableName = quoteIdentifier(table)
+        var stmts: [String] = []
+        if !oldColumns.isEmpty {
+            stmts.append("ALTER TABLE \(tableName) DROP PRIMARY KEY")
+        }
+        if !newColumns.isEmpty {
+            let cols = newColumns.map { quoteIdentifier($0) }.joined(separator: ", ")
+            stmts.append("ALTER TABLE \(tableName) ADD PRIMARY KEY (\(cols))")
+        }
+        return stmts.isEmpty ? nil : stmts
+    }
+
     // MARK: - Column Reorder DDL
 
     func generateMoveColumnSQL(table: String, column: PluginColumnDefinition, afterColumn: String?) -> String? {
@@ -763,6 +829,12 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         var def = "\(column.dataType)"
         if column.unsigned {
             def += " UNSIGNED"
+        }
+        if let charset = column.charset, !charset.isEmpty {
+            def += " CHARACTER SET \(charset)"
+        }
+        if let collation = column.collation, !collation.isEmpty {
+            def += " COLLATE \(collation)"
         }
         if column.isNullable {
             def += " NULL"
@@ -874,19 +946,4 @@ final class MySQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         return columns
     }
 
-    private func stripLimitOffset(from query: String) -> String {
-        var result = query
-
-        if let regex = Self.limitRegex {
-            result = regex.stringByReplacingMatches(
-                in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
-        }
-
-        if let regex = Self.offsetRegex {
-            result = regex.stringByReplacingMatches(
-                in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
-        }
-
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
 }

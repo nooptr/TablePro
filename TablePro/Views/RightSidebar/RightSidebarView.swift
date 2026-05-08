@@ -7,19 +7,18 @@
 
 import SwiftUI
 
-/// Right sidebar that shows table metadata or selected row details
 struct RightSidebarView: View {
     let tableName: String?
     let tableMetadata: TableMetadata?
     let selectedRowData: [(column: String, value: String?, type: String)]?
     let isEditable: Bool
     let isRowDeleted: Bool
-    let onSave: () -> Void
 
     var editState: MultiRowEditState
     let databaseType: DatabaseType
 
     @State private var searchText: String = ""
+    @State private var expandedJsonFieldId: UUID?
 
     // MARK: - Inspector Mode
 
@@ -120,20 +119,87 @@ struct RightSidebarView: View {
         .formStyle(.grouped)
     }
 
-    private static let dateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .short
-        formatter.timeStyle = .short
-        return formatter
-    }()
-
     private func formatDate(_ date: Date) -> String {
-        RightSidebarView.dateFormatter.string(from: date)
+        date.formatted(date: .numeric, time: .shortened)
     }
 
     // MARK: - Row Detail Form
 
+    @ViewBuilder
     private func rowDetailForm(
+        _ rowData: [(column: String, value: String?, type: String)]
+    ) -> some View {
+        if let expandedId = expandedJsonFieldId,
+           let field = editState.fields.first(where: { $0.id == expandedId }) {
+            expandedJsonViewer(field: field, isEditable: contentMode == .editRow)
+                .onChange(of: selectedRowData?.count) { expandedJsonFieldId = nil }
+        } else {
+            fieldListForm(rowData)
+        }
+    }
+
+    // MARK: - Expanded JSON Viewer
+
+    private func expandedJsonViewer(field: FieldEditState, isEditable: Bool) -> some View {
+        VStack(spacing: 0) {
+            HStack {
+                Button { expandedJsonFieldId = nil } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left")
+                        Text("Fields")
+                    }
+                }
+                .buttonStyle(.borderless)
+
+                Spacer()
+
+                Text(field.columnName)
+                    .font(.headline)
+
+                Spacer()
+
+                Button {
+                    popOutJsonField(field: field, isEditable: isEditable)
+                } label: {
+                    Image(systemName: "arrow.up.forward.app")
+                }
+                .buttonStyle(.borderless)
+                .help(String(localized: "Open in Window"))
+
+                TypeBadge(field.columnTypeEnum.badgeLabel)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            JSONViewerView(
+                text: isEditable ? Binding(
+                    get: { field.pendingValue ?? field.originalValue ?? "" },
+                    set: { editState.updateField(at: field.columnIndex, value: $0) }
+                ) : .constant(field.originalValue ?? ""),
+                isEditable: isEditable
+            )
+        }
+    }
+
+    private func popOutJsonField(text: String? = nil, field: FieldEditState, isEditable: Bool) {
+        let text = text ?? field.pendingValue ?? field.originalValue
+        let fieldId = field.id
+        JSONViewerWindowController.open(
+            text: text,
+            columnName: field.columnName,
+            isEditable: isEditable,
+            onCommit: isEditable ? { [editState] newValue in
+                guard let current = editState.fields.first(where: { $0.id == fieldId }) else { return }
+                editState.updateField(at: current.columnIndex, value: newValue)
+            } : nil
+        )
+    }
+
+    // MARK: - Field List
+
+    private func fieldListForm(
         _ rowData: [(column: String, value: String?, type: String)]
     ) -> some View {
         let filtered =
@@ -145,71 +211,48 @@ struct RightSidebarView: View {
             }
 
         return VStack(spacing: 0) {
-            // Inline search field
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.tertiary)
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
-                TextField("Search for field...", text: $searchText)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
-                if !searchText.isEmpty {
-                    Button {
-                        searchText = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.tertiary)
-                            .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-
-            Divider()
+            NativeSearchField(
+                text: $searchText,
+                placeholder: String(localized: "Search fields..."),
+                controlSize: .small
+            )
+            .padding(.horizontal, 6)
 
             List {
                 Section {
                     if filtered.isEmpty && !searchText.isEmpty {
                         Text("No matching fields")
-                            .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
+                            .font(.subheadline)
                             .foregroundStyle(.tertiary)
                             .frame(maxWidth: .infinity)
                     } else {
                         ForEach(filtered, id: \.id) { field in
                             fieldDetailRow(field, at: field.columnIndex, isEditable: contentMode == .editRow)
+                                .listRowSeparator(.hidden)
                         }
                     }
                 } header: {
                     HStack {
-                        Text("FIELDS")
+                        Text("Fields")
                         Spacer()
                         Text("\(filtered.count)")
                             .foregroundStyle(.secondary)
                     }
-                    .padding(.trailing, 15)
                 }
             }
-            .listStyle(.sidebar)
+            .listStyle(.inset)
             .scrollContentBackground(.hidden)
-
-            if contentMode == .editRow && editState.hasEdits {
-                Divider()
-                Button(action: onSave) {
-                    Text("Save Changes")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-            }
         }
     }
 
     @ViewBuilder
     private func fieldDetailRow(_ field: FieldEditState, at index: Int, isEditable: Bool) -> some View {
+        let isJsonField = FieldEditorResolver.resolve(
+            for: field.columnTypeEnum,
+            isLongText: field.isLongText,
+            originalValue: field.originalValue
+        ) == .json
+
         FieldDetailView(
             context: FieldEditorContext(
                 columnName: field.columnName,
@@ -232,7 +275,13 @@ struct RightSidebarView: View {
             onSetNull: { editState.setFieldToNull(at: index) },
             onSetDefault: { editState.setFieldToDefault(at: index) },
             onSetEmpty: { editState.setFieldToEmpty(at: index) },
-            onSetFunction: { editState.setFieldToFunction(at: index, function: $0) }
+            onSetFunction: { editState.setFieldToFunction(at: index, function: $0) },
+            isPrimaryKey: field.isPrimaryKey,
+            isForeignKey: field.isForeignKey,
+            onExpand: isJsonField ? { expandedJsonFieldId = field.id } : nil,
+            onPopOut: isJsonField ? { currentText in
+                popOutJsonField(text: currentText, field: field, isEditable: isEditable)
+            } : nil
         )
     }
 }
@@ -259,7 +308,6 @@ struct RightSidebarView_Previews: PreviewProvider {
             selectedRowData: nil,
             isEditable: false,
             isRowDeleted: false,
-            onSave: {},
             editState: MultiRowEditState(),
             databaseType: .mysql
         )

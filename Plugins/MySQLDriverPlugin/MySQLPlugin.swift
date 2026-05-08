@@ -28,7 +28,11 @@ final class MySQLPlugin: NSObject, TableProPlugin, DriverPlugin {
     // MARK: - UI/Capability Metadata
 
     static let urlSchemes: [String] = ["mysql"]
+    static let explainVariants: [ExplainVariant] = [
+        ExplainVariant(id: "explain", label: "EXPLAIN", sqlPrefix: "EXPLAIN FORMAT=JSON"),
+    ]
     static let brandColorHex = "#FF9500"
+    static let postConnectActions: [PostConnectAction] = [.selectDatabaseFromLastSession]
     static let systemDatabaseNames: [String] = ["information_schema", "mysql", "performance_schema", "sys"]
     static let columnTypesByCategory: [String: [String]] = [
         "Integer": ["TINYINT", "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT"],
@@ -39,6 +43,10 @@ final class MySQLPlugin: NSObject, TableProPlugin, DriverPlugin {
         "Boolean": ["BOOLEAN", "BOOL"],
         "JSON": ["JSON"],
         "Spatial": ["GEOMETRY", "POINT", "LINESTRING", "POLYGON"]
+    ]
+
+    static let structureColumnFields: [StructureColumnField] = [
+        .name, .type, .nullable, .defaultValue, .autoIncrement, .comment, .charset, .collation
     ]
 
     static let sqlDialect: SQLDialectDescriptor? = SQLDialectDescriptor(
@@ -84,6 +92,8 @@ final class MySQLPlugin: NSObject, TableProPlugin, DriverPlugin {
         paginationStyle: .limit,
         requiresBackslashEscaping: true
     )
+
+    static let supportsDropDatabase = true
 
     func createDriver(config: DriverConnectionConfig) -> any PluginDatabaseDriver {
         MySQLPluginDriver(config: config)

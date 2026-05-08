@@ -51,8 +51,11 @@ final class MongoDBPluginDriver: PluginDatabaseDriver {
             }
         }
 
+        let effectiveHost = config.additionalFields["mongoHosts"].flatMap { hosts in
+            hosts.isEmpty ? nil : hosts
+        } ?? config.host
         let conn = MongoDBConnection(
-            host: config.host,
+            host: effectiveHost,
             port: config.port,
             user: config.username,
             password: config.password,
@@ -130,60 +133,6 @@ final class MongoDBPluginDriver: PluginDatabaseDriver {
 
     func cancelQuery() throws {
         mongoConnection?.cancelCurrentQuery()
-    }
-
-    // MARK: - Paginated Query Support
-
-    func fetchRowCount(query: String) async throws -> Int {
-        guard let conn = mongoConnection else {
-            throw MongoDBPluginError.notConnected
-        }
-
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let db = currentDb
-        let operation = try MongoShellParser.parse(trimmed)
-
-        switch operation {
-        case .find(let collection, let filter, _):
-            let count = try await conn.countDocuments(database: db, collection: collection, filter: filter)
-            return Int(count)
-        case .findOne:
-            return 1
-        case .aggregate(let collection, let pipeline):
-            let result = try await conn.aggregate(database: db, collection: collection, pipeline: pipeline)
-            return result.docs.count
-        case .countDocuments(let collection, let filter):
-            let count = try await conn.countDocuments(database: db, collection: collection, filter: filter)
-            return Int(count)
-        default:
-            return 0
-        }
-    }
-
-    func fetchRows(query: String, offset: Int, limit: Int) async throws -> PluginQueryResult {
-        let startTime = Date()
-
-        guard let conn = mongoConnection else {
-            throw MongoDBPluginError.notConnected
-        }
-
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let db = currentDb
-        let operation = try MongoShellParser.parse(trimmed)
-
-        switch operation {
-        case .find(let collection, let filter, var options):
-            options.skip = offset
-            options.limit = limit
-            let result = try await conn.find(
-                database: db, collection: collection, filter: filter,
-                sort: options.sort, projection: options.projection,
-                skip: offset, limit: limit
-            )
-            return buildPluginResult(from: result.docs, startTime: startTime, isTruncated: result.isTruncated)
-        default:
-            return try await executeOperation(operation, connection: conn, startTime: startTime)
-        }
     }
 
     // MARK: - Schema Operations
@@ -448,13 +397,25 @@ final class MongoDBPluginDriver: PluginDatabaseDriver {
         )
     }
 
-    func createDatabase(name: String, charset: String, collation: String?) async throws {
+    func createDatabaseFormSpec() async throws -> PluginCreateDatabaseFormSpec? {
+        PluginCreateDatabaseFormSpec(fields: [], footnote: nil)
+    }
+
+    func createDatabase(_ request: PluginCreateDatabaseRequest) async throws {
         guard let conn = mongoConnection else {
             throw MongoDBPluginError.notConnected
         }
 
-        _ = try await conn.insertOne(database: name, collection: "__tablepro_init", document: "{\"_init\": true}")
-        _ = try await conn.runCommand("{\"drop\": \"__tablepro_init\"}", database: name)
+        _ = try await conn.insertOne(database: request.name, collection: "__tablepro_init", document: "{\"_init\": true}")
+        _ = try await conn.runCommand("{\"drop\": \"__tablepro_init\"}", database: request.name)
+    }
+
+    func dropDatabase(name: String) async throws {
+        guard let conn = mongoConnection else {
+            throw MongoDBPluginError.notConnected
+        }
+
+        _ = try await conn.runCommand("{\"dropDatabase\": 1}", database: name)
     }
 
     // MARK: - Database Switching
@@ -583,6 +544,56 @@ final class MongoDBPluginDriver: PluginDatabaseDriver {
         )
     }
 
+    // MARK: - Streaming
+
+    func streamRows(query: String) -> AsyncThrowingStream<PluginStreamElement, Error> {
+        guard let conn = mongoConnection else {
+            return AsyncThrowingStream { $0.finish(throwing: MongoDBPluginError.notConnected) }
+        }
+
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let db = currentDb
+
+        let operation: MongoOperation
+        do {
+            operation = try MongoShellParser.parse(trimmed)
+        } catch {
+            return AsyncThrowingStream { $0.finish(throwing: error) }
+        }
+
+        switch operation {
+        case .find(let collection, let filter, let options):
+            return conn.streamFind(
+                database: db, collection: collection, filter: filter,
+                sort: options.sort, projection: options.projection
+            )
+        case .aggregate(let collection, let pipeline):
+            return conn.streamAggregate(
+                database: db, collection: collection, pipeline: pipeline
+            )
+        default:
+            return AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
+                Task {
+                    do {
+                        let result = try await self.execute(query: query)
+                        if !result.columns.isEmpty {
+                            continuation.yield(.header(PluginStreamHeader(
+                                columns: result.columns,
+                                columnTypeNames: result.columnTypeNames
+                            )))
+                        }
+                        if !result.rows.isEmpty {
+                            continuation.yield(.rows(result.rows))
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Operation Dispatch
 
     private func executeOperation(
@@ -597,7 +608,7 @@ final class MongoDBPluginDriver: PluginDatabaseDriver {
             let result = try await conn.find(
                 database: db, collection: collection, filter: filter,
                 sort: options.sort, projection: options.projection,
-                skip: options.skip ?? 0, limit: options.limit ?? PluginRowLimits.defaultMax
+                skip: options.skip ?? 0, limit: options.limit ?? PluginRowLimits.emergencyMax
             )
             if result.docs.isEmpty {
                 return PluginQueryResult(

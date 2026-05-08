@@ -12,6 +12,14 @@ import Testing
 @MainActor
 @Suite("Data Change Manager")
 struct DataChangeManagerTests {
+    private func makeManagerWithUndo() -> DataChangeManager {
+        let manager = DataChangeManager()
+        let undoManager = UndoManager()
+        undoManager.groupsByEvent = false
+        manager.undoManagerProvider = { undoManager }
+        return manager
+    }
+
     // MARK: - Configuration Tests
 
     @Test("configureForTable sets properties correctly")
@@ -21,7 +29,7 @@ struct DataChangeManagerTests {
         manager.configureForTable(
             tableName: "users",
             columns: ["id", "name", "email"],
-            primaryKeyColumn: "id",
+            primaryKeyColumns: ["id"],
             databaseType: .postgresql
         )
 
@@ -37,7 +45,7 @@ struct DataChangeManagerTests {
         manager.configureForTable(
             tableName: "users",
             columns: ["id", "name"],
-            primaryKeyColumn: "id"
+            primaryKeyColumns: ["id"]
         )
 
         manager.recordCellChange(
@@ -52,7 +60,7 @@ struct DataChangeManagerTests {
         manager.configureForTable(
             tableName: "products",
             columns: ["id", "title"],
-            primaryKeyColumn: "id"
+            primaryKeyColumns: ["id"]
         )
 
         #expect(!manager.hasChanges)
@@ -77,7 +85,7 @@ struct DataChangeManagerTests {
         manager.configureForTable(
             tableName: "users",
             columns: ["id", "name"],
-            primaryKeyColumn: "id"
+            primaryKeyColumns: ["id"]
         )
 
         manager.recordCellChange(
@@ -97,7 +105,7 @@ struct DataChangeManagerTests {
         manager.configureForTable(
             tableName: "users",
             columns: ["id", "name"],
-            primaryKeyColumn: "id"
+            primaryKeyColumns: ["id"]
         )
 
         manager.recordCellChange(
@@ -123,7 +131,7 @@ struct DataChangeManagerTests {
         manager.configureForTable(
             tableName: "users",
             columns: ["id", "name"],
-            primaryKeyColumn: "id"
+            primaryKeyColumns: ["id"]
         )
 
         manager.recordCellChange(
@@ -144,7 +152,7 @@ struct DataChangeManagerTests {
         manager.configureForTable(
             tableName: "users",
             columns: ["id", "name"],
-            primaryKeyColumn: "id"
+            primaryKeyColumns: ["id"]
         )
 
         manager.recordCellChange(
@@ -175,7 +183,7 @@ struct DataChangeManagerTests {
         manager.configureForTable(
             tableName: "users",
             columns: ["id", "name"],
-            primaryKeyColumn: "id"
+            primaryKeyColumns: ["id"]
         )
 
         manager.recordCellChange(
@@ -205,7 +213,7 @@ struct DataChangeManagerTests {
         manager.configureForTable(
             tableName: "users",
             columns: ["id", "name"],
-            primaryKeyColumn: "id"
+            primaryKeyColumns: ["id"]
         )
 
         manager.recordCellChange(
@@ -229,26 +237,6 @@ struct DataChangeManagerTests {
         #expect(manager.changes[1].rowIndex == 1)
     }
 
-    @Test("changedRowIndices contains the changed row")
-    func changedRowIndicesTracksChanges() async {
-        let manager = DataChangeManager()
-        manager.configureForTable(
-            tableName: "users",
-            columns: ["id", "name"],
-            primaryKeyColumn: "id"
-        )
-
-        manager.recordCellChange(
-            rowIndex: 5,
-            columnIndex: 1,
-            columnName: "name",
-            oldValue: "Alice",
-            newValue: "Bob"
-        )
-
-        #expect(manager.changedRowIndices.contains(5))
-    }
-
     // MARK: - Row Deletion Tests
 
     @Test("Record row deletion makes hasChanges true")
@@ -257,7 +245,7 @@ struct DataChangeManagerTests {
         manager.configureForTable(
             tableName: "users",
             columns: ["id", "name"],
-            primaryKeyColumn: "id"
+            primaryKeyColumns: ["id"]
         )
 
         manager.recordRowDeletion(rowIndex: 0, originalRow: ["1", "Alice"])
@@ -271,7 +259,7 @@ struct DataChangeManagerTests {
         manager.configureForTable(
             tableName: "users",
             columns: ["id", "name"],
-            primaryKeyColumn: "id"
+            primaryKeyColumns: ["id"]
         )
 
         manager.recordCellChange(
@@ -297,7 +285,7 @@ struct DataChangeManagerTests {
         manager.configureForTable(
             tableName: "users",
             columns: ["id", "name"],
-            primaryKeyColumn: "id"
+            primaryKeyColumns: ["id"]
         )
 
         manager.recordRowDeletion(rowIndex: 2, originalRow: ["3", "Charlie"])
@@ -314,7 +302,7 @@ struct DataChangeManagerTests {
         manager.configureForTable(
             tableName: "users",
             columns: ["id", "name"],
-            primaryKeyColumn: "id"
+            primaryKeyColumns: ["id"]
         )
 
         let rows = [
@@ -330,61 +318,6 @@ struct DataChangeManagerTests {
         #expect(manager.hasChanges)
     }
 
-    // MARK: - consumeChangedRowIndices Tests
-
-    @Test("consumeChangedRowIndices returns the set of changed indices")
-    func consumeReturnsChangedIndices() async {
-        let manager = DataChangeManager()
-        manager.configureForTable(
-            tableName: "users",
-            columns: ["id", "name"],
-            primaryKeyColumn: "id"
-        )
-
-        manager.recordCellChange(
-            rowIndex: 0,
-            columnIndex: 1,
-            columnName: "name",
-            oldValue: "Alice",
-            newValue: "Bob"
-        )
-        manager.recordCellChange(
-            rowIndex: 2,
-            columnIndex: 1,
-            columnName: "name",
-            oldValue: "Charlie",
-            newValue: "Dave"
-        )
-
-        let consumed = manager.consumeChangedRowIndices()
-
-        #expect(consumed.contains(0))
-        #expect(consumed.contains(2))
-        #expect(consumed.count == 2)
-    }
-
-    @Test("consumeChangedRowIndices clears indices after consuming")
-    func consumeClearsIndices() async {
-        let manager = DataChangeManager()
-        manager.configureForTable(
-            tableName: "users",
-            columns: ["id", "name"],
-            primaryKeyColumn: "id"
-        )
-
-        manager.recordCellChange(
-            rowIndex: 0,
-            columnIndex: 1,
-            columnName: "name",
-            oldValue: "Alice",
-            newValue: "Bob"
-        )
-
-        _ = manager.consumeChangedRowIndices()
-
-        #expect(manager.changedRowIndices.isEmpty)
-    }
-
     // MARK: - clearChanges Tests
 
     @Test("clearChanges removes all changes")
@@ -393,7 +326,7 @@ struct DataChangeManagerTests {
         manager.configureForTable(
             tableName: "users",
             columns: ["id", "name"],
-            primaryKeyColumn: "id"
+            primaryKeyColumns: ["id"]
         )
 
         manager.recordCellChange(
@@ -418,7 +351,7 @@ struct DataChangeManagerTests {
         manager.configureForTable(
             tableName: "users",
             columns: ["id", "name"],
-            primaryKeyColumn: "id"
+            primaryKeyColumns: ["id"]
         )
 
         manager.recordCellChange(
@@ -439,11 +372,11 @@ struct DataChangeManagerTests {
 
     @Test("After recording a change, canUndo is true")
     func canUndoAfterChange() async {
-        let manager = DataChangeManager()
+        let manager = makeManagerWithUndo()
         manager.configureForTable(
             tableName: "users",
             columns: ["id", "name"],
-            primaryKeyColumn: "id"
+            primaryKeyColumns: ["id"]
         )
 
         manager.recordCellChange(
@@ -459,11 +392,11 @@ struct DataChangeManagerTests {
 
     @Test("After undo, the change is reversed")
     func undoReversesChange() async {
-        let manager = DataChangeManager()
+        let manager = makeManagerWithUndo()
         manager.configureForTable(
             tableName: "users",
             columns: ["id", "name"],
-            primaryKeyColumn: "id"
+            primaryKeyColumns: ["id"]
         )
 
         manager.recordCellChange(
@@ -475,7 +408,7 @@ struct DataChangeManagerTests {
         )
         #expect(manager.changes.count == 1)
 
-        _ = manager.undoLastChange()
+        manager.undoManagerProvider?()?.undo()
 
         #expect(manager.changes.isEmpty)
         #expect(!manager.hasChanges)
@@ -483,11 +416,11 @@ struct DataChangeManagerTests {
 
     @Test("canRedo after undo")
     func canRedoAfterUndo() async {
-        let manager = DataChangeManager()
+        let manager = makeManagerWithUndo()
         manager.configureForTable(
             tableName: "users",
             columns: ["id", "name"],
-            primaryKeyColumn: "id"
+            primaryKeyColumns: ["id"]
         )
 
         manager.recordCellChange(
@@ -498,18 +431,18 @@ struct DataChangeManagerTests {
             newValue: "Bob"
         )
 
-        _ = manager.undoLastChange()
+        manager.undoManagerProvider?()?.undo()
 
         #expect(manager.canRedo)
     }
 
     @Test("New change clears redo stack")
     func newChangeClearsRedo() async {
-        let manager = DataChangeManager()
+        let manager = makeManagerWithUndo()
         manager.configureForTable(
             tableName: "users",
             columns: ["id", "name"],
-            primaryKeyColumn: "id"
+            primaryKeyColumns: ["id"]
         )
 
         manager.recordCellChange(
@@ -520,7 +453,7 @@ struct DataChangeManagerTests {
             newValue: "Bob"
         )
 
-        _ = manager.undoLastChange()
+        manager.undoManagerProvider?()?.undo()
         #expect(manager.canRedo)
 
         manager.recordCellChange(
@@ -550,7 +483,7 @@ struct DataChangeManagerTests {
         manager.configureForTable(
             tableName: "users",
             columns: ["id", "name"],
-            primaryKeyColumn: "id"
+            primaryKeyColumns: ["id"]
         )
 
         let initialVersion = manager.reloadVersion
@@ -572,7 +505,7 @@ struct DataChangeManagerTests {
         manager.configureForTable(
             tableName: "users",
             columns: ["id", "name"],
-            primaryKeyColumn: "id"
+            primaryKeyColumns: ["id"]
         )
 
         manager.recordCellChange(

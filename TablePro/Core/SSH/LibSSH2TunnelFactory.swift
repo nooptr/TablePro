@@ -38,10 +38,10 @@ internal enum LibSSH2TunnelFactory {
         remoteHost: String,
         remotePort: Int,
         localPort: Int
-    ) throws -> LibSSH2Tunnel {
+    ) async throws -> LibSSH2Tunnel {
         _ = initialized
 
-        let chain = try buildAuthenticatedChain(
+        let chain = try await buildAuthenticatedChain(
             config: config,
             credentials: credentials,
             queueLabel: "com.TablePro.ssh.hop.\(connectionId.uuidString)"
@@ -68,7 +68,7 @@ internal enum LibSSH2TunnelFactory {
             )
 
             logger.info(
-                "Tunnel created: \(config.host):\(config.port) -> 127.0.0.1:\(localPort) -> \(remoteHost):\(remotePort)"
+                "Tunnel created: \(config.host) -> 127.0.0.1:\(localPort) -> \(remoteHost):\(remotePort)"
             )
 
             return tunnel
@@ -83,16 +83,16 @@ internal enum LibSSH2TunnelFactory {
     static func testConnection(
         config: SSHConfiguration,
         credentials: SSHTunnelCredentials
-    ) throws {
+    ) async throws {
         _ = initialized
 
-        let chain = try buildAuthenticatedChain(
+        let chain = try await buildAuthenticatedChain(
             config: config,
             credentials: credentials,
             queueLabel: "com.TablePro.ssh.test-hop"
         )
 
-        logger.info("SSH test connection successful to \(config.host):\(config.port)")
+        logger.info("SSH test connection successful to \(config.host)")
         cleanupChain(chain, reason: "Test complete")
     }
 
@@ -113,25 +113,26 @@ internal enum LibSSH2TunnelFactory {
         }
     }
 
-    /// Connects to the SSH server (possibly through jump hosts), verifies host keys,
-    /// and authenticates at each hop. Returns the final authenticated session.
     private static func buildAuthenticatedChain(
         config: SSHConfiguration,
         credentials: SSHTunnelCredentials,
         queueLabel: String
-    ) throws -> AuthenticatedChain {
-        let targetHost: String
-        let targetPort: Int
+    ) async throws -> AuthenticatedChain {
+        let document = await SSHConfigCache.shared.current()
+        let resolvedPrimary = SSHConfigResolver.resolve(config, document: document)
 
-        if let firstJump = config.jumpHosts.first {
-            targetHost = firstJump.host
-            targetPort = firstJump.port
-        } else {
-            targetHost = config.host
-            targetPort = config.port
+        let formJumps = config.jumpHosts
+        let resolvedJumps: [ResolvedSSHTarget] = (formJumps.isEmpty ? resolvedPrimary.proxyJump : formJumps)
+            .map { SSHConfigResolver.resolve($0, document: document) }
+
+        if resolvedPrimary.username.isEmpty {
+            throw SSHTunnelError.tunnelCreationFailed(
+                "SSH username not set. Add it to the form or set `User` for `\(config.host)` in ~/.ssh/config."
+            )
         }
 
-        let socketFD = try connectTCP(host: targetHost, port: targetPort)
+        let firstHop = resolvedJumps.first ?? resolvedPrimary
+        let socketFD = try connectTCP(host: firstHop.host, port: firstHop.port)
 
         do {
             let session = try createSession(socketFD: socketFD)
@@ -140,56 +141,47 @@ internal enum LibSSH2TunnelFactory {
             var currentSocketFD = socketFD
 
             do {
-                // Verify host key
-                try verifyHostKey(session: session, hostname: targetHost, port: targetPort)
+                try await verifyHostKey(session: session, hostname: firstHop.host, port: firstHop.port)
 
-                // Authenticate first hop
-                if let firstJump = config.jumpHosts.first {
-                    let jumpAuthenticator = try buildJumpAuthenticator(jumpHost: firstJump)
-                    try jumpAuthenticator.authenticate(session: session, username: firstJump.username)
+                if !resolvedJumps.isEmpty {
+                    let jumpAuthenticator = try buildJumpAuthenticator(
+                        jumpHost: formJumps.first ?? SSHJumpHost(),
+                        resolved: resolvedJumps[0]
+                    )
+                    try jumpAuthenticator.authenticate(session: session, username: resolvedJumps[0].username)
                 } else {
-                    let authenticator = try buildAuthenticator(config: config, credentials: credentials)
-                    try authenticator.authenticate(session: session, username: config.username)
+                    let authenticator = try buildAuthenticator(
+                        config: config,
+                        resolved: resolvedPrimary,
+                        credentials: credentials
+                    )
+                    try authenticator.authenticate(session: session, username: resolvedPrimary.username)
                 }
 
-                if !config.jumpHosts.isEmpty {
-                    let jumps = config.jumpHosts
+                if !resolvedJumps.isEmpty {
+                    for jumpIndex in 0..<resolvedJumps.count {
+                        let nextResolved: ResolvedSSHTarget = jumpIndex + 1 < resolvedJumps.count
+                            ? resolvedJumps[jumpIndex + 1]
+                            : resolvedPrimary
 
-                    for jumpIndex in 0..<jumps.count {
-                        // Determine next hop target
-                        let nextHost: String
-                        let nextPort: Int
-
-                        if jumpIndex + 1 < jumps.count {
-                            nextHost = jumps[jumpIndex + 1].host
-                            nextPort = jumps[jumpIndex + 1].port
-                        } else {
-                            nextHost = config.host
-                            nextPort = config.port
-                        }
-
-                        // Open direct-tcpip channel to next hop
                         let channel = try openChannel(
                             session: currentSession,
                             socketFD: currentSocketFD,
-                            remoteHost: nextHost,
-                            remotePort: nextPort
+                            remoteHost: nextResolved.host,
+                            remotePort: nextResolved.port
                         )
 
-                        // Create socketpair for the next session
                         var fds: [Int32] = [0, 0]
                         guard socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else {
                             libssh2_channel_free(channel)
                             throw SSHTunnelError.tunnelCreationFailed("Failed to create socketpair")
                         }
 
-                        // Each hop's session needs its own serial queue for libssh2 calls
                         let hopSessionQueue = DispatchQueue(
                             label: "\(queueLabel).\(jumpIndex)",
                             qos: .utility
                         )
 
-                        // Start relay between channel and fds[0]
                         let relayTask = startChannelRelay(
                             channel: channel,
                             socketFD: fds[0],
@@ -206,7 +198,6 @@ internal enum LibSSH2TunnelFactory {
                         )
                         jumpHops.append(hop)
 
-                        // Create new session on fds[1]
                         let nextSession: OpaquePointer
                         do {
                             nextSession = try createSession(socketFD: fds[1])
@@ -217,23 +208,33 @@ internal enum LibSSH2TunnelFactory {
                         }
 
                         do {
-                            // Verify host key for next hop
-                            try verifyHostKey(session: nextSession, hostname: nextHost, port: nextPort)
+                            try await verifyHostKey(
+                                session: nextSession,
+                                hostname: nextResolved.host,
+                                port: nextResolved.port
+                            )
 
-                            // Authenticate next hop
-                            if jumpIndex + 1 < jumps.count {
-                                let nextJump = jumps[jumpIndex + 1]
-                                let jumpAuth = try buildJumpAuthenticator(jumpHost: nextJump)
-                                try jumpAuth.authenticate(session: nextSession, username: nextJump.username)
+                            if jumpIndex + 1 < resolvedJumps.count {
+                                let nextFormJump = formJumps.indices.contains(jumpIndex + 1)
+                                    ? formJumps[jumpIndex + 1]
+                                    : SSHJumpHost()
+                                let jumpAuth = try buildJumpAuthenticator(
+                                    jumpHost: nextFormJump,
+                                    resolved: nextResolved
+                                )
+                                try jumpAuth.authenticate(
+                                    session: nextSession,
+                                    username: nextResolved.username
+                                )
                             } else {
-                                // Final hop is the actual SSH server
                                 let authenticator = try buildAuthenticator(
                                     config: config,
+                                    resolved: resolvedPrimary,
                                     credentials: credentials
                                 )
                                 try authenticator.authenticate(
                                     session: nextSession,
-                                    username: config.username
+                                    username: resolvedPrimary.username
                                 )
                             }
                         } catch {
@@ -385,6 +386,19 @@ internal enum LibSSH2TunnelFactory {
             // Restore blocking mode for handshake/auth
             fcntl(fd, F_SETFL, flags)
 
+            // Enable OS-level TCP keepalive so the kernel detects dead connections
+            // (e.g., silent NAT gateway timeout on AWS) independently of libssh2's
+            // application-level keepalive. macOS uses TCP_KEEPALIVE for the idle
+            // interval (seconds before the first keepalive probe).
+            var yes: Int32 = 1
+            if setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &yes, socklen_t(MemoryLayout<Int32>.size)) != 0 {
+                logger.warning("Failed to set SO_KEEPALIVE: \(String(cString: strerror(errno)))")
+            }
+            var keepIdle: Int32 = 60
+            if setsockopt(fd, IPPROTO_TCP, TCP_KEEPALIVE, &keepIdle, socklen_t(MemoryLayout<Int32>.size)) != 0 {
+                logger.warning("Failed to set TCP_KEEPALIVE: \(String(cString: strerror(errno)))")
+            }
+
             logger.debug("TCP connected to \(host):\(port)")
             return fd
         }
@@ -403,8 +417,12 @@ internal enum LibSSH2TunnelFactory {
 
         let rc = libssh2_session_handshake(session, socketFD)
         if rc != 0 {
+            var msgPtr: UnsafeMutablePointer<CChar>?
+            var msgLen: Int32 = 0
+            libssh2_session_last_error(session, &msgPtr, &msgLen, 0)
+            let detail = msgPtr.map { String(cString: $0) } ?? "Unknown error"
             libssh2_session_free(session)
-            throw SSHTunnelError.tunnelCreationFailed("SSH handshake failed (error \(rc))")
+            throw SSHTunnelError.tunnelCreationFailed("SSH handshake failed: \(detail)")
         }
 
         return session
@@ -416,7 +434,7 @@ internal enum LibSSH2TunnelFactory {
         session: OpaquePointer,
         hostname: String,
         port: Int
-    ) throws {
+    ) async throws {
         var keyLength = 0
         var keyType: Int32 = 0
         guard let keyPtr = libssh2_session_hostkey(session, &keyLength, &keyType) else {
@@ -426,7 +444,7 @@ internal enum LibSSH2TunnelFactory {
         let keyData = Data(bytes: keyPtr, count: keyLength)
         let keyTypeName = HostKeyStore.keyTypeName(keyType)
 
-        try HostKeyVerifier.verify(
+        try await HostKeyVerifier.verify(
             keyData: keyData,
             keyType: keyTypeName,
             hostname: hostname,
@@ -436,47 +454,77 @@ internal enum LibSSH2TunnelFactory {
 
     // MARK: - Authentication
 
-    private static func buildAuthenticator(
+    internal static func buildAuthenticator(
         config: SSHConfiguration,
+        resolved: ResolvedSSHTarget,
         credentials: SSHTunnelCredentials
     ) throws -> any SSHAuthenticator {
         switch config.authMethod {
-        case .password where config.totpMode != .none:
-            // Server requires password + keyboard-interactive for TOTP
+        case .password:
+            // Always pair password with a keyboard-interactive fallback that reuses the same
+            // password. Servers that only advertise `keyboard-interactive` (e.g. PAM stacks
+            // using google-authenticator, which prompt `Password:` over kbd-int) reject the
+            // bare `password` method, and falling through here matches OpenSSH's and
+            // Sequel Ace's behavior.
+            guard let sshPassword = credentials.sshPassword else {
+                logger.error("SSH password is nil (Keychain lookup may have failed) for \(resolved.host)")
+                throw SSHTunnelError.authenticationFailed(reason: .password)
+            }
             let totpProvider = buildTOTPProvider(config: config, credentials: credentials)
             return CompositeAuthenticator(authenticators: [
-                PasswordAuthenticator(password: credentials.sshPassword ?? ""),
-                KeyboardInteractiveAuthenticator(password: nil, totpProvider: totpProvider),
+                PasswordAuthenticator(password: sshPassword),
+                KeyboardInteractiveAuthenticator(password: sshPassword, totpProvider: totpProvider),
             ])
 
-        case .password:
-            return PasswordAuthenticator(password: credentials.sshPassword ?? "")
-
         case .privateKey:
-            let primary = PublicKeyAuthenticator(
-                privateKeyPath: config.privateKeyPath,
-                passphrase: credentials.keyPassphrase
-            )
+            let keyPaths = effectiveKeyPaths(for: resolved)
+            guard !keyPaths.isEmpty else {
+                throw SSHTunnelError.authenticationFailed(reason: .privateKey)
+            }
+            var authenticators: [any SSHAuthenticator] = keyPaths.map { keyPath in
+                buildKeyFileAuthenticator(
+                    keyPath: keyPath,
+                    providedPassphrase: credentials.keyPassphrase,
+                    resolved: resolved,
+                    canPrompt: true
+                )
+            }
             if config.totpMode != .none {
-                let totpAuth = KeyboardInteractiveAuthenticator(
+                authenticators.append(KeyboardInteractiveAuthenticator(
                     password: nil,
                     totpProvider: buildTOTPProvider(config: config, credentials: credentials)
-                )
-                return CompositeAuthenticator(authenticators: [primary, totpAuth])
+                ))
             }
-            return primary
+            return authenticators.count == 1
+                ? authenticators[0]
+                : CompositeAuthenticator(authenticators: authenticators)
 
         case .sshAgent:
-            let socketPath = config.agentSocketPath.isEmpty ? nil : config.agentSocketPath
-            let primary = AgentAuthenticator(socketPath: socketPath)
+            let socketPath: String? = resolved.agentSocketPath.isEmpty
+                ? nil
+                : SSHPathUtilities.expandTilde(resolved.agentSocketPath)
+
+            var authenticators: [any SSHAuthenticator] = [AgentAuthenticator(socketPath: socketPath)]
+
+            for keyPath in effectiveKeyPaths(for: resolved) {
+                authenticators.append(buildKeyFileAuthenticator(
+                    keyPath: keyPath,
+                    providedPassphrase: credentials.keyPassphrase,
+                    resolved: resolved,
+                    canPrompt: true
+                ))
+            }
+
             if config.totpMode != .none {
-                let totpAuth = KeyboardInteractiveAuthenticator(
+                authenticators.append(KeyboardInteractiveAuthenticator(
                     password: nil,
                     totpProvider: buildTOTPProvider(config: config, credentials: credentials)
-                )
-                return CompositeAuthenticator(authenticators: [primary, totpAuth])
+                ))
             }
-            return primary
+
+            return authenticators.count == 1
+                ? authenticators[0]
+                : CompositeAuthenticator(authenticators: authenticators)
 
         case .keyboardInteractive:
             let totpProvider = buildTOTPProvider(config: config, credentials: credentials)
@@ -487,15 +535,142 @@ internal enum LibSSH2TunnelFactory {
         }
     }
 
-    private static func buildJumpAuthenticator(jumpHost: SSHJumpHost) throws -> any SSHAuthenticator {
+    private static func effectiveKeyPaths(for resolved: ResolvedSSHTarget) -> [String] {
+        if !resolved.identityFiles.isEmpty {
+            return resolved.identityFiles
+        }
+        if resolved.identitiesOnly {
+            return []
+        }
+        let sshDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".ssh", isDirectory: true)
+        return ["id_ed25519", "id_rsa", "id_ecdsa"]
+            .map { sshDir.appendingPathComponent($0).path }
+            .filter { FileManager.default.isReadableFile(atPath: $0) }
+    }
+
+    /// Passphrase resolution is deferred to auth time (not build time) so
+    /// that, when this authenticator is used as an agent fallback, the user
+    /// is only prompted if the agent actually fails.
+    private static func buildKeyFileAuthenticator(
+        keyPath: String,
+        providedPassphrase: String?,
+        resolved: ResolvedSSHTarget,
+        canPrompt: Bool
+    ) -> any SSHAuthenticator {
+        KeyFileAuthenticator(
+            keyPath: keyPath,
+            providedPassphrase: providedPassphrase,
+            canPrompt: canPrompt,
+            useKeychain: resolved.useKeychain,
+            addKeysToAgent: resolved.addKeysToAgent
+        )
+    }
+
+    /// Authenticator that resolves the passphrase at AUTH time (not build time),
+    /// then delegates to PublicKeyAuthenticator. Saves to Keychain and adds to
+    /// agent only after authentication succeeds.
+    private struct KeyFileAuthenticator: SSHAuthenticator {
+        let keyPath: String
+        let providedPassphrase: String?
+        let canPrompt: Bool
+        let useKeychain: Bool
+        let addKeysToAgent: Bool
+
+        func authenticate(session: OpaquePointer, username: String) throws {
+            let expandedPath = SSHPathUtilities.expandTilde(keyPath)
+
+            // 1. Try with stored passphrase or nil (covers unencrypted keys + Keychain hits)
+            let storedPassphrase = SSHPassphraseResolver.resolve(
+                forKeyAt: keyPath,
+                provided: providedPassphrase,
+                useKeychain: useKeychain
+            )
+            let firstAttempt = PublicKeyAuthenticator(
+                privateKeyPath: keyPath,
+                passphrase: storedPassphrase
+            )
+            do {
+                try firstAttempt.authenticate(session: session, username: username)
+                addToAgentIfNeeded(path: expandedPath)
+                return
+            } catch {
+                // Auth failed — key likely needs a passphrase we don't have yet
+            }
+
+            // 2. Prompt the user if allowed (key is encrypted, no stored passphrase)
+            guard canPrompt else { throw SSHTunnelError.authenticationFailed(reason: .privateKey) }
+
+            let provider = PromptPassphraseProvider(keyPath: expandedPath)
+            guard let promptResult = provider.providePassphrase() else {
+                throw SSHTunnelError.authenticationFailed(reason: .privateKey)
+            }
+
+            let retryAuth = PublicKeyAuthenticator(
+                privateKeyPath: keyPath,
+                passphrase: promptResult.passphrase
+            )
+            try retryAuth.authenticate(session: session, username: username)
+
+            // Auth succeeded — save to Keychain if user opted in
+            if promptResult.saveToKeychain && useKeychain {
+                SSHKeychainLookup.savePassphrase(promptResult.passphrase, forKeyAt: expandedPath)
+            }
+            addToAgentIfNeeded(path: expandedPath)
+        }
+
+        private func addToAgentIfNeeded(path: String) {
+            guard addKeysToAgent else { return }
+            DispatchQueue.global(qos: .utility).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-add")
+                // Use --apple-use-keychain so ssh-add reads the passphrase from
+                // Keychain for encrypted keys (no TTY available in GUI apps)
+                process.arguments = ["--apple-use-keychain", path]
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                try? process.run()
+                process.waitUntilExit()
+            }
+        }
+    }
+
+    private static func buildJumpAuthenticator(
+        jumpHost: SSHJumpHost,
+        resolved: ResolvedSSHTarget
+    ) throws -> any SSHAuthenticator {
         switch jumpHost.authMethod {
         case .privateKey:
-            return PublicKeyAuthenticator(
-                privateKeyPath: jumpHost.privateKeyPath,
-                passphrase: nil
-            )
+            let keyPaths = effectiveKeyPaths(for: resolved)
+            guard !keyPaths.isEmpty else {
+                throw SSHTunnelError.authenticationFailed(reason: .privateKey)
+            }
+            let authenticators = keyPaths.map { path in
+                KeyFileAuthenticator(
+                    keyPath: path,
+                    providedPassphrase: nil,
+                    canPrompt: true,
+                    useKeychain: resolved.useKeychain,
+                    addKeysToAgent: resolved.addKeysToAgent
+                )
+            }
+            return authenticators.count == 1
+                ? authenticators[0]
+                : CompositeAuthenticator(authenticators: authenticators)
         case .sshAgent:
-            return AgentAuthenticator(socketPath: nil)
+            let socketPath: String? = resolved.agentSocketPath.isEmpty ? nil : resolved.agentSocketPath
+            let agent = AgentAuthenticator(socketPath: socketPath)
+            if !jumpHost.privateKeyPath.isEmpty {
+                let keyAuth = KeyFileAuthenticator(
+                    keyPath: jumpHost.privateKeyPath,
+                    providedPassphrase: nil,
+                    canPrompt: true,
+                    useKeychain: resolved.useKeychain,
+                    addKeysToAgent: resolved.addKeysToAgent
+                )
+                return CompositeAuthenticator(authenticators: [agent, keyAuth])
+            }
+            return agent
         }
     }
 

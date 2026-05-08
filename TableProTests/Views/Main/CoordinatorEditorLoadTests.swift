@@ -20,15 +20,12 @@ struct CoordinatorEditorLoadTests {
         let connection = TestFixtures.makeConnection(database: "testdb")
         let tabManager = QueryTabManager()
         let changeManager = DataChangeManager()
-        let filterStateManager = FilterStateManager()
         let toolbarState = ConnectionToolbarState()
 
         let coordinator = MainContentCoordinator(
             connection: connection,
             tabManager: tabManager,
             changeManager: changeManager,
-            filterStateManager: filterStateManager,
-            columnVisibilityManager: ColumnVisibilityManager(),
             toolbarState: toolbarState
         )
         return (coordinator, tabManager)
@@ -46,7 +43,7 @@ struct CoordinatorEditorLoadTests {
 
         coordinator.loadQueryIntoEditor("SELECT * FROM users")
 
-        #expect(tabManager.tabs[0].query == "SELECT * FROM users")
+        #expect(tabManager.tabs[0].content.query == "SELECT * FROM users")
     }
 
     @Test("loadQueryIntoEditor sets hasUserInteraction to true")
@@ -66,18 +63,18 @@ struct CoordinatorEditorLoadTests {
 
     @Test("loadQueryIntoEditor does not modify table tab")
     @MainActor
-    func loadQuerySkipsTableTab() {
+    func loadQuerySkipsTableTab() throws {
         let (coordinator, tabManager) = makeCoordinator()
         defer { coordinator.teardown() }
 
-        tabManager.addTableTab(tableName: "users")
-        let originalQuery = tabManager.tabs[0].query
+        try tabManager.addTableTab(tableName: "users")
+        let originalQuery = tabManager.tabs[0].content.query
 
         // Falls through to WindowOpener path; table tab unchanged
         coordinator.loadQueryIntoEditor("SELECT * FROM users")
 
         #expect(tabManager.tabs[0].tabType == .table)
-        #expect(tabManager.tabs[0].query == originalQuery)
+        #expect(tabManager.tabs[0].content.query == originalQuery)
     }
 
     @Test("loadQueryIntoEditor does nothing when no tabs exist")
@@ -103,11 +100,11 @@ struct CoordinatorEditorLoadTests {
         defer { coordinator.teardown() }
 
         tabManager.addTab()
-        tabManager.tabs[0].query = ""
+        tabManager.tabs[0].content.query = ""
 
         coordinator.insertQueryFromAI("SELECT * FROM users")
 
-        #expect(tabManager.tabs[0].query == "SELECT * FROM users")
+        #expect(tabManager.tabs[0].content.query == "SELECT * FROM users")
     }
 
     @Test("insertQueryFromAI appends with separator when tab has existing text")
@@ -120,7 +117,7 @@ struct CoordinatorEditorLoadTests {
 
         coordinator.insertQueryFromAI("SELECT 2")
 
-        #expect(tabManager.tabs[0].query == "SELECT 1\n\nSELECT 2")
+        #expect(tabManager.tabs[0].content.query == "SELECT 1\n\nSELECT 2")
     }
 
     @Test("insertQueryFromAI treats whitespace-only text as empty")
@@ -130,11 +127,11 @@ struct CoordinatorEditorLoadTests {
         defer { coordinator.teardown() }
 
         tabManager.addTab()
-        tabManager.tabs[0].query = "   \n  \t  "
+        tabManager.tabs[0].content.query = "   \n  \t  "
 
         coordinator.insertQueryFromAI("SELECT * FROM orders")
 
-        #expect(tabManager.tabs[0].query == "SELECT * FROM orders")
+        #expect(tabManager.tabs[0].content.query == "SELECT * FROM orders")
     }
 
     @Test("insertQueryFromAI sets hasUserInteraction to true")
@@ -153,17 +150,17 @@ struct CoordinatorEditorLoadTests {
 
     @Test("insertQueryFromAI does not modify table tab")
     @MainActor
-    func insertAiSkipsTableTab() {
+    func insertAiSkipsTableTab() throws {
         let (coordinator, tabManager) = makeCoordinator()
         defer { coordinator.teardown() }
 
-        tabManager.addTableTab(tableName: "orders")
-        let originalQuery = tabManager.tabs[0].query
+        try tabManager.addTableTab(tableName: "orders")
+        let originalQuery = tabManager.tabs[0].content.query
 
         coordinator.insertQueryFromAI("SELECT * FROM orders")
 
         #expect(tabManager.tabs[0].tabType == .table)
-        #expect(tabManager.tabs[0].query == originalQuery)
+        #expect(tabManager.tabs[0].content.query == originalQuery)
     }
 
     @Test("insertQueryFromAI does nothing when no tabs exist")

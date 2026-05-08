@@ -11,6 +11,8 @@ import SwiftUI
 
 /// Query history panel with master-detail layout
 struct HistoryPanelView: View {
+    private static let dateFilterKey = "HistoryPanel.dateFilter"
+
     let connectionId: UUID
     // MARK: - State
 
@@ -20,7 +22,7 @@ struct HistoryPanelView: View {
     @State private var entries: [QueryHistoryEntry] = []
     @State private var showClearAllAlert = false
     @State private var searchTask: Task<Void, Never>?
-    @State private var copyButtonTitle = "Copy Query"
+    @State private var copyButtonTitle = String(localized: "Copy Query")
     @State private var copyResetTask: Task<Void, Never>?
     @State private var favoriteDialogQuery: FavoriteDialogQuery?
     @FocusedValue(\.commandActions) private var actions
@@ -56,7 +58,7 @@ struct HistoryPanelView: View {
                 connectionId: connectionId,
                 favorite: nil,
                 initialQuery: item.query,
-                forceGlobal: true
+                folders: []
             )
         }
     }
@@ -76,10 +78,12 @@ private extension HistoryPanelView {
                         showClearAllAlert = true
                     } label: {
                         Image(systemName: "trash")
+                            .frame(width: 24, height: 24)
                     }
                     .buttonStyle(.borderless)
                     .disabled(entries.isEmpty)
                     .help(String(localized: "Clear all history"))
+                    .accessibilityLabel(String(localized: "Clear all history"))
 
                     Picker("", selection: $dateFilter) {
                         ForEach(UIDateFilter.allCases, id: \.self) { filter in
@@ -90,9 +94,7 @@ private extension HistoryPanelView {
                     .frame(width: 120)
                 }
 
-                TextField(String(localized: "Search queries..."), text: $searchText)
-                    .textFieldStyle(.roundedBorder)
-                    .controlSize(.small)
+                NativeSearchField(text: $searchText, placeholder: String(localized: "Search queries..."), controlSize: .small)
             }
             .padding(12)
 
@@ -106,16 +108,9 @@ private extension HistoryPanelView {
                     HistoryRowSwiftUI(entry: entry)
                         .tag(entry.id)
                         .contextMenu { contextMenu(for: entry) }
-                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                            Button(role: .destructive) {
-                                deleteEntry(entry)
-                            } label: {
-                                Label(String(localized: "Delete"), systemImage: "trash")
-                            }
-                        }
                 }
-                .listStyle(.plain)
-                .environment(\.defaultMinListRowHeight, ThemeEngine.shared.activeTheme.rowHeights.comfortable)
+                .listStyle(.sidebar)
+                .environment(\.defaultMinListRowHeight, 44)
                 .onDeleteCommand {
                     deleteSelectedEntry()
                 }
@@ -155,24 +150,26 @@ private extension HistoryPanelView {
         VStack(spacing: 8) {
             if !searchText.isEmpty || dateFilter != .all {
                 Image(systemName: "magnifyingglass")
-                    .font(.system(size: ThemeEngine.shared.activeTheme.iconSizes.huge))
+                    .font(.largeTitle)
                     .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
                 Text("No Matching Queries")
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.body, weight: .medium))
+                    .font(.body.weight(.medium))
                     .foregroundStyle(.secondary)
                 Text("Try adjusting your search terms\nor date filter.")
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.medium))
+                    .font(.callout)
                     .foregroundStyle(.tertiary)
                     .multilineTextAlignment(.center)
             } else {
                 Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: ThemeEngine.shared.activeTheme.iconSizes.huge))
+                    .font(.largeTitle)
                     .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
                 Text("No Query History Yet")
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.body, weight: .medium))
+                    .font(.body.weight(.medium))
                     .foregroundStyle(.secondary)
                 Text("Your executed queries will\nappear here for quick access.")
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.medium))
+                    .font(.callout)
                     .foregroundStyle(.tertiary)
                     .multilineTextAlignment(.center)
             }
@@ -232,10 +229,10 @@ private extension HistoryPanelView {
                 // Metadata
                 VStack(alignment: .leading, spacing: 4) {
                     Text(buildPrimaryMetadata(entry))
-                        .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
                     Text(buildSecondaryMetadata(entry))
-                        .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
+                        .font(.subheadline)
                         .foregroundStyle(.tertiary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -268,13 +265,14 @@ private extension HistoryPanelView {
     var previewEmptyState: some View {
         VStack(spacing: 8) {
             Image(systemName: "doc.text")
-                .font(.system(size: ThemeEngine.shared.activeTheme.iconSizes.huge))
+                .font(.largeTitle)
                 .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
             Text("Select a Query")
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.title3, weight: .medium))
+                .font(.title3.weight(.medium))
                 .foregroundStyle(.secondary)
             Text("Choose a query from the list\nto see its full content here.")
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.medium))
+                .font(.callout)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
         }
@@ -285,7 +283,7 @@ private extension HistoryPanelView {
 
     func buildPrimaryMetadata(_ entry: QueryHistoryEntry) -> String {
         var parts: [String] = []
-        parts.append("Database: \(entry.databaseName)")
+        parts.append(String(format: String(localized: "Database: %@"), entry.databaseName))
         parts.append(entry.formattedExecutionTime)
 
         if entry.rowCount >= 0 {
@@ -295,19 +293,12 @@ private extension HistoryPanelView {
         return parts.joined(separator: "  |  ")
     }
 
-    private static let metadataDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-        return formatter
-    }()
-
     func buildSecondaryMetadata(_ entry: QueryHistoryEntry) -> String {
-        let executedAt = Self.metadataDateFormatter.string(from: entry.executedAt)
-        var text = String(localized: "Executed: \(executedAt)")
+        let executedAt = entry.executedAt.formatted(date: .abbreviated, time: .shortened)
+        var text = String(format: String(localized: "Executed: %@"), executedAt)
 
         if !entry.wasSuccessful, let error = entry.errorMessage {
-            text += "\nError: \(error)"
+            text += "\n" + String(format: String(localized: "Error: %@"), error)
         }
 
         return text
@@ -395,14 +386,14 @@ private extension HistoryPanelView {
     // MARK: - Filter State Persistence
 
     func restoreFilterState() {
-        let savedFilter = UserDefaults.standard.integer(forKey: "HistoryPanel.dateFilter")
+        let savedFilter = UserDefaults.standard.integer(forKey: Self.dateFilterKey)
         if let filter = UIDateFilter(rawValue: savedFilter) {
             dateFilter = filter
         }
     }
 
     func saveFilterState() {
-        UserDefaults.standard.set(dateFilter.rawValue, forKey: "HistoryPanel.dateFilter")
+        UserDefaults.standard.set(dateFilter.rawValue, forKey: Self.dateFilterKey)
     }
 }
 
@@ -415,26 +406,26 @@ private struct HistoryRowSwiftUI: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: entry.wasSuccessful ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .foregroundStyle(entry.wasSuccessful ? .green : .red)
-                .font(.system(size: ThemeEngine.shared.activeTheme.iconSizes.default))
+                .foregroundStyle(entry.wasSuccessful ? Color(nsColor: .systemGreen) : Color(nsColor: .systemRed))
+                .font(.body)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(entry.queryPreview)
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.medium, design: .monospaced))
+                    .font(.system(.callout, design: .monospaced))
                     .lineLimit(1)
 
                 Text(entry.databaseName)
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
 
                 HStack {
                     Text(relativeTime(entry.executedAt))
-                        .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
+                        .font(.subheadline)
                         .foregroundStyle(.tertiary)
                     Spacer()
                     Text(entry.formattedExecutionTime)
-                        .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
+                        .font(.subheadline)
                         .foregroundStyle(.tertiary)
                 }
             }

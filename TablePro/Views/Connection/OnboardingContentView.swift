@@ -39,17 +39,6 @@ struct OnboardingContentView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .gesture(
-                DragGesture(minimumDistance: 30)
-                    .onEnded { value in
-                        let horizontal = value.translation.width
-                        if horizontal < -30, currentPage < 2 {
-                            goToPage(currentPage + 1)
-                        } else if horizontal > 30, currentPage > 0 {
-                            goToPage(currentPage - 1)
-                        }
-                    }
-            )
 
             // Bottom navigation bar
             navigationBar
@@ -86,16 +75,16 @@ struct OnboardingContentView: View {
     // MARK: - Welcome Page
 
     private var welcomePage: some View {
-        VStack(spacing: ThemeEngine.shared.activeTheme.spacing.md) {
+        VStack(spacing: 16) {
             Image(nsImage: NSApp.applicationIconImage)
                 .resizable()
                 .frame(width: 80, height: 80)
 
             Text("Welcome to TablePro")
-                .font(.system(size: 24, weight: .bold, design: .rounded))
+                .font(.title.weight(.bold))
 
             Text("A fast, lightweight native macOS database client")
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.body))
+                .font(.body)
                 .foregroundStyle(.secondary)
         }
     }
@@ -103,9 +92,9 @@ struct OnboardingContentView: View {
     // MARK: - Features Page
 
     private var featuresPage: some View {
-        VStack(spacing: ThemeEngine.shared.activeTheme.spacing.xl) {
+        VStack(spacing: 24) {
             Text("What you can do")
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.title2, weight: .semibold))
+                .font(.title2.weight(.semibold))
 
             VStack(alignment: .leading, spacing: 16) {
                 featureRow(
@@ -142,15 +131,15 @@ struct OnboardingContentView: View {
     private func featureRow(icon: String, title: String, description: String) -> some View {
         HStack(spacing: 16) {
             Image(systemName: icon)
-                .font(.system(size: ThemeEngine.shared.activeTheme.iconSizes.extraLarge))
+                .font(.title)
                 .foregroundStyle(.tint)
                 .frame(width: 40)
 
-            VStack(alignment: .leading, spacing: ThemeEngine.shared.activeTheme.spacing.xxxs) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.body, weight: .medium))
+                    .font(.body.weight(.medium))
                 Text(description)
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
         }
@@ -159,16 +148,18 @@ struct OnboardingContentView: View {
     // MARK: - Get Started Page
 
     private var getStartedPage: some View {
-        VStack(spacing: ThemeEngine.shared.activeTheme.spacing.md) {
+        VStack(spacing: 16) {
             Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.green)
+                .font(.largeTitle)
+                .imageScale(.large)
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(Color(nsColor: .systemGreen))
 
             Text("You're all set!")
-                .font(.system(size: 22, weight: .bold, design: .rounded))
+                .font(.title2.weight(.bold))
 
             Text("Create a connection to get started with\nyour databases.")
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.body))
+                .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
@@ -181,8 +172,7 @@ struct OnboardingContentView: View {
             Button("Skip") {
                 completeOnboarding()
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
+            .buttonStyle(.link)
             .opacity(currentPage == 2 ? 0 : 1)
             .frame(minWidth: 110, alignment: .leading)
 
@@ -190,11 +180,15 @@ struct OnboardingContentView: View {
 
             HStack(spacing: 8) {
                 ForEach(0..<3, id: \.self) { i in
-                    Circle()
-                        .fill(i == currentPage ? Color.accentColor : Color(nsColor: .tertiaryLabelColor))
-                        .frame(width: 8, height: 8)
-                        .scaleEffect(i == currentPage ? 1.2 : 1.0)
-                        .onTapGesture { goToPage(i) }
+                    Button { goToPage(i) } label: {
+                        Circle()
+                            .fill(i == currentPage ? Color.accentColor : Color(nsColor: .tertiaryLabelColor))
+                            .frame(width: 8, height: 8)
+                            .scaleEffect(i == currentPage ? 1.2 : 1.0)
+                            .frame(width: 32, height: 32)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(String(format: String(localized: "Page %d"), i + 1))
                 }
             }
             .animation(.spring(response: 0.3), value: currentPage)
@@ -221,8 +215,8 @@ struct OnboardingContentView: View {
             .animation(.easeInOut(duration: 0.25), value: currentPage)
             .frame(minWidth: 110, alignment: .trailing)
         }
-        .padding(.horizontal, ThemeEngine.shared.activeTheme.spacing.xl)
-        .padding(.bottom, ThemeEngine.shared.activeTheme.spacing.lg)
+        .padding(.horizontal, 24)
+        .padding(.bottom, 20)
     }
 
     // MARK: - Actions

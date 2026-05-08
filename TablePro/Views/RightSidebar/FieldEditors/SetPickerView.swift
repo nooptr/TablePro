@@ -8,23 +8,49 @@ import SwiftUI
 internal struct SetPickerView: View {
     let context: FieldEditorContext
     let values: [String]
+    var isPendingNull: Bool = false
+    var isPendingDefault: Bool = false
+    var onSetNull: (() -> Void)?
+    var onSetDefault: (() -> Void)?
 
     @State private var isSetPopoverPresented = false
 
     var body: some View {
-        let displayLabel = context.value.wrappedValue.isEmpty
-            ? String(localized: "No selection")
-            : context.value.wrappedValue
+        let isNullValue = context.originalValue == nil && !isPendingDefault
+        let displayLabel: String = {
+            if isPendingNull || isNullValue { return "NULL" }
+            if isPendingDefault { return "DEFAULT" }
+            return context.value.wrappedValue.isEmpty
+                ? String(localized: "No selection")
+                : context.value.wrappedValue
+        }()
 
-        Button {
-            isSetPopoverPresented = true
+        Menu {
+            Button { isSetPopoverPresented = true } label: {
+                Text("Edit Values...")
+            }
+            if onSetNull != nil || onSetDefault != nil {
+                Divider()
+                if let onSetNull {
+                    Button("Set NULL", action: onSetNull)
+                }
+                if let onSetDefault {
+                    Button("Set DEFAULT", action: onSetDefault)
+                }
+            }
         } label: {
-            Text(displayLabel)
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
+            HStack(spacing: 4) {
+                Text(displayLabel)
+                    .font(.subheadline)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "chevron.down")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .menuStyle(.borderlessButton)
         .padding(.horizontal, 4)
         .frame(maxWidth: .infinity, minHeight: 22, alignment: .leading)
         .background(.quinary, in: RoundedRectangle(cornerRadius: 5))

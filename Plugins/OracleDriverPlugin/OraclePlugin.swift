@@ -7,7 +7,7 @@ import Foundation
 import os
 import TableProPluginKit
 
-final class OraclePlugin: NSObject, TableProPlugin, DriverPlugin {
+final class OraclePlugin: NSObject, TableProPlugin, DriverPlugin, PluginDiagnosticProvider {
     static let pluginName = "Oracle Driver"
     static let pluginVersion = "1.0.0"
     static let pluginDescription = "Oracle Database support via OracleNIO"
@@ -16,7 +16,7 @@ final class OraclePlugin: NSObject, TableProPlugin, DriverPlugin {
     static let databaseTypeId = "Oracle"
     static let databaseDisplayName = "Oracle"
     static let iconName = "oracle-icon"
-    static let defaultPort = 1521
+    static let defaultPort = 1_521
     static let additionalConnectionFields: [ConnectionField] = [
         ConnectionField(id: "oracleServiceName", label: "Service Name", placeholder: "ORCL")
     ]
@@ -26,6 +26,8 @@ final class OraclePlugin: NSObject, TableProPlugin, DriverPlugin {
     static let isDownloadable = true
     static let pathFieldRole: PathFieldRole = .serviceName
     static let supportsForeignKeyDisable = false
+    static let supportsSchemaSwitching = true
+    static let postConnectActions: [PostConnectAction] = [.selectSchemaFromLastSession]
     static let brandColorHex = "#C3160B"
     static let systemDatabaseNames: [String] = ["SYS", "SYSTEM", "OUTLN", "DBSNMP", "APPQOSSYS", "WMSYS", "XDB"]
     static let databaseGroupingStrategy: GroupingStrategy = .bySchema
@@ -96,6 +98,51 @@ final class OraclePlugin: NSObject, TableProPlugin, DriverPlugin {
 
     func createDriver(config: DriverConnectionConfig) -> any PluginDatabaseDriver {
         OraclePluginDriver(config: config)
+    }
+
+    func diagnose(error: Error) -> PluginDiagnostic? {
+        guard let oracleError = error as? OracleError else { return nil }
+        let issuesURL = URL(string: "https://github.com/TableProApp/TablePro/issues")
+        switch oracleError.category {
+        case .authVerifierUnsupported(let flag):
+            return PluginDiagnostic(
+                title: String(localized: "Unsupported Password Verifier"),
+                message: oracleError.message,
+                suggestedActions: [
+                    String(localized: "Verify the user account exists and the password is correct."),
+                    String(localized: "Ask your DBA to confirm the user has an 11G or 12C password verifier (SELECT password_versions FROM dba_users WHERE username = '<USER>')."),
+                    String(localized: "If the verifier is brand-new (e.g. 23ai), file an issue with the verifier flag below.")
+                ],
+                diagnosticInfo: [
+                    DiagnosticEntry(label: "Verifier flag", value: flag)
+                ],
+                supportURL: issuesURL
+            )
+        case .authConnectionDropped:
+            return PluginDiagnostic(
+                title: String(localized: "Connection Dropped During Handshake"),
+                message: oracleError.message,
+                suggestedActions: [
+                    String(localized: "If the same connection works in DBeaver or sqlplus, this is likely an OOB compatibility issue with cloud-hosted Oracle."),
+                    String(localized: "TablePro 1.2.0 already gates OOB on the server flag, so most cases are resolved. If you still hit this, file an issue."),
+                    String(localized: "Try disabling SSH tunnel or load balancer firewall rules between client and server.")
+                ],
+                supportURL: URL(string: "https://github.com/TableProApp/TablePro/issues/483")
+            )
+        case .authVersionNotSupported:
+            return PluginDiagnostic(
+                title: String(localized: "Server Version Not Supported"),
+                message: oracleError.message,
+                suggestedActions: [
+                    String(localized: "TablePro requires Oracle 12c or later via the OracleNIO Swift driver."),
+                    String(localized: "Check the user account's password_versions; only 10G, 11G, and 12C are supported."),
+                    String(localized: "Rotate the password under modern auth if password_versions contains an unrecognized verifier.")
+                ],
+                supportURL: issuesURL
+            )
+        case .generic, .notConnected, .connectionFailed, .queryFailed:
+            return nil
+        }
     }
 }
 
@@ -223,27 +270,25 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         )
     }
 
-    func fetchRowCount(query: String) async throws -> Int {
-        let countQuery = "SELECT COUNT(*) FROM (\(query))"
-        let result = try await execute(query: countQuery)
-        guard let row = result.rows.first,
-              let cell = row.first,
-              let str = cell,
-              let count = Int(str) else {
-            return 0
-        }
-        return count
-    }
+    // MARK: - Streaming
 
-    func fetchRows(query: String, offset: Int, limit: Int) async throws -> PluginQueryResult {
-        var base = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        while base.hasSuffix(";") {
-            base = String(base.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+    func streamRows(query: String) -> AsyncThrowingStream<PluginStreamElement, Error> {
+        guard let conn = oracleConn else {
+            return AsyncThrowingStream { $0.finish(throwing: OracleError.notConnected) }
         }
-        base = stripOracleOffsetFetch(from: base)
-        let orderBy = hasTopLevelOrderBy(base) ? "" : " ORDER BY 1"
-        let paginated = "\(base)\(orderBy) OFFSET \(offset) ROWS FETCH NEXT \(limit) ROWS ONLY"
-        return try await execute(query: paginated)
+
+        return AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
+            let streamTask = Task {
+                do {
+                    try await conn.streamQuery(query, continuation: continuation)
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { @Sendable _ in
+                streamTask.cancel()
+            }
+        }
     }
 
     // MARK: - Schema Operations
@@ -747,6 +792,173 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         return (statement: sql, parameters: parameters)
     }
 
+    // MARK: - Create Table DDL
+
+    func generateCreateTableSQL(definition: PluginCreateTableDefinition) -> String? {
+        guard !definition.columns.isEmpty else { return nil }
+
+        let qualifiedTable = oracleQualifiedTable(definition.tableName)
+        let pkColumns = definition.columns.filter { $0.isPrimaryKey }
+        let inlinePK = pkColumns.count == 1
+        var parts: [String] = definition.columns.map { oracleColumnDefinition($0, inlinePK: inlinePK) }
+
+        if pkColumns.count > 1 {
+            let pkCols = pkColumns.map { quoteIdentifier($0.name) }.joined(separator: ", ")
+            parts.append("PRIMARY KEY (\(pkCols))")
+        }
+
+        for fk in definition.foreignKeys {
+            parts.append(oracleForeignKeyConstraint(fk))
+        }
+
+        var sql = "CREATE TABLE \(qualifiedTable) (\n  " +
+            parts.joined(separator: ",\n  ") +
+            "\n);"
+
+        var indexStatements: [String] = []
+        for index in definition.indexes {
+            indexStatements.append(oracleIndexDefinition(index, qualifiedTable: qualifiedTable))
+        }
+        if !indexStatements.isEmpty {
+            sql += "\n\n" + indexStatements.joined(separator: ";\n") + ";"
+        }
+
+        return sql
+    }
+
+    // MARK: - Definition SQL (clipboard copy)
+
+    func generateColumnDefinitionSQL(column: PluginColumnDefinition) -> String? {
+        oracleColumnDefinition(column, inlinePK: false)
+    }
+
+    func generateIndexDefinitionSQL(index: PluginIndexDefinition, tableName: String?) -> String? {
+        let qualifiedTable = tableName.map { oracleQualifiedTable($0) } ?? "\"table\""
+        return oracleIndexDefinition(index, qualifiedTable: qualifiedTable)
+    }
+
+    func generateForeignKeyDefinitionSQL(fk: PluginForeignKeyDefinition) -> String? {
+        oracleForeignKeyConstraint(fk)
+    }
+
+    // MARK: - ALTER TABLE DDL
+
+    func generateAddColumnSQL(table: String, column: PluginColumnDefinition) -> String? {
+        let qt = oracleQualifiedTable(table)
+        let colDef = oracleColumnDefinition(column, inlinePK: false)
+        return "ALTER TABLE \(qt) ADD (\(colDef))"
+    }
+
+    func generateModifyColumnSQL(table: String, oldColumn: PluginColumnDefinition, newColumn: PluginColumnDefinition) -> String? {
+        let qt = oracleQualifiedTable(table)
+        var stmts: [String] = []
+
+        if oldColumn.name != newColumn.name {
+            stmts.append("ALTER TABLE \(qt) RENAME COLUMN \(quoteIdentifier(oldColumn.name)) TO \(quoteIdentifier(newColumn.name))")
+        }
+
+        var modifyParts: [String] = []
+        let colName = quoteIdentifier(newColumn.name)
+
+        let typeChanged = oldColumn.dataType.uppercased() != newColumn.dataType.uppercased()
+        let nullabilityChanged = oldColumn.isNullable != newColumn.isNullable
+        let defaultChanged = oldColumn.defaultValue != newColumn.defaultValue
+
+        if typeChanged || nullabilityChanged || defaultChanged {
+            var def = "\(colName) \(newColumn.dataType.uppercased())"
+            if let defaultValue = newColumn.defaultValue {
+                def += " DEFAULT \(oracleDefaultValue(defaultValue))"
+            } else if defaultChanged {
+                def += " DEFAULT NULL"
+            }
+            if !newColumn.isNullable {
+                def += " NOT NULL"
+            } else if nullabilityChanged {
+                def += " NULL"
+            }
+            modifyParts.append(def)
+        }
+
+        if !modifyParts.isEmpty {
+            stmts.append("ALTER TABLE \(qt) MODIFY (\(modifyParts.joined(separator: ", ")))")
+        }
+
+        return stmts.isEmpty ? nil : stmts.joined(separator: ";\n")
+    }
+
+    func generateDropColumnSQL(table: String, columnName: String) -> String? {
+        "ALTER TABLE \(oracleQualifiedTable(table)) DROP COLUMN \(quoteIdentifier(columnName))"
+    }
+
+    func generateAddIndexSQL(table: String, index: PluginIndexDefinition) -> String? {
+        oracleIndexDefinition(index, qualifiedTable: oracleQualifiedTable(table))
+    }
+
+    func generateDropIndexSQL(table: String, indexName: String) -> String? {
+        "DROP INDEX \(quoteIdentifier(indexName))"
+    }
+
+    func generateAddForeignKeySQL(table: String, fk: PluginForeignKeyDefinition) -> String? {
+        "ALTER TABLE \(oracleQualifiedTable(table)) ADD \(oracleForeignKeyConstraint(fk))"
+    }
+
+    func generateDropForeignKeySQL(table: String, constraintName: String) -> String? {
+        "ALTER TABLE \(oracleQualifiedTable(table)) DROP CONSTRAINT \(quoteIdentifier(constraintName))"
+    }
+
+    // MARK: - DDL Helpers
+
+    private func oracleQualifiedTable(_ table: String) -> String {
+        let schema = _currentSchema ?? config.username.uppercased()
+        return "\(quoteIdentifier(schema)).\(quoteIdentifier(table))"
+    }
+
+    private func oracleColumnDefinition(_ col: PluginColumnDefinition, inlinePK: Bool) -> String {
+        var def = "\(quoteIdentifier(col.name)) \(col.dataType.uppercased())"
+        if let defaultValue = col.defaultValue {
+            def += " DEFAULT \(oracleDefaultValue(defaultValue))"
+        }
+        if !col.isNullable {
+            def += " NOT NULL"
+        }
+        if inlinePK && col.isPrimaryKey {
+            def += " PRIMARY KEY"
+        }
+        return def
+    }
+
+    private func oracleDefaultValue(_ value: String) -> String {
+        let upper = value.uppercased()
+        if upper == "NULL" || upper == "SYSDATE" || upper == "SYSTIMESTAMP"
+            || upper == "SYS_GUID()" || upper == "USER"
+            || value.hasPrefix("'") || Int64(value) != nil || Double(value) != nil {
+            return value
+        }
+        return "'\(escapeStringLiteral(value))'"
+    }
+
+    private func oracleIndexDefinition(_ index: PluginIndexDefinition, qualifiedTable: String) -> String {
+        let cols = index.columns.map { quoteIdentifier($0) }.joined(separator: ", ")
+        let unique = index.isUnique ? "UNIQUE " : ""
+        return "CREATE \(unique)INDEX \(quoteIdentifier(index.name)) ON \(qualifiedTable) (\(cols))"
+    }
+
+    private func oracleForeignKeyConstraint(_ fk: PluginForeignKeyDefinition) -> String {
+        let cols = fk.columns.map { quoteIdentifier($0) }.joined(separator: ", ")
+        let refCols = fk.referencedColumns.map { quoteIdentifier($0) }.joined(separator: ", ")
+        let refTable: String
+        if let schema = fk.referencedSchema, !schema.isEmpty {
+            refTable = "\(quoteIdentifier(schema)).\(quoteIdentifier(fk.referencedTable))"
+        } else {
+            refTable = quoteIdentifier(fk.referencedTable)
+        }
+        var def = "CONSTRAINT \(quoteIdentifier(fk.name)) FOREIGN KEY (\(cols)) REFERENCES \(refTable) (\(refCols))"
+        if fk.onDelete != "NO ACTION" {
+            def += " ON DELETE \(fk.onDelete)"
+        }
+        return def
+    }
+
     // MARK: - Schema Switching
 
     func switchSchema(to schema: String) async throws {
@@ -937,53 +1149,6 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     private func effectiveSchemaEscaped(_ schema: String?) -> String {
         let raw = schema ?? _currentSchema ?? config.username.uppercased()
         return raw.replacingOccurrences(of: "'", with: "''")
-    }
-
-    private func hasTopLevelOrderBy(_ query: String) -> Bool {
-        let ns = query.uppercased() as NSString
-        let len = ns.length
-        guard len >= 8 else { return false }
-        var depth = 0
-        var i = len - 1
-        while i >= 7 {
-            let ch = ns.character(at: i)
-            if ch == 0x29 { depth += 1 }
-            else if ch == 0x28 { depth -= 1 }
-            else if depth == 0 && ch == 0x59 {
-                let start = i - 7
-                if start >= 0 {
-                    let candidate = ns.substring(with: NSRange(location: start, length: 8))
-                    if candidate == "ORDER BY" { return true }
-                }
-            }
-            i -= 1
-        }
-        return false
-    }
-
-    private func stripOracleOffsetFetch(from query: String) -> String {
-        let ns = query.uppercased() as NSString
-        let len = ns.length
-        guard len >= 6 else { return query }
-        var depth = 0
-        var i = len - 1
-        while i >= 5 {
-            let ch = ns.character(at: i)
-            if ch == 0x29 { depth += 1 }
-            else if ch == 0x28 { depth -= 1 }
-            else if depth == 0 && ch == 0x54 {
-                let start = i - 5
-                if start >= 0 {
-                    let candidate = ns.substring(with: NSRange(location: start, length: 6))
-                    if candidate == "OFFSET" {
-                        return (query as NSString).substring(to: start)
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                    }
-                }
-            }
-            i -= 1
-        }
-        return query
     }
 
     private static let fromTableRegex = try? NSRegularExpression(

@@ -19,15 +19,12 @@ internal final class DynamoDBPluginDriver: PluginDatabaseDriver, @unchecked Send
     // Table description cache to avoid repeated DescribeTable calls
     private var _tableDescriptionCache: [String: TableDescription] = [:]
 
-    // Pagination state per query
-    private var _paginationStates: [String: PaginationState] = [:]
-
     private var connection: DynamoDBConnection? {
         lock.withLock { _connection }
     }
 
     private static let logger = Logger(subsystem: "com.TablePro", category: "DynamoDBPluginDriver")
-    private static let maxItems = PluginRowLimits.defaultMax
+    private static let maxItems = PluginRowLimits.emergencyMax
 
     var serverVersion: String? {
         lock.withLock { _serverVersion }
@@ -82,7 +79,6 @@ internal final class DynamoDBPluginDriver: PluginDatabaseDriver, @unchecked Send
             _connection?.disconnect()
             _connection = nil
             _tableDescriptionCache.removeAll()
-            _paginationStates.removeAll()
         }
     }
 
@@ -181,73 +177,6 @@ internal final class DynamoDBPluginDriver: PluginDatabaseDriver, @unchecked Send
             columnTypeNames: typeNames,
             rows: rows,
             rowsAffected: 0,
-            executionTime: Date().timeIntervalSince(startTime)
-        )
-    }
-
-    func fetchRowCount(query: String) async throws -> Int {
-        guard let conn = connection else {
-            throw DynamoDBError.notConnected
-        }
-
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if let parsed = DynamoDBQueryBuilder.parseCountQuery(trimmed) {
-            if let col = parsed.filterColumn, let op = parsed.filterOp, let val = parsed.filterValue {
-                let filters = [DynamoDBFilterSpec(column: col, op: op, value: val)]
-                return try await countFilteredScanItems(
-                    tableName: parsed.tableName, conn: conn,
-                    filters: filters, logicMode: "AND"
-                )
-            }
-            return try await countItems(tableName: parsed.tableName, conn: conn)
-        }
-
-        if let parsed = DynamoDBQueryBuilder.parseScanQuery(trimmed) {
-            if !parsed.filters.isEmpty {
-                return try await countFilteredScanItems(
-                    tableName: parsed.tableName, conn: conn,
-                    filters: parsed.filters, logicMode: parsed.logicMode
-                )
-            }
-            return try await countItems(tableName: parsed.tableName, conn: conn)
-        }
-
-        if let parsed = DynamoDBQueryBuilder.parseQueryQuery(trimmed) {
-            return try await countQueryItems(parsed: parsed, conn: conn)
-        }
-
-        // For raw PartiQL, try to get count from table name
-        if let tableName = DynamoDBPartiQLParser.extractTableName(trimmed) {
-            return try await countItems(tableName: tableName, conn: conn)
-        }
-
-        return 0
-    }
-
-    func fetchRows(query: String, offset: Int, limit: Int) async throws -> PluginQueryResult {
-        let startTime = Date()
-
-        guard let conn = connection else {
-            throw DynamoDBError.notConnected
-        }
-
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if DynamoDBQueryBuilder.isTaggedQuery(trimmed) {
-            return try await executePaginatedTaggedQuery(
-                trimmed, offset: offset, limit: limit, conn: conn, startTime: startTime
-            )
-        }
-
-        // For raw PartiQL, execute and paginate client-side
-        let fullResult = try await execute(query: trimmed)
-        let pageRows = Array(fullResult.rows.dropFirst(offset).prefix(limit))
-        return PluginQueryResult(
-            columns: fullResult.columns,
-            columnTypeNames: fullResult.columnTypeNames,
-            rows: pageRows,
-            rowsAffected: fullResult.rowsAffected,
             executionTime: Date().timeIntervalSince(startTime)
         )
     }
@@ -557,21 +486,7 @@ internal final class DynamoDBPluginDriver: PluginDatabaseDriver, @unchecked Send
             extractKeySchema(from: _tableDescriptionCache[table])
         }
 
-        let typeNames: [String] = lock.withLock {
-            let matchingState = _paginationStates.values.first { state in
-                if let parsed = DynamoDBQueryBuilder.parseScanQuery(state.queryKey) {
-                    return parsed.tableName == table
-                }
-                if let parsed = DynamoDBQueryBuilder.parseQueryQuery(state.queryKey) {
-                    return parsed.tableName == table
-                }
-                return false
-            }
-            if let state = matchingState {
-                return state.columnTypeNames
-            }
-            return columns.map { _ in "S" }
-        }
+        let typeNames: [String] = columns.map { _ in "S" }
 
         let generator = DynamoDBStatementGenerator(
             tableName: table,
@@ -594,6 +509,266 @@ internal final class DynamoDBPluginDriver: PluginDatabaseDriver, @unchecked Send
 
     func allTablesMetadataSQL(schema: String?) -> String? {
         nil
+    }
+
+    // MARK: - Streaming
+
+    func streamRows(query: String) -> AsyncThrowingStream<PluginStreamElement, Error> {
+        AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
+            let streamTask = Task {
+                do {
+                    try await self.performStreamRows(query: query, continuation: continuation)
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+
+            continuation.onTermination = { @Sendable _ in
+                streamTask.cancel()
+            }
+        }
+    }
+
+    private func performStreamRows(
+        query: String,
+        continuation: AsyncThrowingStream<PluginStreamElement, Error>.Continuation
+    ) async throws {
+        guard let conn = connection else {
+            throw DynamoDBError.notConnected
+        }
+
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let parsed = DynamoDBQueryBuilder.parseScanQuery(trimmed) {
+            try await streamScan(parsed, conn: conn, continuation: continuation)
+        } else if let parsed = DynamoDBQueryBuilder.parseQueryQuery(trimmed) {
+            try await streamQuery(parsed, conn: conn, continuation: continuation)
+        } else {
+            try await streamPartiQL(trimmed, conn: conn, continuation: continuation)
+        }
+
+        continuation.finish()
+    }
+
+    private func streamScan(
+        _ parsed: DynamoDBParsedScanQuery,
+        conn: DynamoDBConnection,
+        continuation: AsyncThrowingStream<PluginStreamElement, Error>.Continuation
+    ) async throws {
+        let keySchema = try await cachedKeySchema(parsed.tableName, conn: conn)
+        let hasFilters = !parsed.filters.isEmpty
+        var headerSent = false
+        var columns: [String] = []
+        var lastEvaluatedKey: [String: DynamoDBAttributeValue]?
+
+        repeat {
+            try Task.checkCancellation()
+
+            let response = try await conn.scan(
+                tableName: parsed.tableName,
+                limit: 1000,
+                exclusiveStartKey: lastEvaluatedKey
+            )
+
+            var items = response.Items ?? []
+
+            if hasFilters {
+                items = applyClientFilters(
+                    items: items, filters: parsed.filters, logicMode: parsed.logicMode
+                )
+            }
+
+            if !items.isEmpty {
+                if !headerSent {
+                    columns = DynamoDBItemFlattener.unionColumns(from: items, keySchema: keySchema)
+                    let typeNames = DynamoDBItemFlattener.columnTypeNames(for: columns, items: items)
+                    continuation.yield(.header(PluginStreamHeader(
+                        columns: columns,
+                        columnTypeNames: typeNames,
+                        estimatedRowCount: nil
+                    )))
+                    headerSent = true
+                }
+
+                let rows = DynamoDBItemFlattener.flatten(items: items, columns: columns)
+                if !rows.isEmpty {
+                    continuation.yield(.rows(rows))
+                }
+            }
+
+            lastEvaluatedKey = response.LastEvaluatedKey
+        } while lastEvaluatedKey != nil
+
+        if !headerSent {
+            let sampleResponse = try await conn.scan(tableName: parsed.tableName, limit: 1)
+            let sampleItems = sampleResponse.Items ?? []
+            columns = DynamoDBItemFlattener.unionColumns(from: sampleItems, keySchema: keySchema)
+            let typeNames = DynamoDBItemFlattener.columnTypeNames(for: columns, items: sampleItems)
+            continuation.yield(.header(PluginStreamHeader(
+                columns: columns.isEmpty ? ["Result"] : columns,
+                columnTypeNames: typeNames.isEmpty ? ["String"] : typeNames,
+                estimatedRowCount: nil
+            )))
+        }
+    }
+
+    private func streamQuery(
+        _ parsed: DynamoDBParsedQueryQuery,
+        conn: DynamoDBConnection,
+        continuation: AsyncThrowingStream<PluginStreamElement, Error>.Continuation
+    ) async throws {
+        let keySchema = try await cachedKeySchema(parsed.tableName, conn: conn)
+
+        var expressionValues: [String: DynamoDBAttributeValue] = [:]
+        switch parsed.partitionKeyType {
+        case "N":
+            expressionValues[":pkval"] = .number(parsed.partitionKeyValue)
+        default:
+            expressionValues[":pkval"] = .string(parsed.partitionKeyValue)
+        }
+        let keyCondition = "\(parsed.partitionKeyName) = :pkval"
+
+        var headerSent = false
+        var columns: [String] = []
+        var lastEvaluatedKey: [String: DynamoDBAttributeValue]?
+
+        repeat {
+            try Task.checkCancellation()
+
+            let response = try await conn.query(
+                tableName: parsed.tableName,
+                keyConditionExpression: keyCondition,
+                expressionAttributeValues: expressionValues,
+                limit: 1000,
+                exclusiveStartKey: lastEvaluatedKey
+            )
+
+            var items = response.Items ?? []
+
+            if !parsed.filters.isEmpty {
+                items = applyClientFilters(
+                    items: items, filters: parsed.filters, logicMode: parsed.logicMode
+                )
+            }
+
+            if !headerSent && !items.isEmpty {
+                columns = DynamoDBItemFlattener.unionColumns(from: items, keySchema: keySchema)
+                let typeNames = DynamoDBItemFlattener.columnTypeNames(for: columns, items: items)
+                continuation.yield(.header(PluginStreamHeader(
+                    columns: columns,
+                    columnTypeNames: typeNames,
+                    estimatedRowCount: nil
+                )))
+                headerSent = true
+            }
+
+            if !items.isEmpty {
+                let rows = DynamoDBItemFlattener.flatten(items: items, columns: columns)
+                if !rows.isEmpty {
+                    continuation.yield(.rows(rows))
+                }
+            }
+
+            lastEvaluatedKey = response.LastEvaluatedKey
+        } while lastEvaluatedKey != nil
+
+        if !headerSent {
+            columns = DynamoDBItemFlattener.unionColumns(from: [], keySchema: keySchema)
+            let typeNames = DynamoDBItemFlattener.columnTypeNames(for: columns, items: [])
+            continuation.yield(.header(PluginStreamHeader(
+                columns: columns.isEmpty ? ["Result"] : columns,
+                columnTypeNames: typeNames.isEmpty ? ["String"] : typeNames,
+                estimatedRowCount: nil
+            )))
+        }
+    }
+
+    private func streamPartiQL(
+        _ statement: String,
+        conn: DynamoDBConnection,
+        continuation: AsyncThrowingStream<PluginStreamElement, Error>.Continuation
+    ) async throws {
+        let tableName = DynamoDBPartiQLParser.extractTableName(statement)
+        let keySchema: [(name: String, keyType: String)]
+        if let name = tableName {
+            keySchema = try await cachedKeySchema(name, conn: conn)
+        } else {
+            keySchema = []
+        }
+
+        var headerSent = false
+        var columns: [String] = []
+        var nextToken: String?
+
+        let firstResponse = try await conn.executeStatement(statement: statement)
+        var items = firstResponse.Items ?? []
+
+        if !items.isEmpty {
+            columns = DynamoDBItemFlattener.unionColumns(from: items, keySchema: keySchema)
+            let typeNames = DynamoDBItemFlattener.columnTypeNames(for: columns, items: items)
+            continuation.yield(.header(PluginStreamHeader(
+                columns: columns,
+                columnTypeNames: typeNames,
+                estimatedRowCount: nil
+            )))
+            headerSent = true
+
+            let rows = DynamoDBItemFlattener.flatten(items: items, columns: columns)
+            for row in rows {
+                continuation.yield(.rows([row]))
+            }
+        }
+
+        nextToken = firstResponse.NextToken
+
+        while let token = nextToken {
+            try Task.checkCancellation()
+
+            let response = try await conn.executeStatement(
+                statement: statement, nextToken: token
+            )
+            items = response.Items ?? []
+
+            if !headerSent && !items.isEmpty {
+                columns = DynamoDBItemFlattener.unionColumns(from: items, keySchema: keySchema)
+                let typeNames = DynamoDBItemFlattener.columnTypeNames(for: columns, items: items)
+                continuation.yield(.header(PluginStreamHeader(
+                    columns: columns,
+                    columnTypeNames: typeNames,
+                    estimatedRowCount: nil
+                )))
+                headerSent = true
+            }
+
+            if !items.isEmpty {
+                let rows = DynamoDBItemFlattener.flatten(items: items, columns: columns)
+                if !rows.isEmpty {
+                    continuation.yield(.rows(rows))
+                }
+            }
+
+            nextToken = response.NextToken
+        }
+
+        if !headerSent {
+            if let name = tableName {
+                let sampleResponse = try await conn.scan(tableName: name, limit: 1)
+                let sampleItems = sampleResponse.Items ?? []
+                columns = DynamoDBItemFlattener.unionColumns(from: sampleItems, keySchema: keySchema)
+                let typeNames = DynamoDBItemFlattener.columnTypeNames(for: columns, items: sampleItems)
+                continuation.yield(.header(PluginStreamHeader(
+                    columns: columns.isEmpty ? ["Result"] : columns,
+                    columnTypeNames: typeNames.isEmpty ? ["String"] : typeNames,
+                    estimatedRowCount: nil
+                )))
+            } else {
+                continuation.yield(.header(PluginStreamHeader(
+                    columns: ["Result"],
+                    columnTypeNames: ["String"],
+                    estimatedRowCount: nil
+                )))
+            }
+        }
     }
 
     // MARK: - Tagged Query Execution
@@ -622,60 +797,6 @@ internal final class DynamoDBPluginDriver: PluginDatabaseDriver, @unchecked Send
         }
 
         throw DynamoDBError.serverError("Invalid tagged query format")
-    }
-
-    private func executePaginatedTaggedQuery(
-        _ query: String, offset: Int, limit: Int,
-        conn: DynamoDBConnection, startTime: Date
-    ) async throws -> PluginQueryResult {
-        let queryKey = query
-
-        // If offset is 0, start a fresh scan/query
-        if offset == 0 {
-            lock.withLock { _paginationStates.removeValue(forKey: queryKey) }
-        }
-
-        var state = lock.withLock { _paginationStates[queryKey] }
-
-        // If we have cached items that cover the requested range, serve from cache
-        if let existingState = state {
-            let end = min(offset + limit, existingState.allItems.count)
-            if offset < existingState.allItems.count {
-                let pageItems = Array(existingState.allItems[offset..<end])
-                let rows = DynamoDBItemFlattener.flatten(items: pageItems, columns: existingState.discoveredColumns)
-                return PluginQueryResult(
-                    columns: existingState.discoveredColumns,
-                    columnTypeNames: existingState.columnTypeNames,
-                    rows: rows,
-                    rowsAffected: 0,
-                    executionTime: Date().timeIntervalSince(startTime)
-                )
-            }
-
-            // Need more items but exhausted
-            if existingState.isExhausted {
-                return emptyResult(columns: existingState.discoveredColumns,
-                                   typeNames: existingState.columnTypeNames,
-                                   startTime: startTime)
-            }
-        }
-
-        // Fetch more items from DynamoDB
-        if let parsed = DynamoDBQueryBuilder.parseScanQuery(query) {
-            return try await fetchMoreScanItems(
-                parsed: parsed, queryKey: queryKey, offset: offset, limit: limit,
-                existingState: state, conn: conn, startTime: startTime
-            )
-        }
-
-        if let parsed = DynamoDBQueryBuilder.parseQueryQuery(query) {
-            return try await fetchMoreQueryItems(
-                parsed: parsed, queryKey: queryKey, offset: offset, limit: limit,
-                existingState: state, conn: conn, startTime: startTime
-            )
-        }
-
-        return try await executeTaggedQuery(query, conn: conn, startTime: startTime)
     }
 
     // MARK: - Scan Execution
@@ -790,161 +911,6 @@ internal final class DynamoDBPluginDriver: PluginDatabaseDriver, @unchecked Send
         return PluginQueryResult(
             columns: columns,
             columnTypeNames: typeNames,
-            rows: rows,
-            rowsAffected: 0,
-            executionTime: Date().timeIntervalSince(startTime)
-        )
-    }
-
-    // MARK: - Paginated Fetch Helpers
-
-    private func fetchMoreScanItems(
-        parsed: DynamoDBParsedScanQuery,
-        queryKey: String,
-        offset: Int,
-        limit: Int,
-        existingState: PaginationState?,
-        conn: DynamoDBConnection,
-        startTime: Date
-    ) async throws -> PluginQueryResult {
-        let keySchema = try await cachedKeySchema(parsed.tableName, conn: conn)
-        var state = existingState ?? PaginationState(
-            queryKey: queryKey,
-            allItems: [],
-            lastEvaluatedKey: nil,
-            isExhausted: false,
-            discoveredColumns: [],
-            columnTypeNames: [],
-            keySchema: keySchema
-        )
-
-        // Fetch until we have enough items or exhaust the table
-        let needed = offset + limit
-        while state.allItems.count < needed && !state.isExhausted {
-            let batchSize = min(needed - state.allItems.count, 1000)
-            let response = try await conn.scan(
-                tableName: parsed.tableName,
-                limit: batchSize,
-                exclusiveStartKey: state.lastEvaluatedKey
-            )
-
-            var newItems = response.Items ?? []
-
-            if !parsed.filters.isEmpty {
-                newItems = applyClientFilters(
-                    items: newItems, filters: parsed.filters, logicMode: parsed.logicMode
-                )
-            }
-
-            state.allItems.append(contentsOf: newItems)
-            state.lastEvaluatedKey = response.LastEvaluatedKey
-
-            if response.LastEvaluatedKey == nil {
-                state.isExhausted = true
-            }
-
-            if state.allItems.count >= Self.maxItems {
-                state.isExhausted = true
-                state.allItems = Array(state.allItems.prefix(Self.maxItems))
-            }
-        }
-
-        // Update discovered columns from all items
-        state.discoveredColumns = DynamoDBItemFlattener.unionColumns(from: state.allItems, keySchema: keySchema)
-        state.columnTypeNames = DynamoDBItemFlattener.columnTypeNames(
-            for: state.discoveredColumns, items: state.allItems
-        )
-
-        lock.withLock { _paginationStates[queryKey] = state }
-
-        // Serve the requested page
-        let end = min(offset + limit, state.allItems.count)
-        guard offset < state.allItems.count else {
-            return emptyResult(columns: state.discoveredColumns, typeNames: state.columnTypeNames, startTime: startTime)
-        }
-        let pageItems = Array(state.allItems[offset..<end])
-        let rows = DynamoDBItemFlattener.flatten(items: pageItems, columns: state.discoveredColumns)
-
-        return PluginQueryResult(
-            columns: state.discoveredColumns,
-            columnTypeNames: state.columnTypeNames,
-            rows: rows,
-            rowsAffected: 0,
-            executionTime: Date().timeIntervalSince(startTime)
-        )
-    }
-
-    private func fetchMoreQueryItems(
-        parsed: DynamoDBParsedQueryQuery,
-        queryKey: String,
-        offset: Int,
-        limit: Int,
-        existingState: PaginationState?,
-        conn: DynamoDBConnection,
-        startTime: Date
-    ) async throws -> PluginQueryResult {
-        let keySchema = try await cachedKeySchema(parsed.tableName, conn: conn)
-        var state = existingState ?? PaginationState(
-            queryKey: queryKey,
-            allItems: [],
-            lastEvaluatedKey: nil,
-            isExhausted: false,
-            discoveredColumns: [],
-            columnTypeNames: [],
-            keySchema: keySchema
-        )
-
-        var expressionValues: [String: DynamoDBAttributeValue] = [:]
-        switch parsed.partitionKeyType {
-        case "N":
-            expressionValues[":pkval"] = .number(parsed.partitionKeyValue)
-        default:
-            expressionValues[":pkval"] = .string(parsed.partitionKeyValue)
-        }
-        let keyCondition = "\(parsed.partitionKeyName) = :pkval"
-
-        let needed = offset + limit
-        while state.allItems.count < needed && !state.isExhausted {
-            let batchSize = min(needed - state.allItems.count, 1000)
-            let response = try await conn.query(
-                tableName: parsed.tableName,
-                keyConditionExpression: keyCondition,
-                expressionAttributeValues: expressionValues,
-                limit: batchSize,
-                exclusiveStartKey: state.lastEvaluatedKey
-            )
-
-            let fetchedItems = response.Items ?? []
-            state.allItems.append(contentsOf: fetchedItems)
-            state.lastEvaluatedKey = response.LastEvaluatedKey
-
-            if response.LastEvaluatedKey == nil {
-                state.isExhausted = true
-            }
-
-            if state.allItems.count >= Self.maxItems {
-                state.isExhausted = true
-                state.allItems = Array(state.allItems.prefix(Self.maxItems))
-            }
-        }
-
-        state.discoveredColumns = DynamoDBItemFlattener.unionColumns(from: state.allItems, keySchema: keySchema)
-        state.columnTypeNames = DynamoDBItemFlattener.columnTypeNames(
-            for: state.discoveredColumns, items: state.allItems
-        )
-
-        lock.withLock { _paginationStates[queryKey] = state }
-
-        let end = min(offset + limit, state.allItems.count)
-        guard offset < state.allItems.count else {
-            return emptyResult(columns: state.discoveredColumns, typeNames: state.columnTypeNames, startTime: startTime)
-        }
-        let pageItems = Array(state.allItems[offset..<end])
-        let rows = DynamoDBItemFlattener.flatten(items: pageItems, columns: state.discoveredColumns)
-
-        return PluginQueryResult(
-            columns: state.discoveredColumns,
-            columnTypeNames: state.columnTypeNames,
             rows: rows,
             rowsAffected: 0,
             executionTime: Date().timeIntervalSince(startTime)
@@ -1251,31 +1217,9 @@ internal final class DynamoDBPluginDriver: PluginDatabaseDriver, @unchecked Send
         }
     }
 
-    private func emptyResult(columns: [String], typeNames: [String], startTime: Date) -> PluginQueryResult {
-        PluginQueryResult(
-            columns: columns.isEmpty ? ["Result"] : columns,
-            columnTypeNames: typeNames.isEmpty ? ["String"] : typeNames,
-            rows: [],
-            rowsAffected: 0,
-            executionTime: Date().timeIntervalSince(startTime)
-        )
-    }
-
     private func formatBytes(_ bytes: Int64) -> String {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .binary
         return formatter.string(fromByteCount: bytes)
     }
-}
-
-// MARK: - Pagination State
-
-private struct PaginationState {
-    let queryKey: String
-    var allItems: [[String: DynamoDBAttributeValue]]
-    var lastEvaluatedKey: [String: DynamoDBAttributeValue]?
-    var isExhausted: Bool
-    var discoveredColumns: [String]
-    var columnTypeNames: [String]
-    var keySchema: [(name: String, keyType: String)]
 }

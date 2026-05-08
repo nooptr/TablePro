@@ -24,7 +24,8 @@ final class MSSQLPlugin: NSObject, TableProPlugin, DriverPlugin {
 
     // MARK: - UI/Capability Metadata
 
-    static let postConnectActions: [PostConnectAction] = [.selectDatabaseFromLastSession]
+    static let supportsSchemaSwitching = true
+    static let postConnectActions: [PostConnectAction] = [.selectDatabaseFromLastSession, .selectSchemaFromLastSession]
     static let brandColorHex = "#E34517"
     static let systemDatabaseNames: [String] = ["master", "tempdb", "model", "msdb"]
     static let defaultSchemaName = "dbo"
@@ -93,6 +94,8 @@ final class MSSQLPlugin: NSObject, TableProPlugin, DriverPlugin {
         autoLimitStyle: .top
     )
 
+    static let supportsDropDatabase = true
+
     func createDriver(config: DriverConnectionConfig) -> any PluginDatabaseDriver {
         MSSQLPluginDriver(config: config)
     }
@@ -100,41 +103,69 @@ final class MSSQLPlugin: NSObject, TableProPlugin, DriverPlugin {
 
 // MARK: - Global FreeTDS initialization
 
-private let freetdsLastErrorLock = NSLock()
-private var _freetdsLastError = ""
+/// Per-connection error storage keyed by DBPROCESS pointer.
+/// Falls back to a global error string when the DBPROCESS is nil (pre-connection errors).
+private let freetdsErrorLock = NSLock()
+private var freetdsConnectionErrors: [UnsafeRawPointer: String] = [:]
+private var freetdsGlobalError = ""
 
-private var freetdsLastError: String {
-    get {
-        freetdsLastErrorLock.lock()
-        defer { freetdsLastErrorLock.unlock() }
-        return _freetdsLastError
+private func freetdsGetError(for dbproc: UnsafeMutablePointer<DBPROCESS>?) -> String {
+    freetdsErrorLock.lock()
+    defer { freetdsErrorLock.unlock() }
+    if let dbproc {
+        return freetdsConnectionErrors[UnsafeRawPointer(dbproc)] ?? freetdsGlobalError
     }
-    set {
-        freetdsLastErrorLock.lock()
-        defer { freetdsLastErrorLock.unlock() }
-        _freetdsLastError = newValue
+    return freetdsGlobalError
+}
+
+private func freetdsClearError(for dbproc: UnsafeMutablePointer<DBPROCESS>?) {
+    freetdsErrorLock.lock()
+    defer { freetdsErrorLock.unlock() }
+    if let dbproc {
+        freetdsConnectionErrors[UnsafeRawPointer(dbproc)] = nil
+    } else {
+        freetdsGlobalError = ""
     }
+}
+
+private func freetdsSetError(_ msg: String, for dbproc: UnsafeMutablePointer<DBPROCESS>?, overwrite: Bool = false) {
+    freetdsErrorLock.lock()
+    defer { freetdsErrorLock.unlock() }
+    if let dbproc {
+        let key = UnsafeRawPointer(dbproc)
+        if overwrite || (freetdsConnectionErrors[key]?.isEmpty ?? true) {
+            freetdsConnectionErrors[key] = msg
+        }
+    } else if overwrite || freetdsGlobalError.isEmpty {
+        freetdsGlobalError = msg
+    }
+}
+
+private func freetdsUnregister(_ dbproc: UnsafeMutablePointer<DBPROCESS>) {
+    freetdsErrorLock.lock()
+    defer { freetdsErrorLock.unlock() }
+    freetdsConnectionErrors.removeValue(forKey: UnsafeRawPointer(dbproc))
 }
 
 private let freetdsLogger = Logger(subsystem: "com.TablePro", category: "FreeTDSConnection")
 
 private let freetdsInitOnce: Void = {
     _ = dbinit()
-    _ = dberrhandle { _, _, dberr, _, dberrstr, oserrstr in
+    _ = dberrhandle { dbproc, _, dberr, _, dberrstr, oserrstr in
         var msg = "db-lib error \(dberr)"
         if let s = dberrstr { msg += ": \(String(cString: s))" }
         if let s = oserrstr, String(cString: s) != "Success" { msg += " (os: \(String(cString: s)))" }
         freetdsLogger.error("FreeTDS: \(msg)")
-        if freetdsLastError.isEmpty {
-            freetdsLastError = msg
-        }
+        freetdsSetError(msg, for: dbproc)
         return INT_CANCEL
     }
-    _ = dbmsghandle { _, msgno, _, severity, msgtext, _, _, _ in
+    _ = dbmsghandle { dbproc, msgno, _, severity, msgtext, _, _, _ in
         guard let text = msgtext else { return 0 }
         let msg = String(cString: text)
         if severity > 10 {
-            freetdsLastError = msg
+            // SQL Server sends informational messages first, error messages last —
+            // overwrite so the most specific error is kept
+            freetdsSetError(msg, for: dbproc, overwrite: true)
             freetdsLogger.error("FreeTDS msg \(msgno) sev \(severity): \(msg)")
         } else {
             freetdsLogger.debug("FreeTDS msg \(msgno): \(msg)")
@@ -196,14 +227,16 @@ private final class FreeTDSConnection: @unchecked Sendable {
         _ = dbsetlname(login, user, Int32(DBSETUSER))
         _ = dbsetlname(login, password, Int32(DBSETPWD))
         _ = dbsetlname(login, "TablePro", Int32(DBSETAPP))
+        _ = dbsetlname(login, "us_english", Int32(DBSETNATLANG))
         _ = dbsetlname(login, "UTF-8", Int32(DBSETCHARSET))
         _ = dbsetlversion(login, UInt8(DBVERSION_74))
 
-        freetdsLastError = ""
+        freetdsClearError(for: nil)
         let serverName = "\(host):\(port)"
         guard let proc = dbopen(login, serverName) else {
-            let detail = freetdsLastError.isEmpty ? "Check host, port, and credentials" : freetdsLastError
-            throw MSSQLPluginError.connectionFailed("Failed to connect to \(host):\(port) — \(detail)")
+            let detail = freetdsGetError(for: nil)
+            let msg = detail.isEmpty ? "Check host, port, and credentials" : detail
+            throw MSSQLPluginError.connectionFailed("Failed to connect to \(host):\(port) — \(msg)")
         }
 
         if !database.isEmpty {
@@ -239,6 +272,7 @@ private final class FreeTDSConnection: @unchecked Sendable {
         lock.unlock()
 
         if let handle = handle {
+            freetdsUnregister(handle)
             queue.async {
                 _ = dbclose(handle)
             }
@@ -273,13 +307,14 @@ private final class FreeTDSConnection: @unchecked Sendable {
         _isCancelled = false
         lock.unlock()
 
-        freetdsLastError = ""
+        freetdsClearError(for: proc)
         if dbcmd(proc, query) == FAIL {
             throw MSSQLPluginError.queryFailed("Failed to prepare query")
         }
         if dbsqlexec(proc) == FAIL {
-            let detail = freetdsLastError.isEmpty ? "Query execution failed" : freetdsLastError
-            throw MSSQLPluginError.queryFailed(detail)
+            let detail = freetdsGetError(for: proc)
+            let msg = detail.isEmpty ? "Query execution failed" : detail
+            throw MSSQLPluginError.queryFailed(msg)
         }
 
         var allColumns: [String] = []
@@ -349,7 +384,7 @@ private final class FreeTDSConnection: @unchecked Sendable {
                     }
                 }
                 allRows.append(row)
-                if allRows.count >= PluginRowLimits.defaultMax {
+                if allRows.count >= PluginRowLimits.emergencyMax {
                     truncated = true
                     break
                 }
@@ -364,6 +399,129 @@ private final class FreeTDSConnection: @unchecked Sendable {
             affectedRows: affectedRows,
             isTruncated: truncated
         )
+    }
+
+    func streamQuery(
+        _ query: String,
+        continuation: AsyncThrowingStream<PluginStreamElement, Error>.Continuation
+    ) async throws {
+        let queryToRun = String(query)
+        try await pluginDispatchAsync(on: queue) { [self] in
+            try self.streamQuerySync(queryToRun, continuation: continuation)
+        }
+    }
+
+    private func streamQuerySync(
+        _ query: String,
+        continuation: AsyncThrowingStream<PluginStreamElement, Error>.Continuation
+    ) throws {
+        guard let proc = dbproc else {
+            throw MSSQLPluginError.notConnected
+        }
+
+        _ = dbcanquery(proc)
+
+        lock.lock()
+        _isCancelled = false
+        lock.unlock()
+
+        freetdsClearError(for: proc)
+        if dbcmd(proc, query) == FAIL {
+            throw MSSQLPluginError.queryFailed("Failed to prepare query")
+        }
+        if dbsqlexec(proc) == FAIL {
+            let detail = freetdsGetError(for: proc)
+            let msg = detail.isEmpty ? "Query execution failed" : detail
+            throw MSSQLPluginError.queryFailed(msg)
+        }
+
+        var headerSent = false
+
+        while true {
+            lock.lock()
+            let cancelledBetweenResults = _isCancelled || Task.isCancelled
+            if cancelledBetweenResults { _isCancelled = false }
+            lock.unlock()
+            if cancelledBetweenResults {
+                continuation.finish(throwing: CancellationError())
+                return
+            }
+
+            let resCode = dbresults(proc)
+            if resCode == FAIL {
+                continuation.finish(throwing: MSSQLPluginError.queryFailed("Query execution failed"))
+                return
+            }
+            if resCode == Int32(NO_MORE_RESULTS) {
+                break
+            }
+
+            let numCols = dbnumcols(proc)
+            if numCols <= 0 { continue }
+
+            if !headerSent {
+                var cols: [String] = []
+                var typeNames: [String] = []
+                for i in 1...numCols {
+                    let name = dbcolname(proc, Int32(i)).map { String(cString: $0) } ?? "col\(i)"
+                    cols.append(name)
+                    typeNames.append(Self.freetdsTypeName(dbcoltype(proc, Int32(i))))
+                }
+                continuation.yield(.header(PluginStreamHeader(
+                    columns: cols,
+                    columnTypeNames: typeNames,
+                    estimatedRowCount: nil
+                )))
+                headerSent = true
+            }
+
+            let batchSize = 5_000
+            var batch: [PluginRow] = []
+            batch.reserveCapacity(batchSize)
+
+            while true {
+                let rowCode = dbnextrow(proc)
+                if rowCode == Int32(NO_MORE_ROWS) { break }
+                if rowCode == FAIL { break }
+
+                lock.lock()
+                let cancelled = _isCancelled || Task.isCancelled
+                if cancelled { _isCancelled = false }
+                lock.unlock()
+                if cancelled {
+                    if !batch.isEmpty {
+                        continuation.yield(.rows(batch))
+                    }
+                    continuation.finish(throwing: CancellationError())
+                    return
+                }
+
+                var row: [String?] = []
+                for i in 1...numCols {
+                    let len = dbdatlen(proc, Int32(i))
+                    let colType = dbcoltype(proc, Int32(i))
+                    if len <= 0 && colType != Int32(SYBBIT) {
+                        row.append(nil)
+                    } else if let ptr = dbdata(proc, Int32(i)) {
+                        let str = Self.columnValueAsString(proc: proc, ptr: ptr, srcType: colType, srcLen: len)
+                        row.append(str)
+                    } else {
+                        row.append(nil)
+                    }
+                }
+                batch.append(row)
+                if batch.count >= batchSize {
+                    continuation.yield(.rows(batch))
+                    batch.removeAll(keepingCapacity: true)
+                }
+            }
+
+            if !batch.isEmpty {
+                continuation.yield(.rows(batch))
+            }
+        }
+
+        continuation.finish()
     }
 
     private static func columnValueAsString(proc: UnsafeMutablePointer<DBPROCESS>, ptr: UnsafePointer<BYTE>, srcType: Int32, srcLen: DBINT) -> String? {
@@ -649,6 +807,26 @@ final class MSSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         return (statement: sql, parameters: parameters)
     }
 
+    // MARK: - Streaming
+
+    func streamRows(query: String) -> AsyncThrowingStream<PluginStreamElement, Error> {
+        guard let conn = freeTDSConn else {
+            return AsyncThrowingStream { $0.finish(throwing: MSSQLPluginError.notConnected) }
+        }
+        return AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
+            let streamTask = Task {
+                do {
+                    try await conn.streamQuery(query, continuation: continuation)
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { @Sendable _ in
+                streamTask.cancel()
+            }
+        }
+    }
+
     func cancelQuery() throws {
         freeTDSConn?.cancelCurrentQuery()
     }
@@ -675,29 +853,6 @@ final class MSSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
 
         let sql = "EXEC sp_executesql N'\(Self.escapeNString(convertedQuery))', N'\(paramDecls)', \(paramAssigns)"
         return try await execute(query: sql)
-    }
-
-    func fetchRowCount(query: String) async throws -> Int {
-        let countQuery = "SELECT COUNT_BIG(*) FROM (\(query)) AS __cnt"
-        let result = try await execute(query: countQuery)
-        guard let row = result.rows.first,
-              let cell = row.first,
-              let str = cell,
-              let count = Int(str) else {
-            return 0
-        }
-        return count
-    }
-
-    func fetchRows(query: String, offset: Int, limit: Int) async throws -> PluginQueryResult {
-        var base = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        while base.hasSuffix(";") {
-            base = String(base.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        base = stripMSSQLOffsetFetch(from: base)
-        let orderBy = hasTopLevelOrderBy(base) ? "" : " ORDER BY (SELECT NULL)"
-        let paginated = "\(base)\(orderBy) OFFSET \(offset) ROWS FETCH NEXT \(limit) ROWS ONLY"
-        return try await execute(query: paginated)
     }
 
     func fetchApproximateRowCount(table: String, schema: String?) async throws -> Int? {
@@ -1176,9 +1331,18 @@ final class MSSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         return PluginDatabaseMetadata(name: database)
     }
 
-    func createDatabase(name: String, charset: String, collation: String?) async throws {
-        let quotedName = "[\(name.replacingOccurrences(of: "]", with: "]]"))]"
+    func createDatabaseFormSpec() async throws -> PluginCreateDatabaseFormSpec? {
+        PluginCreateDatabaseFormSpec(fields: [], footnote: nil)
+    }
+
+    func createDatabase(_ request: PluginCreateDatabaseRequest) async throws {
+        let quotedName = "[\(request.name.replacingOccurrences(of: "]", with: "]]"))]"
         _ = try await execute(query: "CREATE DATABASE \(quotedName)")
+    }
+
+    func dropDatabase(name: String) async throws {
+        let quotedName = "[\(name.replacingOccurrences(of: "]", with: "]]"))]"
+        _ = try await execute(query: "DROP DATABASE \(quotedName)")
     }
 
     // MARK: - All Tables Metadata
@@ -1409,28 +1573,6 @@ final class MSSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         return raw.replacingOccurrences(of: "'", with: "''")
     }
 
-    private func hasTopLevelOrderBy(_ query: String) -> Bool {
-        let ns = query.uppercased() as NSString
-        let len = ns.length
-        guard len >= 8 else { return false }
-        var depth = 0
-        var i = len - 1
-        while i >= 7 {
-            let ch = ns.character(at: i)
-            if ch == 0x29 { depth += 1 }
-            else if ch == 0x28 { depth -= 1 }
-            else if depth == 0 && ch == 0x59 {
-                let start = i - 7
-                if start >= 0 {
-                    let candidate = ns.substring(with: NSRange(location: start, length: 8))
-                    if candidate == "ORDER BY" { return true }
-                }
-            }
-            i -= 1
-        }
-        return false
-    }
-
     // MARK: - Create Table DDL
 
     func generateCreateTableSQL(definition: PluginCreateTableDefinition) -> String? {
@@ -1519,30 +1661,90 @@ final class MSSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         return def
     }
 
-    private func stripMSSQLOffsetFetch(from query: String) -> String {
-        let ns = query.uppercased() as NSString
-        let len = ns.length
-        guard len >= 6 else { return query }
-        var depth = 0
-        var i = len - 1
-        while i >= 5 {
-            let ch = ns.character(at: i)
-            if ch == 0x29 { depth += 1 }
-            else if ch == 0x28 { depth -= 1 }
-            else if depth == 0 && ch == 0x54 {
-                let start = i - 5
-                if start >= 0 {
-                    let candidate = ns.substring(with: NSRange(location: start, length: 6))
-                    if candidate == "OFFSET" {
-                        return (query as NSString).substring(to: start)
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                    }
-                }
-            }
-            i -= 1
-        }
-        return query
+    // MARK: - ALTER TABLE DDL
+
+    private func mssqlQualifiedTable(_ table: String) -> String {
+        "\(quoteIdentifier(_currentSchema)).\(quoteIdentifier(table))"
     }
+
+    func generateAddColumnSQL(table: String, column: PluginColumnDefinition) -> String? {
+        "ALTER TABLE \(mssqlQualifiedTable(table)) ADD \(mssqlColumnDefinition(column, inlinePK: false))"
+    }
+
+    func generateModifyColumnSQL(table: String, oldColumn: PluginColumnDefinition, newColumn: PluginColumnDefinition) -> String? {
+        let qt = mssqlQualifiedTable(table)
+        var stmts: [String] = []
+        let needsTypeChange = oldColumn.dataType != newColumn.dataType || oldColumn.isNullable != newColumn.isNullable
+        let defaultChanged = oldColumn.defaultValue != newColumn.defaultValue
+
+        // Rename column first so subsequent statements reference the correct name
+        if oldColumn.name != newColumn.name {
+            let escapedPath = "\(escapeStringLiteral(_currentSchema)).\(escapeStringLiteral(table)).\(escapeStringLiteral(oldColumn.name))"
+            stmts.append("EXEC sp_rename '\(escapedPath)', '\(escapeStringLiteral(newColumn.name))', 'COLUMN'")
+        }
+
+        let colName = quoteIdentifier(newColumn.name)
+
+        // Drop existing default constraint before ALTER COLUMN or default change
+        if (defaultChanged || needsTypeChange) && oldColumn.defaultValue != nil {
+            let objectId = escapeStringLiteral("\(_currentSchema).\(table)")
+            stmts.append("""
+                DECLARE @dfName NVARCHAR(256); \
+                SELECT @dfName = dc.name FROM sys.default_constraints dc \
+                JOIN sys.columns c ON dc.parent_column_id = c.column_id AND dc.parent_object_id = c.object_id \
+                WHERE c.name = '\(escapeStringLiteral(newColumn.name))' \
+                AND dc.parent_object_id = OBJECT_ID('\(objectId)'); \
+                IF @dfName IS NOT NULL EXEC('ALTER TABLE \(qt) DROP CONSTRAINT [' + @dfName + ']')
+                """)
+        }
+
+        if needsTypeChange {
+            let nullable = newColumn.isNullable ? "NULL" : "NOT NULL"
+            stmts.append("ALTER TABLE \(qt) ALTER COLUMN \(colName) \(newColumn.dataType) \(nullable)")
+        }
+
+        if defaultChanged, let defaultValue = newColumn.defaultValue {
+            stmts.append("ALTER TABLE \(qt) ADD DEFAULT \(mssqlDefaultValue(defaultValue)) FOR \(colName)")
+        }
+
+        return stmts.isEmpty ? nil : stmts.joined(separator: ";\n")
+    }
+
+    func generateDropColumnSQL(table: String, columnName: String) -> String? {
+        "ALTER TABLE \(mssqlQualifiedTable(table)) DROP COLUMN \(quoteIdentifier(columnName))"
+    }
+
+    func generateAddIndexSQL(table: String, index: PluginIndexDefinition) -> String? {
+        mssqlIndexDefinition(index, qualifiedTable: mssqlQualifiedTable(table))
+    }
+
+    func generateDropIndexSQL(table: String, indexName: String) -> String? {
+        "DROP INDEX \(quoteIdentifier(indexName)) ON \(mssqlQualifiedTable(table))"
+    }
+
+    func generateAddForeignKeySQL(table: String, fk: PluginForeignKeyDefinition) -> String? {
+        "ALTER TABLE \(mssqlQualifiedTable(table)) ADD \(mssqlForeignKeyDefinition(fk))"
+    }
+
+    func generateDropForeignKeySQL(table: String, constraintName: String) -> String? {
+        "ALTER TABLE \(mssqlQualifiedTable(table)) DROP CONSTRAINT \(quoteIdentifier(constraintName))"
+    }
+
+    func generateModifyPrimaryKeySQL(table: String, oldColumns: [String], newColumns: [String], constraintName: String?) -> [String]? {
+        let qt = mssqlQualifiedTable(table)
+        var stmts: [String] = []
+        if !oldColumns.isEmpty {
+            let name = constraintName.map { quoteIdentifier($0) } ?? "/* unknown constraint */"
+            stmts.append("ALTER TABLE \(qt) DROP CONSTRAINT \(name)")
+        }
+        if !newColumns.isEmpty {
+            let cols = newColumns.map { quoteIdentifier($0) }.joined(separator: ", ")
+            let pkName = constraintName.map { quoteIdentifier($0) } ?? quoteIdentifier("PK_\(table)")
+            stmts.append("ALTER TABLE \(qt) ADD CONSTRAINT \(pkName) PRIMARY KEY (\(cols))")
+        }
+        return stmts.isEmpty ? nil : stmts
+    }
+
 }
 
 // MARK: - Errors

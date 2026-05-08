@@ -45,8 +45,13 @@ Click a table in the sidebar, then click the **Structure** tab. Or right-click a
 | **Type** | Data type (VARCHAR, INT, etc.) |
 | **Nullable** | Whether NULL values are allowed |
 | **Default** | Default value if none specified |
-| **Extra** | Additional attributes (AUTO_INCREMENT, etc.) |
-| **Key** | Primary key (PRI), Foreign key (FOR), etc. |
+| **Primary Key** | Whether the column is part of the primary key |
+| **Auto Inc** | AUTO_INCREMENT / SERIAL |
+| **Comment** | Column comment |
+| **Charset** | Character set (MySQL/MariaDB only) |
+| **Collation** | Collation (MySQL/MariaDB only) |
+
+Use the filter field at the top to search columns by name. Click any column header to sort.
 
 ## Indexes Tab
 
@@ -67,10 +72,20 @@ Click a table in the sidebar, then click the **Structure** tab. Or right-click a
 | Property | Description |
 |----------|-------------|
 | **Name** | Index name |
-| **Columns** | Columns included in the index |
-| **Type** | BTREE, HASH, FULLTEXT, etc. |
+| **Columns** | Columns included in the index. MySQL prefix lengths shown as `col(10)` |
+| **Type** | BTREE, HASH, FULLTEXT, GIN, GIST, BRIN, etc. |
 | **Unique** | Whether the index enforces uniqueness |
-| **Primary** | Whether this is the primary key |
+| **Condition** | WHERE clause for partial indexes (PostgreSQL) |
+
+### Add and Drop Indexes
+
+Click **+** to add a new index, **-** or `Delete` to mark an index for removal. Multi-column indexes are supported by adding multiple column entries to one index row.
+
+- **Partial indexes (PostgreSQL)**: enter a `WHERE` predicate in the **Condition** field. The generated DDL emits `CREATE INDEX ... WHERE ...`.
+- **Prefix length (MySQL/MariaDB)**: append `(N)` to the column entry, for example `email(20)`. Useful for `TEXT` and long `VARCHAR` columns.
+- **Index type**: pick from the type dropdown. Available types depend on the database (BTREE everywhere, GIN/GIST/BRIN on PostgreSQL, FULLTEXT/SPATIAL on MySQL).
+
+Changes are queued. Click **Apply** to preview the `CREATE INDEX` / `DROP INDEX` statements before executing.
 
 ## Foreign Keys Tab
 
@@ -91,10 +106,34 @@ Click a table in the sidebar, then click the **Structure** tab. Or right-click a
 | Property | Description |
 |----------|-------------|
 | **Name** | Constraint name |
-| **Column** | Local column(s) |
-| **References** | Target table and column |
-| **On Delete** | Action when referenced row is deleted |
+| **Columns** | Local column(s) |
+| **Ref Table** | Referenced table |
+| **Ref Columns** | Referenced column(s) |
+| **Ref Schema** | Referenced schema (for cross-schema references) |
+| **On Delete** | Action when referenced row is deleted (NO ACTION, CASCADE, SET NULL, SET DEFAULT, RESTRICT) |
 | **On Update** | Action when referenced row is updated |
+
+On Delete and On Update use dropdown pickers with all standard referential actions.
+
+### Add and Drop Foreign Keys
+
+Click **+** to add a new foreign key, **-** or `Delete` to remove one. The local and referenced columns use dropdowns populated from the live schema, so typos surface as missing entries rather than runtime errors.
+
+- **Cross-schema references**: pick a different schema in the **Ref Schema** column for PostgreSQL or MySQL. The generated DDL qualifies the referenced table (`other_schema.other_table`).
+- **Composite foreign keys**: add multiple column pairs to a single FK entry.
+- **Referential actions**: configure `ON DELETE` and `ON UPDATE` per FK.
+
+Changes are queued. Apply to preview the generated `ALTER TABLE ... ADD CONSTRAINT` / `DROP CONSTRAINT` SQL.
+
+## Primary Keys
+
+Mark one or more columns as primary key in the **Columns** tab by toggling the **Primary Key** flag. Multiple flagged columns produce a composite primary key. The generated DDL emits a single `PRIMARY KEY (col1, col2)` clause.
+
+Changing a primary key on an existing table executes as a drop-and-add sequence. SQLite and ClickHouse do not support modifying primary keys without recreating the table: TablePro disables the action on those databases.
+
+## Table Options (MySQL/MariaDB)
+
+The Columns tab toolbar exposes table-level **Charset** and **Collation** pickers for MySQL and MariaDB. Changes generate `ALTER TABLE ... CONVERT TO CHARACTER SET ...` and update the table's default collation. Per-column overrides remain available in the column detail panel.
 
 ## DDL Tab
 
@@ -112,7 +151,11 @@ Click a table in the sidebar, then click the **Structure** tab. Or right-click a
   />
 </Frame>
 
-Select all with `Cmd+A` and copy with `Cmd+C`. Useful for recreating tables, documenting schemas, or version control.
+The DDL view uses tree-sitter syntax highlighting with line numbers. Use the toolbar buttons to:
+
+- **Copy** the DDL to clipboard
+- **Export** as a `.sql` file
+- **Open in Editor** to send the DDL to a new query tab for editing
 
 ## Creating a New Table
 
@@ -135,6 +178,22 @@ Supported databases: MySQL, MariaDB, PostgreSQL, SQLite, SQL Server, ClickHouse,
 <Warning>
 Structure modifications alter your database schema. Always backup important data before making changes.
 </Warning>
+
+### Database Support
+
+Not all databases support every ALTER TABLE operation. TablePro disables unsupported actions in the UI.
+
+| Operation | MySQL / MariaDB | PostgreSQL | SQLite | ClickHouse | SQL Server | DuckDB | Oracle |
+|-----------|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| Add column | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| Modify column | Yes | Yes | Rename only | Yes | Yes | Yes | Yes |
+| Drop column | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| Add / drop index | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| Add / drop FK | Yes | Yes | - | - | Yes | Yes | Yes |
+| Modify PK | Yes | Yes | - | - | Yes | Yes | Yes |
+| Reorder columns | Yes | - | - | - | - | - | - |
+
+Cassandra supports add and drop column only. MongoDB structure is read-only. Redis, Etcd, and DynamoDB do not have table schemas.
 
 ### Visual Structure Editor
 
@@ -188,12 +247,13 @@ Right-click any row in the Columns, Indexes, or Foreign Keys tabs:
 | Action | Description |
 |--------|-------------|
 | **Copy Name** | Copy the item name to clipboard |
-| **Copy Definition** | Copy the SQL definition (e.g., column definition, index creation clause) |
-| **Open [table]** | (Foreign Keys tab only) Navigate to the referenced table |
-| **Duplicate** | Copy and paste the selected items |
+| **Copy Definition** | Copy the SQL definition |
+| **Copy As** | Copy as CSV, JSON, or SQL INSERT |
+| **Open [table]** | (Foreign Keys tab) Navigate to the referenced table |
+| **Duplicate** | Duplicate selected items |
 | **Delete** | Mark items for deletion (apply to execute) |
 
-Multi-select rows first to copy or delete multiple items at once.
+Multi-select rows to copy or delete multiple items at once.
 
 ### Schema Change Preview
 
@@ -213,7 +273,9 @@ Before applying, TablePro shows the generated ALTER TABLE SQL for review.
   />
 </Frame>
 
-`Cmd+Z` to undo, `Cmd+Shift+Z` to redo structure changes before applying.
+Destructive changes (dropping columns, changing data types) show a confirmation dialog before executing.
+
+`Cmd+Z` to undo, `Cmd+Shift+Z` to redo structure changes before applying. Schema changes are recorded in query history.
 
 {/* Screenshot: Undo and redo for structure changes */}
 <Frame caption="Undo and redo for structure changes">
@@ -239,69 +301,7 @@ Column reordering is only available for MySQL and MariaDB. Other databases do no
 
 Drag is disabled when you have unsaved structure changes. Apply or discard pending changes first.
 
-### Adding Columns via SQL
-
-```sql
--- MySQL
-ALTER TABLE users ADD COLUMN phone VARCHAR(20) AFTER email;
-
--- PostgreSQL
-ALTER TABLE users ADD COLUMN phone VARCHAR(20);
-
--- SQLite (limited ALTER TABLE)
-ALTER TABLE users ADD COLUMN phone TEXT;
-```
-
-### Modifying Columns via SQL
-
-```sql
--- MySQL
-ALTER TABLE users MODIFY COLUMN name VARCHAR(200) NOT NULL;
-
--- PostgreSQL
-ALTER TABLE users ALTER COLUMN name TYPE VARCHAR(200);
-ALTER TABLE users ALTER COLUMN name SET NOT NULL;
-
--- SQLite (requires table recreation)
--- See SQLite documentation for workarounds
-```
-
-### Dropping Columns via SQL
-
-```sql
--- MySQL/PostgreSQL
-ALTER TABLE users DROP COLUMN phone;
-
--- SQLite (requires table recreation)
-```
-
-### Managing Indexes
-
-```sql
--- Create index
-CREATE INDEX idx_users_email ON users(email);
-
--- Create unique index
-CREATE UNIQUE INDEX idx_users_username ON users(username);
-
--- Drop index
-DROP INDEX idx_users_email ON users;  -- MySQL
-DROP INDEX idx_users_email;  -- PostgreSQL
-```
-
-### Managing Foreign Keys
-
-```sql
--- Add foreign key
-ALTER TABLE orders
-ADD CONSTRAINT fk_orders_user
-FOREIGN KEY (user_id) REFERENCES users(id)
-ON DELETE CASCADE;
-
--- Drop foreign key
-ALTER TABLE orders DROP FOREIGN KEY fk_orders_user;  -- MySQL
-ALTER TABLE orders DROP CONSTRAINT fk_orders_user;  -- PostgreSQL
-```
+For changes unsupported by the visual editor, use the SQL editor directly.
 
 ## Refreshing Structure
 

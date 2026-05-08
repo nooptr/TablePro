@@ -59,7 +59,7 @@ internal struct FieldMenuView: View {
             }
         } label: {
             Image(systemName: "chevron.down")
-                .font(.system(size: 10))
+                .font(.caption)
                 .frame(width: 20, height: 20)
                 .contentShape(Rectangle())
         }

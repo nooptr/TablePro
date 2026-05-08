@@ -26,7 +26,7 @@ enum ConnectionEnvironment: String, CaseIterable {
         case .local: return "house.fill"
         case .ssh: return "lock.fill"
         case .production: return "exclamationmark.triangle.fill"
-        case .staging: return "flask.fill"
+        case .staging: return "testtube.2"
         }
     }
 
@@ -79,7 +79,7 @@ enum ToolbarConnectionState: Equatable {
         case .connecting: return String(localized: "Connecting...")
         case .connected: return String(localized: "Connected")
         case .executing: return String(localized: "Executing...")
-        case .error(let message): return String(localized: "Error: \(message)")
+        case .error(let message): return String(format: String(localized: "Error: %@"), message)
         }
     }
 
@@ -183,8 +183,20 @@ final class ConnectionToolbarState {
     /// Whether there are pending data grid changes (for SQL preview button)
     var hasDataPendingChanges: Bool = false
 
+    /// Whether the structure view has pending schema changes
+    var hasStructureChanges: Bool = false
+
+    /// Whether the current editor has non-empty query text
+    var hasQueryText: Bool = false
+
+    /// Whether the history panel is visible
+    var isHistoryPanelVisible: Bool = false
+
     /// Whether the SQL review popover is showing
     var showSQLReviewPopover: Bool = false
+
+    /// Whether the connection switcher popover is showing
+    var showConnectionSwitcher: Bool = false
 
     /// SQL statements to display in the review popover
     var previewStatements: [String] = []
@@ -212,11 +224,11 @@ final class ConnectionToolbarState {
         var parts: [String] = [connectionState.description]
 
         if let latency = latencyMs {
-            parts.append(String(localized: "Latency: \(latency)ms"))
+            parts.append(String(format: String(localized: "Latency: %dms"), latency))
         }
 
         if let lag = replicationLagSeconds {
-            parts.append(String(localized: "Replication lag: \(lag)s"))
+            parts.append(String(format: String(localized: "Replication lag: %ds"), lag))
         }
 
         parts.append(safeModeLevel.displayName)
@@ -238,18 +250,27 @@ final class ConnectionToolbarState {
     /// Update state from a DatabaseConnection model
     func update(from connection: DatabaseConnection) {
         connectionName = connection.name
-        if PluginManager.shared.connectionMode(for: connection.type) == .fileBased {
-            databaseName = (connection.database as NSString).lastPathComponent
-        } else if let session = DatabaseManager.shared.session(for: connection.id),
-                  let database = session.currentDatabase {
-            databaseName = database
-        } else {
-            databaseName = connection.database
-        }
         databaseType = connection.type
         displayColor = connection.displayColor
         tagId = connection.tagId
         safeModeLevel = connection.safeModeLevel
+        syncDatabaseName(for: connection)
+    }
+
+    /// Resolve `databaseName` from the active session, falling back to the connection's configured value.
+    func syncDatabaseName(for connection: DatabaseConnection) {
+        let resolved: String
+        if PluginManager.shared.connectionMode(for: connection.type) == .fileBased {
+            resolved = (connection.database as NSString).lastPathComponent
+        } else if let session = DatabaseManager.shared.session(for: connection.id),
+                  let database = session.currentDatabase {
+            resolved = database
+        } else {
+            resolved = connection.database
+        }
+        if databaseName != resolved {
+            databaseName = resolved
+        }
     }
 
     /// Update connection state from ConnectionStatus

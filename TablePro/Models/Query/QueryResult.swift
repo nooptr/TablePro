@@ -62,7 +62,7 @@ enum DatabaseError: Error, LocalizedError {
         case .invalidCredentials:
             return String(localized: "Invalid username or password")
         case .fileNotFound(let path):
-            return String(localized: "Database file not found: \(path)")
+            return String(format: String(localized: "Database file not found: %@"), path)
         case .notConnected:
             return String(localized: "Not connected to database")
         case .unsupportedOperation:
@@ -72,7 +72,7 @@ enum DatabaseError: Error, LocalizedError {
 }
 
 /// Information about a database table
-struct TableInfo: Identifiable, Hashable {
+struct TableInfo: Identifiable, Hashable, Sendable {
     var id: String { "\(name)_\(type.rawValue)" }
     let name: String
     let type: TableType
@@ -116,6 +116,26 @@ struct IndexInfo: Identifiable, Hashable {
     let isUnique: Bool
     let isPrimary: Bool
     let type: String  // BTREE, HASH, FULLTEXT, etc.
+    let columnPrefixes: [String: Int]?
+    let whereClause: String?
+
+    init(
+        name: String,
+        columns: [String],
+        isUnique: Bool,
+        isPrimary: Bool,
+        type: String,
+        columnPrefixes: [String: Int]? = nil,
+        whereClause: String? = nil
+    ) {
+        self.name = name
+        self.columns = columns
+        self.isUnique = isUnique
+        self.isPrimary = isPrimary
+        self.type = type
+        self.columnPrefixes = columnPrefixes
+        self.whereClause = whereClause
+    }
 }
 
 /// Information about a foreign key relationship
@@ -125,8 +145,27 @@ struct ForeignKeyInfo: Identifiable, Hashable {
     let column: String
     let referencedTable: String
     let referencedColumn: String
+    let referencedSchema: String?
     let onDelete: String  // CASCADE, SET NULL, RESTRICT, NO ACTION
     let onUpdate: String
+
+    init(
+        name: String,
+        column: String,
+        referencedTable: String,
+        referencedColumn: String,
+        referencedSchema: String? = nil,
+        onDelete: String = "NO ACTION",
+        onUpdate: String = "NO ACTION"
+    ) {
+        self.name = name
+        self.column = column
+        self.referencedTable = referencedTable
+        self.referencedColumn = referencedColumn
+        self.referencedSchema = referencedSchema
+        self.onDelete = onDelete
+        self.onUpdate = onUpdate
+    }
 }
 
 /// Connection status

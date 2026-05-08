@@ -5,28 +5,26 @@
 //  AI chat panel view - right-side panel for conversing with AI about database queries.
 //
 
-import OSLog
 import SwiftUI
 
 /// AI chat panel displayed alongside the main editor content
 struct AIChatPanelView: View {
     let connection: DatabaseConnection
-    let tables: [TableInfo]
     var currentQuery: String?
     var queryResults: String?
 
     @Bindable var viewModel: AIChatViewModel
     private let settingsManager = AppSettingsManager.shared
-    @State private var isNearBottom: Bool = true
+    @State private var isUserScrolledUp = false
+    @State private var lastAutoScrollTime: Date = .distantPast
+    @State private var mentionState = MentionPopoverState()
 
     private var hasConfiguredProvider: Bool {
-        settingsManager.ai.providers.contains(where: { $0.isEnabled })
+        settingsManager.ai.hasActiveProvider
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-
             if !hasConfiguredProvider && viewModel.messages.isEmpty {
                 noProviderState
             } else if viewModel.messages.isEmpty {
@@ -46,9 +44,14 @@ struct AIChatPanelView: View {
         .onAppear {
             viewModel.connection = connection
         }
-        .task(id: tables) {
-            viewModel.tables = tables
-            await fetchSchemaContext()
+        .onChange(of: connection.id) {
+            viewModel.connection = connection
+        }
+        .task(id: settingsManager.ai.providers.map(\.id)) {
+            await viewModel.loadAvailableModels()
+        }
+        .task(id: connection.id) {
+            await viewModel.loadSavedQueries()
         }
         .alert(
             String(localized: "Allow AI Access"),
@@ -65,165 +68,112 @@ struct AIChatPanelView: View {
         }
     }
 
-    // MARK: - Header
-
-    private var header: some View {
-        HStack(spacing: 0) {
-            // Left: New conversation button
-            Button {
-                viewModel.startNewConversation()
-            } label: {
-                Image(systemName: "square.and.pencil")
-                    .foregroundStyle(.secondary)
-                    .frame(width: 32, height: 32)
-            }
-            .buttonStyle(.plain)
-            .help(String(localized: "New Conversation"))
-
-            Spacer()
-
-            // Center: Conversation title as dropdown
-            Menu {
-                if !viewModel.conversations.isEmpty {
-                    Section(String(localized: "Recent Conversations")) {
-                        ForEach(viewModel.conversations) { conversation in
-                            Button {
-                                viewModel.switchConversation(to: conversation.id)
-                            } label: {
-                                HStack {
-                                    Text(conversation.title.isEmpty
-                                        ? String(localized: "Untitled")
-                                        : conversation.title)
-                                    if conversation.id == viewModel.activeConversationID {
-                                        Image(systemName: "checkmark")
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Divider()
-                }
-                Button(role: .destructive) {
-                    viewModel.clearConversation()
-                } label: {
-                    Label(String(localized: "Clear Recents"), systemImage: "trash")
-                }
-                .disabled(viewModel.conversations.isEmpty)
-            } label: {
-                HStack(spacing: 4) {
-                    let title = viewModel.conversations
-                        .first(where: { $0.id == viewModel.activeConversationID })?.title
-                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                    Text(title.isEmpty ? String(localized: "New Chat") : title)
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                }
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-
-            Spacer()
-
-            // Right: Spacer to balance layout (history menu removed)
-            Color.clear
-                .frame(width: 32, height: 32)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 8)
-    }
-
-    // MARK: - Empty State
+    // MARK: - Empty States
 
     private var emptyState: some View {
-        ContentUnavailableView {
-            Label(String(localized: "Ask AI about your database"), systemImage: "sparkles")
-        } description: {
-            Text(String(localized: "Get help writing queries, explaining schemas, or fixing errors."))
-        }
+        EmptyStateView(
+            icon: "sparkles",
+            title: String(localized: "Ask AI about your database"),
+            description: String(localized: "AI responses may be inaccurate")
+        )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    // MARK: - No Provider State
-
     private var noProviderState: some View {
-        ContentUnavailableView {
-            Label(String(localized: "Set Up AI Provider"), systemImage: "sparkles")
-        } description: {
-            Text(String(localized: "Configure an AI provider in Settings to start chatting."))
-        } actions: {
-            SettingsLink {
-                Text(String(localized: "Go to Settings…"))
+        EmptyStateView(
+            icon: "gear",
+            title: String(localized: "AI Not Configured"),
+            description: String(localized: "Configure an AI provider in Settings to start chatting."),
+            actionTitle: String(localized: "Go to Settings…"),
+            action: {
+                WindowOpener.shared.openSettings(tab: .ai)
             }
-            .simultaneousGesture(TapGesture().onEnded {
-                UserDefaults.standard.set(SettingsTab.ai.rawValue, forKey: "selectedSettingsTab")
-            })
-        }
+        )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Message List
 
     private var messageList: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(viewModel.messages) { message in
-                        if message.role != .system {
-                            // Extra spacing before user messages to separate conversation turns
-                            if message.role == .user,
-                               let msgIndex = viewModel.messages.firstIndex(where: { $0.id == message.id }),
-                               msgIndex > 0,
-                               viewModel.messages[msgIndex - 1].role == .assistant
-                            {
+        let visibleMessages = viewModel.messages.filter { isVisibleInMessageList($0) }
+        let spacedMessageIDs: Set<UUID> = {
+            var ids = Set<UUID>()
+            for i in 1..<visibleMessages.count
+                where visibleMessages[i].role == .user && visibleMessages[i - 1].role == .assistant {
+                ids.insert(visibleMessages[i].id)
+            }
+            return ids
+        }()
+
+        return ScrollViewReader { proxy in
+            ZStack(alignment: .bottom) {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(visibleMessages) { message in
+                            if spacedMessageIDs.contains(message.id) {
                                 Spacer()
                                     .frame(height: 16)
                             }
                             AIChatMessageView(
                                 message: message,
                                 onRetry: shouldShowRetry(for: message) ? { viewModel.retry() } : nil,
-                                onRegenerate: shouldShowRegenerate(for: message) ? { viewModel.regenerate() } : nil
+                                onRegenerate: shouldShowRegenerate(for: message) ? { viewModel.regenerate() } : nil,
+                                onEdit: message.role == .user && !viewModel.isStreaming
+                                    ? { viewModel.editMessage(message) } : nil
                             )
                             .padding(.vertical, 4)
                             .id(message.id)
                         }
-                    }
 
-                    // Invisible bottom anchor to track scroll position
-                    Color.clear
-                        .frame(height: 1)
-                        .id("bottomAnchor")
-                        .onAppear { isNearBottom = true }
-                        .onDisappear { isNearBottom = false }
+                        Color.clear
+                            .frame(height: 1)
+                            .id("bottomAnchor")
+                            .onAppear { isUserScrolledUp = false }
+                            .onDisappear { isUserScrolledUp = true }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 8)
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 8)
-            }
-            .scrollIndicators(.hidden)
-            .onAppear {
-                if !viewModel.messages.isEmpty {
-                    // Delay to let ScrollView finish layout before scrolling
-                    DispatchQueue.main.async {
-                        proxy.scrollTo("bottomAnchor", anchor: .bottom)
+                .defaultScrollAnchor(.bottom)
+                .scrollIndicators(.hidden)
+                .onAppear {
+                    scrollToBottom(proxy: proxy)
+                }
+                .onChange(of: viewModel.messages.count) {
+                    isUserScrolledUp = false
+                    scrollToBottom(proxy: proxy, animated: true)
+                }
+                .onChange(of: viewModel.activeConversationID) {
+                    isUserScrolledUp = false
+                    scrollToBottom(proxy: proxy, animated: true)
+                }
+                .onChange(of: viewModel.messages.last?.plainText) {
+                    guard !isUserScrolledUp else { return }
+                    let now = Date()
+                    guard now.timeIntervalSince(lastAutoScrollTime) >= 0.1 else { return }
+                    lastAutoScrollTime = now
+                    scrollToBottom(proxy: proxy)
+                }
+                .onChange(of: viewModel.isStreaming) { _, newValue in
+                    if !newValue, !isUserScrolledUp {
+                        scrollToBottom(proxy: proxy, animated: true)
                     }
                 }
-            }
-            .onChange(of: viewModel.messages.last?.content) {
-                if isNearBottom {
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        proxy.scrollTo("bottomAnchor", anchor: .bottom)
+
+                if isUserScrolledUp {
+                    Button {
+                        isUserScrolledUp = false
+                        scrollToBottom(proxy: proxy, animated: true)
+                    } label: {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.title2)
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(.secondary)
                     }
-                }
-            }
-            .onChange(of: viewModel.messages.count) {
-                // Always scroll on new message (user just sent a message)
-                withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo("bottomAnchor", anchor: .bottom)
-                }
-            }
-            .onChange(of: viewModel.activeConversationID) {
-                // Scroll to bottom when switching conversations
-                DispatchQueue.main.async {
-                    proxy.scrollTo("bottomAnchor", anchor: .bottom)
+                    .buttonStyle(.plain)
+                    .padding(.bottom, 8)
+                    .transition(.opacity)
+                    .animation(.easeInOut(duration: 0.2), value: isUserScrolledUp)
                 }
             }
         }
@@ -234,7 +184,7 @@ struct AIChatPanelView: View {
     private func errorBanner(_ message: String) -> some View {
         HStack(spacing: 6) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.yellow)
+                .foregroundStyle(Color(nsColor: .systemYellow))
             Text(message)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -244,14 +194,15 @@ struct AIChatPanelView: View {
                 viewModel.errorMessage = nil
             } label: {
                 Image(systemName: "xmark")
-                    .font(.caption2)
+                    .frame(width: 24, height: 24)
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(String(localized: "Dismiss error"))
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(Color.yellow.opacity(0.1))
+        .background(Color(nsColor: .systemYellow).opacity(0.1))
     }
 
     // MARK: - Input Area
@@ -259,121 +210,404 @@ struct AIChatPanelView: View {
     private var inputArea: some View {
         VStack(spacing: 0) {
             Divider()
-            HStack(alignment: .center, spacing: 8) {
-                TextField(
-                    String(localized: "Ask about your database..."),
-                    text: $viewModel.inputText,
-                    axis: .vertical
+            VStack(alignment: .leading, spacing: 6) {
+                AIChatContextChipStrip(
+                    items: viewModel.attachedContext,
+                    onRemove: { viewModel.detach($0) }
                 )
-                .textFieldStyle(.roundedBorder)
-                .lineLimit(1...5)
-                .onSubmit {
-                    if !NSEvent.modifierFlags.contains(.shift) {
-                        updateContext()
-                        viewModel.sendMessage()
-                    }
-                }
 
-                if viewModel.isStreaming {
-                    Button {
-                        viewModel.cancelStream()
-                    } label: {
-                        Image(systemName: "stop.circle.fill")
-                            .foregroundStyle(.red)
-                    }
-                    .buttonStyle(.plain)
-                    .help(String(localized: "Stop Generating"))
-                } else {
-                    Button {
+                ChatComposerView(
+                    text: $viewModel.inputText,
+                    placeholder: String(localized: "Ask about your database..."),
+                    minLines: 1,
+                    maxLines: 5,
+                    mentionState: mentionState,
+                    onTextChange: { text, caret in
+                        updateMentionState(text: text, caret: caret)
+                    },
+                    onSubmit: {
                         updateContext()
                         viewModel.sendMessage()
-                    } label: {
-                        Image(systemName: "arrow.up.circle.fill")
-                            .foregroundStyle(
-                                viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                    ? .secondary : Color.accentColor
-                            )
+                    },
+                    onAttach: { item in
+                        viewModel.attach(item)
                     }
-                    .buttonStyle(.plain)
-                    .disabled(viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .help(String(localized: "Send Message"))
+                )
+
+                HStack(alignment: .center, spacing: 8) {
+                    mentionMenu
+                    slashCommandMenu
+                    modeMenu
+                    modelPicker
+                    Spacer()
+                    sendOrStopButton
                 }
             }
             .padding(8)
         }
     }
 
-    // MARK: - Schema Context
-
-    private static let logger = Logger(subsystem: "com.TablePro", category: "AIChatPanelView")
-
-    /// Fetch column and foreign key info for tables and populate the view model.
-    /// Reuses cached columns from the shared `SQLSchemaProvider` when available,
-    /// falling back to direct driver queries only for uncached data.
-    /// Respects AI settings (`includeSchema`, `maxSchemaTables`).
-    private func fetchSchemaContext() async {
-        let settings = AppSettingsManager.shared.ai
-        guard settings.includeSchema,
-              let driver = DatabaseManager.shared.driver(for: connection.id)
-        else { return }
-
-        let tablesToFetch = Array(tables.prefix(settings.maxSchemaTables))
-        var columns: [String: [ColumnInfo]] = [:]
-        var foreignKeys: [String: [ForeignKeyInfo]] = [:]
-
-        let provider = viewModel.schemaProvider
-
-        for table in tablesToFetch {
-            if let provider {
-                let cached = await provider.getColumns(for: table.name)
-                if !cached.isEmpty {
-                    columns[table.name] = cached
+    private var modeMenu: some View {
+        let binding = Binding<AIChatMode>(
+            get: { settingsManager.ai.chatMode },
+            set: { newValue in
+                var settings = settingsManager.ai
+                settings.chatMode = newValue
+                settingsManager.ai = settings
+            }
+        )
+        return Menu {
+            Picker("", selection: binding) {
+                ForEach(AIChatMode.allCases) { mode in
+                    Label(mode.displayName, systemImage: mode.symbolName)
+                        .tag(mode)
                 }
             }
+            .pickerStyle(.inline)
+            .labelsHidden()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: settingsManager.ai.chatMode.symbolName)
+                Text(settingsManager.ai.chatMode.displayName)
+                    .lineLimit(1)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption2)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help(settingsManager.ai.chatMode.helpText)
+    }
 
-            if columns[table.name] == nil {
-                do {
-                    let cols = try await driver.fetchColumns(table: table.name)
-                    columns[table.name] = cols
-                } catch {
-                    Self.logger.warning(
-                        "Failed to fetch columns for table '\(table.name)': \(error.localizedDescription)"
+    @ViewBuilder
+    private var sendOrStopButton: some View {
+        if viewModel.isStreaming {
+            Button {
+                viewModel.cancelStream()
+            } label: {
+                Image(systemName: "stop.circle.fill")
+                    .foregroundStyle(Color(nsColor: .systemRed))
+            }
+            .buttonStyle(.plain)
+            .help(String(localized: "Stop Generating"))
+        } else {
+            let isEmpty = viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            Button {
+                updateContext()
+                viewModel.sendMessage()
+            } label: {
+                Image(systemName: "arrow.up.circle.fill")
+                    .foregroundStyle(isEmpty ? .secondary : Color.accentColor)
+            }
+            .buttonStyle(.plain)
+            .disabled(isEmpty)
+            .help(String(localized: "Send Message"))
+        }
+    }
+
+    @ViewBuilder
+    private var modelPicker: some View {
+        let providers = settingsManager.ai.providers
+        if providers.isEmpty {
+            EmptyView()
+        } else {
+            let activeProvider = settingsManager.ai.activeProvider
+            let selectedProviderId = viewModel.selectedProviderId ?? activeProvider?.id
+            let selectedProvider = providers.first(where: { $0.id == selectedProviderId }) ?? activeProvider
+            let resolvedModel = viewModel.selectedModel ?? selectedProvider?.model ?? ""
+            let label = selectedProvider.map { provider in
+                resolvedModel.isEmpty ? provider.displayName : resolvedModel
+            } ?? String(localized: "Select Model")
+
+            Menu {
+                ForEach(providers) { provider in
+                    modelMenuSection(
+                        provider: provider,
+                        selectedProviderId: selectedProviderId,
+                        selectedModel: resolvedModel
+                    )
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "cpu")
+                    Text(label)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help(String(localized: "Choose AI provider and model"))
+        }
+    }
+
+    @ViewBuilder
+    private var mentionMenu: some View {
+        if let connectionId = viewModel.connection?.id {
+            Menu {
+                Button {
+                    viewModel.attach(.schema(connectionId: connectionId))
+                } label: {
+                    Label(String(localized: "Schema"), systemImage: "tablecells")
+                }
+                .disabled(viewModel.tables.isEmpty)
+
+                Menu(String(localized: "Tables")) {
+                    let sortedTables = viewModel.tables.sorted {
+                        $0.name.localizedStandardCompare($1.name) == .orderedAscending
+                    }
+                    ForEach(sortedTables, id: \.name) { table in
+                        Button {
+                            viewModel.attach(.table(connectionId: connectionId, name: table.name))
+                        } label: {
+                            Text(table.name)
+                        }
+                    }
+                }
+                .disabled(viewModel.tables.isEmpty)
+
+                Button {
+                    if let query = currentQuery, !query.isEmpty {
+                        viewModel.attach(.currentQuery(text: query))
+                    }
+                } label: {
+                    Label(String(localized: "Current Query"), systemImage: "doc.text")
+                }
+                .disabled((currentQuery ?? "").isEmpty)
+
+                Button {
+                    if let results = queryResults, !results.isEmpty {
+                        viewModel.attach(.queryResult(summary: results))
+                    }
+                } label: {
+                    Label(String(localized: "Query Results"), systemImage: "list.bullet.rectangle")
+                }
+                .disabled((queryResults ?? "").isEmpty)
+            } label: {
+                Image(systemName: "at")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help(String(localized: "Attach context"))
+        }
+    }
+
+    private var slashCommandMenu: some View {
+        let customCommands = CustomSlashCommandStorage.shared.commands.filter(\.isValid)
+        return Menu {
+            ForEach(SlashCommand.allCommands) { command in
+                Button {
+                    updateContext()
+                    viewModel.runSlashCommand(command)
+                } label: {
+                    Text("/\(command.name) · \(command.description)")
+                }
+            }
+            if !customCommands.isEmpty {
+                Divider()
+                Section(String(localized: "Custom")) {
+                    ForEach(customCommands) { command in
+                        Button {
+                            updateContext()
+                            Task { await viewModel.runCustomSlashCommand(command) }
+                        } label: {
+                            if command.description.isEmpty {
+                                Text("/\(command.name)")
+                            } else {
+                                Text("/\(command.name) · \(command.description)")
+                            }
+                        }
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "command")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help(String(localized: "Slash commands"))
+    }
+
+    @ViewBuilder
+    private func modelMenuSection(
+        provider: AIProviderConfig,
+        selectedProviderId: UUID?,
+        selectedModel: String
+    ) -> some View {
+        let fallback = provider.model.isEmpty ? [] : [provider.model]
+        let cached = viewModel.availableModels[provider.id] ?? []
+        let models = cached.isEmpty ? fallback : cached
+
+        if models.count > 1 {
+            Section(provider.displayName) {
+                ForEach(models, id: \.self) { model in
+                    modelButton(
+                        provider: provider,
+                        model: model,
+                        isSelected: provider.id == selectedProviderId && model == selectedModel
                     )
                 }
             }
+        } else if let single = models.first {
+            modelButton(
+                provider: provider,
+                model: single,
+                isSelected: provider.id == selectedProviderId && single == selectedModel,
+                showProviderPrefix: true
+            )
         }
+    }
 
-        // Fetch foreign keys for the needed tables in bulk
-        do {
-            let fkResult = try await driver.fetchForeignKeys(forTables: tablesToFetch.map(\.name))
-            for (table, fks) in fkResult {
-                foreignKeys[table] = fks
+    private func modelButton(
+        provider: AIProviderConfig,
+        model: String,
+        isSelected: Bool,
+        showProviderPrefix: Bool = false
+    ) -> some View {
+        Button {
+            viewModel.selectedProviderId = provider.id
+            viewModel.selectedModel = model
+        } label: {
+            HStack {
+                Text(showProviderPrefix ? "\(provider.displayName) · \(model)" : model)
+                if isSelected {
+                    Image(systemName: "checkmark")
+                }
             }
-        } catch {
-            Self.logger.warning("Failed to bulk fetch foreign keys: \(error.localizedDescription)")
         }
-
-        viewModel.columnsByTable = columns
-        viewModel.foreignKeysByTable = foreignKeys
     }
 
     // MARK: - Helpers
+
+    private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool = false) {
+        if animated {
+            withAnimation(.easeOut(duration: 0.2)) {
+                proxy.scrollTo("bottomAnchor", anchor: .bottom)
+            }
+        } else {
+            proxy.scrollTo("bottomAnchor", anchor: .bottom)
+        }
+    }
 
     private func updateContext() {
         viewModel.currentQuery = currentQuery
         viewModel.queryResults = queryResults
     }
 
-    private func shouldShowRetry(for message: AIChatMessage) -> Bool {
+    /// Hide system turns and user turns that exist only to carry tool-result
+    /// blocks back to the model — those are protocol plumbing, not user input.
+    private func isVisibleInMessageList(_ message: ChatTurn) -> Bool {
+        guard message.role != .system else { return false }
+        if message.role == .user {
+            let hasUserContent = message.blocks.contains { block in
+                switch block {
+                case .text(let value): return !value.isEmpty
+                case .attachment: return true
+                case .toolUse, .toolResult: return false
+                }
+            }
+            if !hasUserContent { return false }
+        }
+        return true
+    }
+
+    private func updateMentionState(text: String, caret: Int) {
+        guard let match = MentionDetector.detect(in: text, caret: caret) else {
+            mentionState.reset()
+            return
+        }
+        let candidates = mentionCandidates(forQuery: match.query)
+        guard !candidates.isEmpty else {
+            mentionState.reset()
+            return
+        }
+        let queryChanged = match.query != mentionState.query
+        mentionState.candidates = candidates
+        mentionState.query = match.query
+        mentionState.anchorRange = match.range
+        if queryChanged {
+            mentionState.selectedIndex = 0
+        } else {
+            mentionState.clampSelection()
+        }
+        mentionState.isVisible = true
+    }
+
+    private func mentionCandidates(forQuery query: String) -> [MentionCandidate] {
+        let connectionId = connection.id
+        var items: [MentionCandidate] = []
+
+        let schemaItem = ContextItem.schema(connectionId: connectionId)
+        if matchesQuery(schemaItem.displayLabel, query) {
+            items.append(MentionCandidate(item: schemaItem))
+        }
+
+        if let editorQuery = currentQuery, !editorQuery.isEmpty {
+            let item = ContextItem.currentQuery(text: editorQuery)
+            if matchesQuery(item.displayLabel, query) {
+                items.append(MentionCandidate(item: item))
+            }
+        }
+
+        if let results = queryResults, !results.isEmpty {
+            let item = ContextItem.queryResult(summary: results)
+            if matchesQuery(item.displayLabel, query) {
+                items.append(MentionCandidate(item: item))
+            }
+        }
+
+        let tableBudget = max(0, (Self.maxMentionCandidates / 2) - items.count)
+        let matchingTables = viewModel.tables
+            .filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            .prefix(tableBudget)
+        for table in matchingTables {
+            items.append(MentionCandidate(
+                item: .table(connectionId: connectionId, name: table.name)
+            ))
+        }
+
+        let savedBudget = max(0, Self.maxMentionCandidates - items.count)
+        let matchingSavedQueries = viewModel.savedQueries
+            .filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            .prefix(savedBudget)
+        for favorite in matchingSavedQueries {
+            items.append(MentionCandidate(
+                item: .savedQuery(id: favorite.id, name: favorite.name)
+            ))
+        }
+
+        return items
+    }
+
+    private static let maxMentionCandidates = 10
+
+    private func matchesQuery(_ label: String, _ query: String) -> Bool {
+        query.isEmpty || label.localizedCaseInsensitiveContains(query)
+    }
+
+    private func shouldShowRetry(for message: ChatTurn) -> Bool {
         message.role == .user
             && message.id == viewModel.messages.last?.id
             && viewModel.lastMessageFailed
+            && viewModel.canRetryLastFailure
     }
 
-    private func shouldShowRegenerate(for message: AIChatMessage) -> Bool {
+    private func shouldShowRegenerate(for message: ChatTurn) -> Bool {
         message.role == .assistant
             && message.id == viewModel.messages.last?.id
             && !viewModel.isStreaming
-            && !message.content.isEmpty
+            && !message.plainText.isEmpty
     }
 }

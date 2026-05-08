@@ -38,20 +38,20 @@ struct PreviewTabTests {
 
     @Test("Preview table tab can be added via addPreviewTableTab")
     @MainActor
-    func addPreviewTableTab() {
+    func addPreviewTableTab() throws {
         let manager = QueryTabManager()
-        manager.addPreviewTableTab(tableName: "users", databaseType: .mysql, databaseName: "mydb")
+        try manager.addPreviewTableTab(tableName: "users", databaseType: .mysql, databaseName: "mydb")
         #expect(manager.tabs.count == 1)
         #expect(manager.selectedTab?.isPreview == true)
-        #expect(manager.selectedTab?.tableName == "users")
+        #expect(manager.selectedTab?.tableContext.tableName == "users")
     }
 
     @Test("replaceTabContent can set isPreview flag")
     @MainActor
-    func replaceTabContentSetsPreview() {
+    func replaceTabContentSetsPreview() throws {
         let manager = QueryTabManager()
-        manager.addPreviewTableTab(tableName: "users", databaseType: .mysql, databaseName: "mydb")
-        let replaced = manager.replaceTabContent(
+        try manager.addPreviewTableTab(tableName: "users", databaseType: .mysql, databaseName: "mydb")
+        let replaced = try manager.replaceTabContent(
             tableName: "orders",
             databaseType: .mysql,
             databaseName: "mydb",
@@ -59,15 +59,15 @@ struct PreviewTabTests {
         )
         #expect(replaced == true)
         #expect(manager.selectedTab?.isPreview == true)
-        #expect(manager.selectedTab?.tableName == "orders")
+        #expect(manager.selectedTab?.tableContext.tableName == "orders")
     }
 
     @Test("replaceTabContent defaults to non-preview")
     @MainActor
-    func replaceTabContentDefaultsNonPreview() {
+    func replaceTabContentDefaultsNonPreview() throws {
         let manager = QueryTabManager()
-        manager.addPreviewTableTab(tableName: "users", databaseType: .mysql, databaseName: "mydb")
-        let replaced = manager.replaceTabContent(
+        try manager.addPreviewTableTab(tableName: "users", databaseType: .mysql, databaseName: "mydb")
+        let replaced = try manager.replaceTabContent(
             tableName: "orders",
             databaseType: .mysql,
             databaseName: "mydb"

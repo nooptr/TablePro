@@ -15,7 +15,7 @@ import os
 /// Coordinator for the SQL editor — manages find panel, horizontal scrolling, and scroll-to-match
 @Observable
 @MainActor
-final class SQLEditorCoordinator: TextViewCoordinator {
+final class SQLEditorCoordinator: TextViewCoordinator, TextViewDelegate {
     // MARK: - Properties
 
     private static let logger = Logger(subsystem: "com.TablePro", category: "SQLEditorCoordinator")
@@ -23,13 +23,21 @@ final class SQLEditorCoordinator: TextViewCoordinator {
     @ObservationIgnored weak var controller: TextViewController?
     /// Shared schema provider for inline AI suggestions (avoids duplicate schema fetches)
     @ObservationIgnored var schemaProvider: SQLSchemaProvider?
+    /// Connection-level AI policy for inline suggestions
+    @ObservationIgnored var connectionAIPolicy: AIConnectionPolicy?
     @ObservationIgnored private var contextMenu: AIEditorContextMenu?
     @ObservationIgnored private var inlineSuggestionManager: InlineSuggestionManager?
+    @ObservationIgnored private var aiChatInlineSource: AIChatInlineSource?
+    @ObservationIgnored private var copilotDocumentSync: CopilotDocumentSync?
+    @ObservationIgnored private var copilotInlineSource: CopilotInlineSource?
     @ObservationIgnored private var editorSettingsObserver: NSObjectProtocol?
+    @ObservationIgnored private var aiSettingsObserver: NSObjectProtocol?
     @ObservationIgnored private var windowKeyObserver: NSObjectProtocol?
+    @ObservationIgnored private var lastInlineSourceKind: InlineSourceKind = .off
     /// Debounce work item for frame-change notification to avoid
     /// triggering syntax highlight viewport recalculation on every keystroke.
     @ObservationIgnored private var frameChangeTask: Task<Void, Never>?
+    @ObservationIgnored private var isUppercasing = false
     @ObservationIgnored private var wasEditorFocused = false
     @ObservationIgnored private var didDestroy = false
 
@@ -48,6 +56,9 @@ final class SQLEditorCoordinator: TextViewCoordinator {
     @ObservationIgnored var onAIOptimize: ((String) -> Void)?
     @ObservationIgnored var onSaveAsFavorite: ((String) -> Void)?
     @ObservationIgnored var onFormatSQL: (() -> Void)?
+    @ObservationIgnored var databaseType: DatabaseType?
+    @ObservationIgnored var tabID: UUID?
+    @ObservationIgnored var connectionId: UUID?
 
     /// Whether the editor text view is currently the first responder.
     /// Used to guard cursor propagation — when the find panel highlights
@@ -63,6 +74,9 @@ final class SQLEditorCoordinator: TextViewCoordinator {
         if let observer = editorSettingsObserver {
             NotificationCenter.default.removeObserver(observer)
         }
+        if let observer = aiSettingsObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
         if let observer = windowKeyObserver {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -73,6 +87,10 @@ final class SQLEditorCoordinator: TextViewCoordinator {
         if let observer = editorSettingsObserver {
             NotificationCenter.default.removeObserver(observer)
             editorSettingsObserver = nil
+        }
+        if let observer = aiSettingsObserver {
+            NotificationCenter.default.removeObserver(observer)
+            aiSettingsObserver = nil
         }
         if let observer = windowKeyObserver {
             NotificationCenter.default.removeObserver(observer)
@@ -90,6 +108,7 @@ final class SQLEditorCoordinator: TextViewCoordinator {
         // Deferred to next run loop because prepareCoordinator runs during
         // TextViewController.init, before the view hierarchy is fully loaded.
         Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(50))
             guard let self else { return }
             self.fixFindPanelHitTesting(controller: controller)
             self.installAIContextMenu(controller: controller)
@@ -118,25 +137,27 @@ final class SQLEditorCoordinator: TextViewCoordinator {
         }
     }
 
-    func textViewDidChangeText(controller: TextViewController) {
-        // Invalidate Vim buffer's cached line count after text changes
+    func textView(_ textView: TextView, didReplaceContentsIn range: NSRange, with string: String) {
         vimEngine?.invalidateLineCache()
 
-        // Notify inline suggestion manager immediately (lightweight)
         Task { [weak self] in
             self?.inlineSuggestionManager?.handleTextChange()
             self?.vimCursorManager?.updatePosition()
         }
 
-        // Throttle frame-change notification — during rapid typing, only the
-        // last notification matters. The highlighter recalculates the visible
-        // range on each notification, so coalescing saves redundant layout work.
+        if !didDestroy, let tabID, let sync = copilotDocumentSync {
+            let text = textView.string
+            Task { await sync.didChangeText(tabID: tabID, newText: text) }
+        }
+
         frameChangeTask?.cancel()
         frameChangeTask = Task { [weak controller] in
             try? await Task.sleep(for: .milliseconds(50))
             guard !Task.isCancelled, let controller, let textView = controller.textView else { return }
             NotificationCenter.default.post(name: NSView.frameDidChangeNotification, object: textView)
         }
+
+        uppercaseKeywordIfNeeded(textView: textView, range: range, string: string)
     }
 
     func textViewDidChangeSelection(controller: TextViewController, newPositions: [CursorPosition]) {
@@ -161,8 +182,16 @@ final class SQLEditorCoordinator: TextViewCoordinator {
 
         uninstallVimKeyInterceptor()
 
+        if let tabID, let sync = copilotDocumentSync {
+            let id = tabID
+            Task { await sync.didCloseTab(tabID: id) }
+        }
+
         inlineSuggestionManager?.uninstall()
         inlineSuggestionManager = nil
+        copilotDocumentSync = nil
+        copilotInlineSource = nil
+        aiChatInlineSource = nil
 
         // Release closure captures to break potential retain cycles
         onCloseTab = nil
@@ -170,6 +199,7 @@ final class SQLEditorCoordinator: TextViewCoordinator {
         onAIExplain = nil
         onAIOptimize = nil
         onSaveAsFavorite = nil
+        onFormatSQL = nil
         schemaProvider = nil
         contextMenu = nil
         vimEngine = nil
@@ -181,6 +211,20 @@ final class SQLEditorCoordinator: TextViewCoordinator {
         EditorEventRouter.shared.unregister(self)
         Self.logger.debug("SQLEditorCoordinator destroyed")
         cleanupMonitors()
+    }
+
+    func revive() {
+        guard didDestroy else { return }
+        didDestroy = false
+        if let controller, let textView = controller.textView {
+            EditorEventRouter.shared.register(self, textView: textView)
+        }
+        if contextMenu == nil, let controller {
+            installAIContextMenu(controller: controller)
+        }
+        if inlineSuggestionManager == nil, let controller {
+            installInlineSuggestionManager(controller: controller)
+        }
     }
 
     // MARK: - AI Context Menu
@@ -210,6 +254,9 @@ final class SQLEditorCoordinator: TextViewCoordinator {
 
     /// Called by EditorEventRouter when a right-click is detected in this editor's text view.
     func showContextMenu(for event: NSEvent, in textView: TextView) {
+        if contextMenu == nil, let controller {
+            installAIContextMenu(controller: controller)
+        }
         guard let menu = contextMenu else { return }
         NSMenu.popUpContextMenu(menu, with: event, for: textView)
     }
@@ -218,8 +265,91 @@ final class SQLEditorCoordinator: TextViewCoordinator {
 
     private func installInlineSuggestionManager(controller: TextViewController) {
         let manager = InlineSuggestionManager()
-        manager.install(controller: controller, schemaProvider: schemaProvider)
+        manager.install(controller: controller, sourceResolver: { [weak self] in
+            self?.resolveInlineSource()
+        })
         inlineSuggestionManager = manager
+    }
+
+    private enum InlineSourceKind {
+        case off
+        case copilot
+        case ai
+    }
+
+    private var resolvedInlineSourceKind: InlineSourceKind {
+        let ai = AppSettingsManager.shared.ai
+        guard ai.enabled, ai.inlineSuggestionsEnabled, let active = ai.activeProvider else {
+            return .off
+        }
+        return active.type == .copilot ? .copilot : .ai
+    }
+
+    private func resolveInlineSource() -> InlineSuggestionSource? {
+        let kind = resolvedInlineSourceKind
+        if kind != lastInlineSourceKind {
+            teardownInlineSources(except: kind)
+            lastInlineSourceKind = kind
+        }
+        switch kind {
+        case .off:
+            return nil
+        case .copilot:
+            if copilotInlineSource == nil {
+                installCopilotInlineSource()
+            }
+            return copilotInlineSource
+        case .ai:
+            if aiChatInlineSource == nil {
+                aiChatInlineSource = AIChatInlineSource(
+                    schemaProvider: schemaProvider,
+                    connectionPolicy: connectionAIPolicy
+                )
+            }
+            return aiChatInlineSource
+        }
+    }
+
+    private func installCopilotInlineSource() {
+        let sync = CopilotDocumentSync()
+        copilotDocumentSync = sync
+        copilotInlineSource = CopilotInlineSource(documentSync: sync)
+
+        let capturedTabID = tabID
+        let capturedText = controller?.textView?.string ?? ""
+        let capturedSchemaProvider = schemaProvider
+        let capturedDBType = databaseType
+        let dbName = connectionId.flatMap {
+            DatabaseManager.shared.session(for: $0)?.activeDatabase
+        } ?? "database"
+
+        Task {
+            if let provider = capturedSchemaProvider, let dbType = capturedDBType {
+                await sync.schemaContext.buildPreamble(
+                    schemaProvider: provider,
+                    databaseName: dbName,
+                    databaseType: dbType
+                )
+            }
+            if let tabID = capturedTabID {
+                sync.ensureDocumentOpen(tabID: tabID, text: capturedText)
+                await sync.didActivateTab(tabID: tabID, text: capturedText)
+            }
+        }
+    }
+
+    private func teardownInlineSources(except kind: InlineSourceKind) {
+        if kind != .copilot {
+            if let tabID, let sync = copilotDocumentSync {
+                let id = tabID
+                Task { await sync.didCloseTab(tabID: id) }
+            }
+            copilotDocumentSync = nil
+            copilotInlineSource = nil
+        }
+        if kind != .ai {
+            aiChatInlineSource = nil
+        }
     }
 
     // MARK: - Vim Mode
@@ -327,8 +457,73 @@ final class SQLEditorCoordinator: TextViewCoordinator {
         ) { [weak self, weak controller] _ in
             guard let self, let controller else { return }
             self.handleVimSettingsChange(controller: controller)
+            self.handleInlineProviderChange()
             self.vimCursorManager?.updatePosition()
         }
+        aiSettingsObserver = NotificationCenter.default.addObserver(
+            forName: .aiSettingsDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleInlineProviderChange()
+        }
+    }
+
+    private func handleInlineProviderChange() {
+        let kind = resolvedInlineSourceKind
+        guard kind != lastInlineSourceKind else { return }
+        teardownInlineSources(except: kind)
+        lastInlineSourceKind = kind
+    }
+
+    // MARK: - Keyword Auto-Uppercase
+
+    private func uppercaseKeywordIfNeeded(textView: TextView, range: NSRange, string: String) {
+        guard !isUppercasing,
+              AppSettingsManager.shared.editor.uppercaseKeywords,
+              KeywordUppercaseHelper.isWordBoundary(string),
+              (textView.textStorage.string as NSString).length < 500_000 else { return }
+
+        let nsText = textView.textStorage.string as NSString
+        guard let match = KeywordUppercaseHelper.keywordBeforePosition(nsText, at: range.location) else { return }
+
+        let word = match.word
+        let wordRange = match.range
+        let uppercased = word.uppercased()
+
+        isUppercasing = true
+        DispatchQueue.main.async { [weak self, weak textView] in
+            guard let self, let textView, !self.didDestroy else {
+                self?.isUppercasing = false
+                return
+            }
+            guard wordRange.upperBound <= textView.textStorage.length else {
+                self.isUppercasing = false
+                return
+            }
+            let currentWord = (textView.textStorage.string as NSString).substring(with: wordRange)
+            guard currentWord == word else {
+                self.isUppercasing = false
+                return
+            }
+            // Mutate textStorage directly with proper attributes — skip CEUndoManager
+            // since auto-uppercase is automatic formatting, not a user edit.
+            let attrs = textView.typingAttributes
+            textView.textStorage.beginEditing()
+            textView.textStorage.replaceCharacters(
+                in: wordRange,
+                with: NSAttributedString(string: uppercased, attributes: attrs)
+            )
+            textView.textStorage.endEditing()
+            textView.needsDisplay = true
+            self.isUppercasing = false
+        }
+    }
+
+    // MARK: - Find Panel
+
+    func showFindPanel() {
+        controller?.showFindPanel()
     }
 
     // MARK: - CodeEditSourceEditor Workarounds

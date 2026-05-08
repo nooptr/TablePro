@@ -19,7 +19,7 @@ struct LicenseActivationSheet: View {
             // Header
             VStack(spacing: 8) {
                 Image(systemName: "key.fill")
-                    .font(.system(size: 32))
+                    .font(.title)
                     .foregroundStyle(.secondary)
 
                 Text("Activate License")
@@ -43,9 +43,9 @@ struct LicenseActivationSheet: View {
                     .onSubmit { Task { await activate() } }
 
                 if let errorMessage {
-                    Text(errorMessage)
+                    Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(Color(nsColor: .systemOrange))
                 }
             }
             .padding(.horizontal, 32)

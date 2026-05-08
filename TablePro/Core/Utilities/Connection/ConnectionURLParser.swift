@@ -4,6 +4,7 @@
 //
 
 import Foundation
+import TableProPluginKit
 
 struct ParsedConnectionURL {
     let type: DatabaseType
@@ -17,6 +18,7 @@ struct ParsedConnectionURL {
     let sshHost: String?
     let sshPort: Int?
     let sshUsername: String?
+    let sshPassword: String?
     let usePrivateKey: Bool?
     let useSSHAgent: Bool?
     let agentSocket: String?
@@ -32,20 +34,23 @@ struct ParsedConnectionURL {
     let filterValue: String?
     let filterCondition: String?
     let oracleServiceName: String?
+    let safeModeLevel: Int?
     let useSrv: Bool
     let mongoQueryParams: [String: String]
+    let multiHost: String?
 
     var suggestedName: String {
         if let connectionName, !connectionName.isEmpty {
             return connectionName
         }
         let typeName = type.rawValue
+        let displayHost = multiHost?.split(separator: ",").first.map(String.init) ?? host
         let displayDatabase = database.isEmpty ? (oracleServiceName ?? "") : database
         if !displayDatabase.isEmpty {
-            return "\(typeName) \(host)/\(displayDatabase)"
+            return "\(typeName) \(displayHost)/\(displayDatabase)"
         }
-        if !host.isEmpty {
-            return "\(typeName) \(host)"
+        if !displayHost.isEmpty {
+            return "\(typeName) \(displayHost)"
         }
         return typeName
     }
@@ -64,7 +69,7 @@ enum ConnectionURLParseError: Error, LocalizedError, Equatable {
         case .invalidURL:
             return String(localized: "Invalid connection URL format")
         case .unsupportedScheme(let scheme):
-            return String(localized: "Unsupported database scheme: \(scheme)")
+            return String(format: String(localized: "Unsupported database scheme: %@"), scheme)
         case .missingHost:
             return String(localized: "Connection URL must include a host")
         }
@@ -88,48 +93,23 @@ struct ConnectionURLParser {
         if scheme.hasSuffix("+ssh") {
             isSSH = true
             scheme = String(scheme.dropLast(4))
+        } else if let plusIdx = scheme.lastIndex(of: "+"),
+                  !scheme.hasSuffix("+srv") {
+            scheme = String(scheme[scheme.startIndex..<plusIdx])
         }
 
-        let dbType: DatabaseType
-        switch scheme {
-        case "postgresql", "postgres":
-            dbType = .postgresql
-        case "redshift":
-            dbType = .redshift
-        case "mysql":
-            dbType = .mysql
-        case "mariadb":
-            dbType = .mariadb
-        case "sqlite":
-            dbType = .sqlite
-        case "mongodb", "mongodb+srv":
-            dbType = .mongodb
-        case "redis", "rediss":
-            dbType = .redis
-        case "sqlserver", "mssql", "jdbc:sqlserver":
-            dbType = .mssql
-        case "oracle", "jdbc:oracle:thin":
-            dbType = .oracle
-        case "clickhouse", "ch":
-            dbType = .clickhouse
-        case "cassandra", "cql":
-            dbType = .cassandra
-        case "scylladb", "scylla":
-            dbType = .scylladb
-        default:
-            if let resolvedType = PluginMetadataRegistry.shared.databaseType(forUrlScheme: scheme) {
-                dbType = resolvedType
-            } else {
-                return .failure(.unsupportedScheme(scheme))
-            }
+        guard let dbType = resolveDBType(from: scheme) else {
+            return .failure(.unsupportedScheme(scheme))
         }
 
         let isSrv = scheme == "mongodb+srv"
 
-        if dbType == .sqlite {
+        let isFileBased = dbType == .sqlite || dbType == .duckdb
+            || PluginMetadataRegistry.shared.snapshot(forTypeId: dbType.pluginTypeId)?.connectionMode == .fileBased
+        if isFileBased {
             let path = String(trimmed[schemeEnd.upperBound...])
             return .success(ParsedConnectionURL(
-                type: .sqlite,
+                type: dbType,
                 host: "",
                 port: nil,
                 database: path,
@@ -140,6 +120,7 @@ struct ConnectionURLParser {
                 sshHost: nil,
                 sshPort: nil,
                 sshUsername: nil,
+                sshPassword: nil,
                 usePrivateKey: nil,
                 useSSHAgent: nil,
                 agentSocket: nil,
@@ -155,13 +136,23 @@ struct ConnectionURLParser {
                 filterValue: nil,
                 filterCondition: nil,
                 oracleServiceName: nil,
+                safeModeLevel: nil,
                 useSrv: false,
-                mongoQueryParams: [:]
+                mongoQueryParams: [:],
+                multiHost: nil
             ))
         }
 
         if isSSH {
             return parseSSHURL(trimmed, schemeEnd: schemeEnd, dbType: dbType)
+        }
+
+        // Multi-host MongoDB URI: URLComponents can't parse comma-separated hosts
+        if dbType == .mongodb && !isSrv {
+            let afterScheme = String(trimmed[schemeEnd.upperBound...])
+            if let multiHostResult = parseMultiHostMongoDB(afterScheme, dbType: dbType, isSrv: isSrv) {
+                return .success(multiHostResult)
+            }
         }
 
         let httpURL = "http://" + String(trimmed[schemeEnd.upperBound...])
@@ -202,6 +193,10 @@ struct ConnectionURLParser {
             }
         }
 
+        if scheme == "etcds" {
+            sslMode = sslMode ?? .required
+        }
+
         // Oracle-specific: path component is the service name, not the database name
         var oracleServiceName: String?
         if dbType == .oracle && !database.isEmpty {
@@ -230,6 +225,7 @@ struct ConnectionURLParser {
             sshHost: nil,
             sshPort: nil,
             sshUsername: nil,
+            sshPassword: nil,
             usePrivateKey: nil,
             useSSHAgent: nil,
             agentSocket: nil,
@@ -245,9 +241,42 @@ struct ConnectionURLParser {
             filterValue: ext.filterValue,
             filterCondition: ext.filterCondition,
             oracleServiceName: oracleServiceName,
+            safeModeLevel: ext.safeModeLevel,
             useSrv: ext.useSrv,
-            mongoQueryParams: ext.mongoQueryParams
+            mongoQueryParams: ext.mongoQueryParams,
+            multiHost: nil
         ))
+    }
+
+    private static func resolveDBType(from scheme: String) -> DatabaseType? {
+        switch scheme {
+        case "postgresql", "postgres":
+            return .postgresql
+        case "redshift":
+            return .redshift
+        case "mysql":
+            return .mysql
+        case "mariadb":
+            return .mariadb
+        case "sqlite":
+            return .sqlite
+        case "mongodb", "mongodb+srv":
+            return .mongodb
+        case "redis", "rediss":
+            return .redis
+        case "sqlserver", "mssql", "jdbc:sqlserver":
+            return .mssql
+        case "oracle", "jdbc:oracle:thin":
+            return .oracle
+        case "clickhouse", "ch":
+            return .clickhouse
+        case "cassandra", "cql":
+            return .cassandra
+        case "scylladb", "scylla":
+            return .scylladb
+        default:
+            return PluginMetadataRegistry.shared.databaseType(forUrlScheme: scheme)
+        }
     }
 
     // SSH URL format: scheme+ssh://ssh_user@ssh_host:ssh_port/db_user:db_pass@db_host:db_port/db_name?params
@@ -274,10 +303,19 @@ struct ConnectionURLParser {
         let dbPart = String(mainPart[mainPart.index(after: firstSlash)...])
 
         var sshUsername: String?
+        var sshPassword: String?
         var sshHostPort: String
         if let atIndex = sshPart.firstIndex(of: "@") {
-            sshUsername = String(sshPart[sshPart.startIndex..<atIndex])
-                .removingPercentEncoding
+            let userinfo = String(sshPart[sshPart.startIndex..<atIndex])
+            if let colonIndex = userinfo.firstIndex(of: ":") {
+                sshUsername = String(userinfo[userinfo.startIndex..<colonIndex])
+                    .removingPercentEncoding
+                let rawPass = String(userinfo[userinfo.index(after: colonIndex)...])
+                    .removingPercentEncoding ?? ""
+                sshPassword = rawPass.isEmpty ? nil : rawPass
+            } else {
+                sshUsername = userinfo.removingPercentEncoding
+            }
             sshHostPort = String(sshPart[sshPart.index(after: atIndex)...])
         } else {
             sshHostPort = sshPart
@@ -363,6 +401,7 @@ struct ConnectionURLParser {
             sshHost: sshHost,
             sshPort: sshPort,
             sshUsername: sshUsername,
+            sshPassword: sshPassword,
             usePrivateKey: ext.usePrivateKey,
             useSSHAgent: ext.useSSHAgent,
             agentSocket: ext.agentSocket,
@@ -378,9 +417,109 @@ struct ConnectionURLParser {
             filterValue: ext.filterValue,
             filterCondition: ext.filterCondition,
             oracleServiceName: oracleServiceName,
+            safeModeLevel: ext.safeModeLevel,
             useSrv: ext.useSrv,
-            mongoQueryParams: ext.mongoQueryParams
+            mongoQueryParams: ext.mongoQueryParams,
+            multiHost: nil
         ))
+    }
+
+    // MARK: - Multi-Host MongoDB Parsing
+
+    private static func parseMultiHostMongoDB(
+        _ afterScheme: String,
+        dbType: DatabaseType,
+        isSrv: Bool
+    ) -> ParsedConnectionURL? {
+        var mainPart = afterScheme
+        var queryString: String?
+        if let questionIndex = afterScheme.firstIndex(of: "?") {
+            mainPart = String(afterScheme[afterScheme.startIndex..<questionIndex])
+            queryString = String(afterScheme[afterScheme.index(after: questionIndex)...])
+        }
+
+        var authority = mainPart
+        var database = ""
+        if let slashIndex = mainPart.firstIndex(of: "/") {
+            authority = String(mainPart[mainPart.startIndex..<slashIndex])
+            database = String(mainPart[mainPart.index(after: slashIndex)...])
+                .removingPercentEncoding ?? String(mainPart[mainPart.index(after: slashIndex)...])
+        }
+
+        var credentials = ""
+        var hostPortion = authority
+        if let atIndex = authority.lastIndex(of: "@") {
+            credentials = String(authority[authority.startIndex..<atIndex])
+            hostPortion = String(authority[authority.index(after: atIndex)...])
+        }
+
+        guard hostPortion.contains(",") else { return nil }
+
+        var username = ""
+        var password = ""
+        if !credentials.isEmpty {
+            if let colonIndex = credentials.firstIndex(of: ":") {
+                username = String(credentials[credentials.startIndex..<colonIndex])
+                    .removingPercentEncoding ?? ""
+                password = String(credentials[credentials.index(after: colonIndex)...])
+                    .removingPercentEncoding ?? ""
+            } else {
+                username = credentials.removingPercentEncoding ?? ""
+            }
+        }
+
+        let multiHost = hostPortion
+
+        let firstSegment = hostPortion.split(separator: ",").first.map(String.init) ?? hostPortion
+        let hostParts = firstSegment.split(separator: ":", maxSplits: 1)
+        let firstHost = String(hostParts[0]).removingPercentEncoding ?? String(hostParts[0])
+        let firstPort: Int? = hostParts.count > 1 ? Int(hostParts[1]) : nil
+
+        var queryItems: [URLQueryItem]?
+        if let qs = queryString {
+            queryItems = qs.split(separator: "&").map { param in
+                let kv = param.split(separator: "=", maxSplits: 1)
+                let key = String(kv[0])
+                let val = kv.count > 1 ? (String(kv[1]).removingPercentEncoding ?? String(kv[1])) : ""
+                return URLQueryItem(name: key, value: val)
+            }
+        }
+
+        let ext = parseQueryItems(queryItems, dbType: dbType)
+
+        return ParsedConnectionURL(
+            type: dbType,
+            host: firstHost,
+            port: firstPort,
+            database: database,
+            username: username,
+            password: password,
+            sslMode: ext.sslMode,
+            authSource: ext.authSource,
+            sshHost: nil,
+            sshPort: nil,
+            sshUsername: nil,
+            sshPassword: nil,
+            usePrivateKey: nil,
+            useSSHAgent: nil,
+            agentSocket: nil,
+            connectionName: ext.connectionName,
+            redisDatabase: nil,
+            statusColor: ext.statusColor,
+            envTag: ext.envTag,
+            schema: ext.schema,
+            tableName: ext.tableName,
+            isView: ext.isView,
+            filterColumn: ext.filterColumn,
+            filterOperation: ext.filterOperation,
+            filterValue: ext.filterValue,
+            filterCondition: ext.filterCondition,
+            oracleServiceName: nil,
+            safeModeLevel: ext.safeModeLevel,
+            useSrv: isSrv,
+            mongoQueryParams: ext.mongoQueryParams,
+            multiHost: multiHost
+        )
     }
 
     // MARK: - Query Parameter Helpers
@@ -401,6 +540,7 @@ struct ConnectionURLParser {
         var filterOperation: String?
         var filterValue: String?
         var filterCondition: String?
+        var safeModeLevel: Int?
         var useSrv: Bool = false
         var mongoQueryParams: [String: String] = [:]
     }
@@ -424,15 +564,16 @@ struct ConnectionURLParser {
             guard let key = parts.first else { continue }
             let value = parts.count > 1 ? String(parts[1]) : nil
             guard let value else { continue }
-            if String(key) == "usePrivateKey" {
+            let keyStr = String(key).lowercased()
+            if keyStr == "useprivatekey" {
                 ext.usePrivateKey = value.lowercased() == "true"
                 continue
             }
-            if String(key) == "useSSHAgent" {
+            if keyStr == "usesshagent" {
                 ext.useSSHAgent = value.lowercased() == "true"
                 continue
             }
-            if String(key) == "agentSocket" {
+            if keyStr == "agentsocket" {
                 ext.agentSocket = value.removingPercentEncoding ?? value
                 continue
             }
@@ -441,13 +582,14 @@ struct ConnectionURLParser {
         return ext
     }
 
-    private static func applyQueryParam(key: String, value: String, to ext: inout ExtendedParams, dbType: DatabaseType? = nil) {
+    private static func applyQueryParam(key rawKey: String, value: String, to ext: inout ExtendedParams, dbType: DatabaseType? = nil) {
+        let key = rawKey.lowercased()
         switch key {
         case "sslmode":
             ext.sslMode = parseSSLMode(value)
-        case "authSource", "authsource":
+        case "authsource":
             ext.authSource = value
-        case "statusColor", "statuscolor":
+        case "statuscolor":
             ext.statusColor = value
         case "env":
             ext.envTag = value.removingPercentEncoding ?? value
@@ -473,7 +615,7 @@ struct ConnectionURLParser {
         case "condition", "raw", "query":
             ext.filterCondition = value.replacingOccurrences(of: "+", with: " ")
                 .removingPercentEncoding ?? value
-        case "tLSMode", "tlsmode":
+        case "tlsmode":
             if ext.sslMode == nil, let intValue = Int(value) {
                 ext.sslMode = parseTlsModeInteger(intValue)
             }
@@ -481,13 +623,15 @@ struct ConnectionURLParser {
             if value.lowercased() == "true" && ext.sslMode == nil {
                 ext.sslMode = .required
             }
-        case "authMechanism", "authmechanism":
+        case "authmechanism":
             ext.mongoQueryParams["authMechanism"] = value
-        case "replicaSet", "replicaset":
+        case "replicaset":
             ext.mongoQueryParams["replicaSet"] = value
+        case "safemodelevel":
+            ext.safeModeLevel = Int(value)
         default:
             if dbType == .mongodb {
-                ext.mongoQueryParams[key] = value
+                ext.mongoQueryParams[rawKey] = value
             }
         }
     }
@@ -583,7 +727,7 @@ struct ConnectionURLParser {
         return bestColor
     }
 
-    internal static func tagId(fromEnvName name: String) -> UUID? {
+    @MainActor internal static func tagId(fromEnvName name: String) -> UUID? {
         let tags = TagStorage.shared.loadTags()
         return tags.first(where: { $0.name.lowercased() == name.lowercased() })?.id
     }

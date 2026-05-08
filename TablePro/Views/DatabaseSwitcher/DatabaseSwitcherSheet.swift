@@ -23,9 +23,11 @@ struct DatabaseSwitcherSheet: View {
 
     @State private var viewModel: DatabaseSwitcherViewModel
     @State private var showCreateDialog = false
+    @State private var showDropDialog = false
+    @State private var databaseToDrop: String?
+    @State private var supportsCreateDatabase = false
 
     private enum FocusField {
-        case search
         case databaseList
     }
 
@@ -62,13 +64,6 @@ struct DatabaseSwitcherSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
-            Text(isSchemaMode
-                ? String(localized: "Open Schema")
-                : String(localized: "Open Database"))
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.body, weight: .semibold))
-                .padding(.vertical, 12)
-
             // Databases / Schemas toggle (PostgreSQL only)
             if PluginManager.shared.supportsSchemaSwitching(for: databaseType) {
                 Picker("", selection: $viewModel.mode) {
@@ -79,7 +74,8 @@ struct DatabaseSwitcherSheet: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .padding(.horizontal, 12)
+                .frame(width: 220)
+                .padding(.top, 12)
                 .padding(.bottom, 8)
                 .onChange(of: viewModel.mode) {
                     Task { await viewModel.fetchDatabases() }
@@ -112,14 +108,20 @@ struct DatabaseSwitcherSheet: View {
             footer
         }
         .frame(width: 420, height: 480)
+        .navigationTitle(isSchemaMode
+            ? String(localized: "Open Schema")
+            : String(localized: "Open Database"))
         .background(Color(nsColor: .windowBackgroundColor))
-        .defaultFocus($focus, .search)
         .task { await viewModel.fetchDatabases() }
+        .task { await refreshCreateSupport() }
         .sheet(isPresented: $showCreateDialog) {
-            CreateDatabaseSheet { name, charset, collation in
-                try await viewModel.createDatabase(
-                    name: name, charset: charset, collation: collation)
-                await viewModel.refreshDatabases()
+            CreateDatabaseSheet(databaseType: databaseType, viewModel: viewModel)
+        }
+        .sheet(isPresented: $showDropDialog) {
+            if let name = databaseToDrop {
+                DropDatabaseSheet(databaseName: name, viewModel: viewModel) {
+                    databaseToDrop = nil
+                }
             }
         }
         .onExitCommand {
@@ -130,22 +132,19 @@ struct DatabaseSwitcherSheet: View {
             openSelectedDatabase()
             return .handled
         }
-        .onKeyPress(.upArrow) {
-            moveSelection(up: true)
-            return .handled
-        }
-        .onKeyPress(.downArrow) {
-            moveSelection(up: false)
-            return .handled
-        }
         .onKeyPress(characters: .init(charactersIn: "jn"), phases: [.down, .repeat]) { keyPress in
             guard keyPress.modifiers.contains(.control) else { return .ignored }
-            moveSelection(up: false)
+            viewModel.moveDown()
             return .handled
         }
         .onKeyPress(characters: .init(charactersIn: "kp"), phases: [.down, .repeat]) { keyPress in
             guard keyPress.modifiers.contains(.control) else { return .ignored }
-            moveSelection(up: true)
+            viewModel.moveUp()
+            return .handled
+        }
+        .onKeyPress(.delete) {
+            guard canDropSelected else { return .ignored }
+            initiateDropForSelected()
             return .handled
         }
     }
@@ -154,51 +153,44 @@ struct DatabaseSwitcherSheet: View {
 
     private var toolbar: some View {
         HStack(spacing: 8) {
-            // Search
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.body))
-                    .foregroundStyle(.tertiary)
-
-                TextField(isSchemaMode
+            NativeSearchField(
+                text: $viewModel.searchText,
+                placeholder: isSchemaMode
                     ? String(localized: "Search schemas...")
                     : String(localized: "Search databases..."),
-                    text: $viewModel.searchText)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.body))
-                    .focused($focus, equals: .search)
-
-                if !viewModel.searchText.isEmpty {
-                    Button(action: { viewModel.searchText = "" }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(6)
+                onMoveUp: { viewModel.moveUp() },
+                onMoveDown: { viewModel.moveDown() },
+                focusOnAppear: true
+            )
 
             // Refresh
             Button(action: {
                 Task { await viewModel.refreshDatabases() }
             }) {
                 Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 14))
+                    .frame(width: 24, height: 24)
             }
             .buttonStyle(.borderless)
-            .help("Refresh database list")
+            .help(String(localized: "Refresh database list"))
 
-            // Create (only for non-SQLite)
-            if databaseType != .sqlite && !isSchemaMode {
+            if !isSchemaMode && supportsCreateDatabase {
                 Button(action: { showCreateDialog = true }) {
                     Image(systemName: "plus")
-                        .font(.system(size: 14))
+                        .frame(width: 24, height: 24)
                 }
                 .buttonStyle(.borderless)
-                .help("Create new database")
+                .help(String(localized: "Create new database"))
+            }
+
+            // Drop
+            if !isSchemaMode && PluginManager.shared.supportsDropDatabase(for: databaseType) {
+                Button(action: { initiateDropForSelected() }) {
+                    Image(systemName: "trash")
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.borderless)
+                .disabled(!canDropSelected)
+                .help(String(localized: "Drop selected database"))
             }
         }
         .padding(.horizontal, 12)
@@ -210,39 +202,11 @@ struct DatabaseSwitcherSheet: View {
     private var databaseList: some View {
         ScrollViewReader { proxy in
             List(selection: $viewModel.selectedDatabase) {
-                // Recent section
-                if !viewModel.recentDatabaseMetadata.isEmpty {
-                    Section {
-                        ForEach(viewModel.recentDatabaseMetadata) { db in
-                            databaseRow(db)
-                        }
-                    } header: {
-                        Text("RECENT")
-                            .font(
-                                .system(size: ThemeEngine.shared.activeTheme.typography.caption, weight: .semibold)
-                            )
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                // All databases
-                Section {
-                    ForEach(viewModel.allDatabases) { db in
-                        databaseRow(db)
-                    }
-                } header: {
-                    if !viewModel.recentDatabaseMetadata.isEmpty {
-                        Text(isSchemaMode
-                            ? String(localized: "ALL SCHEMAS")
-                            : String(localized: "ALL DATABASES"))
-                            .font(
-                                .system(size: ThemeEngine.shared.activeTheme.typography.caption, weight: .semibold)
-                            )
-                            .foregroundStyle(.secondary)
-                    }
+                ForEach(viewModel.filteredDatabases) { db in
+                    databaseRow(db)
                 }
             }
-            .listStyle(.sidebar)
+            .listStyle(.inset)
             .scrollContentBackground(.hidden)
             .focused($focus, equals: .databaseList)
             .onChange(of: viewModel.selectedDatabase) { _, newValue in
@@ -256,56 +220,54 @@ struct DatabaseSwitcherSheet: View {
     }
 
     private func databaseRow(_ database: DatabaseMetadata) -> some View {
-        let isSelected = database.name == viewModel.selectedDatabase
         let isCurrent = database.name == activeName
 
         return HStack(spacing: 10) {
-            // Icon
             Image(systemName: database.icon)
-                .font(.system(size: 14))
-                .foregroundStyle(
-                    isSelected ? .white : (database.isSystemDatabase ? Color(nsColor: .systemOrange) : Color(nsColor: .systemBlue)))
+                .font(.body)
+                .foregroundStyle(database.isSystemDatabase ? Color(nsColor: .systemOrange) : Color(nsColor: .systemBlue))
 
-            // Name
             Text(database.name)
-                .font(.system(size: 13))
-                .foregroundStyle(isSelected ? .white : .primary)
+                .font(.body)
 
             Spacer()
 
-            // Current badge
             if isCurrent {
                 Text("current")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(isSelected ? .white.opacity(0.7) : .secondary)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
                     .background(
                         RoundedRectangle(cornerRadius: 4)
-                            .fill(
-                                isSelected
-                                    ? Color.white.opacity(0.15)
-                                    : Color(nsColor: .quaternaryLabelColor))
+                            .fill(Color(nsColor: .quaternaryLabelColor))
                     )
             }
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
-        .listRowBackground(
-            RoundedRectangle(cornerRadius: 4)
-                .fill(isSelected ? Color(nsColor: .selectedContentBackgroundColor) : Color.clear)
-                .padding(.horizontal, 4)
-        )
-        .listRowInsets(ThemeEngine.shared.activeTheme.spacing.listRowInsets.swiftUI)
+        .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
         .listRowSeparator(.hidden)
         .id(database.name)
         .tag(database.name)
         .overlay(
-            DoubleClickView {
+            DoubleClickDetector {
                 viewModel.selectedDatabase = database.name
                 openSelectedDatabase()
             }
         )
+        .contextMenu {
+            if !isSchemaMode && PluginManager.shared.supportsDropDatabase(for: databaseType)
+                && !database.isSystemDatabase && database.name != activeName
+            {
+                Button(role: .destructive) {
+                    databaseToDrop = database.name
+                    showDropDialog = true
+                } label: {
+                    Label(String(localized: "Drop Database..."), systemImage: "trash")
+                }
+            }
+        }
     }
 
     // MARK: - Empty States
@@ -317,7 +279,7 @@ struct DatabaseSwitcherSheet: View {
             Text(isSchemaMode
                 ? String(localized: "Loading schemas...")
                 : String(localized: "Loading databases..."))
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.medium))
+                .font(.callout)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -326,16 +288,16 @@ struct DatabaseSwitcherSheet: View {
     private func errorView(_ message: String) -> some View {
         VStack(spacing: 12) {
             Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: ThemeEngine.shared.activeTheme.iconSizes.extraLarge))
-                .foregroundStyle(.orange)
+                .font(.title2)
+                .foregroundStyle(Color(nsColor: .systemOrange))
 
             Text(isSchemaMode
                 ? String(localized: "Failed to load schemas")
                 : String(localized: "Failed to load databases"))
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.body, weight: .medium))
+                .font(.body.weight(.medium))
 
             Text(message)
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
+                .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
@@ -352,16 +314,16 @@ struct DatabaseSwitcherSheet: View {
     private var sqliteEmptyState: some View {
         VStack(spacing: 12) {
             Image(systemName: "doc.fill")
-                .font(.system(size: ThemeEngine.shared.activeTheme.iconSizes.extraLarge))
+                .font(.title2)
                 .foregroundStyle(.secondary)
 
             Text("SQLite is file-based")
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.body, weight: .medium))
+                .font(.body.weight(.medium))
 
             Text(
                 "Each SQLite file is a separate database.\nTo open a different database, create a new connection."
             )
-            .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
+            .font(.subheadline)
             .foregroundStyle(.secondary)
             .multilineTextAlignment(.center)
             .padding(.horizontal)
@@ -372,24 +334,24 @@ struct DatabaseSwitcherSheet: View {
     private var emptyState: some View {
         VStack(spacing: 12) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: ThemeEngine.shared.activeTheme.iconSizes.extraLarge))
+                .font(.title2)
                 .foregroundStyle(.secondary)
 
             if viewModel.searchText.isEmpty {
                 Text(isSchemaMode
                     ? String(localized: "No schemas found")
                     : String(localized: "No databases found"))
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.body, weight: .medium))
+                    .font(.body.weight(.medium))
             } else {
                 Text(isSchemaMode
                     ? String(localized: "No matching schemas")
                     : String(localized: "No matching databases"))
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.body, weight: .medium))
+                    .font(.body.weight(.medium))
 
                 Text(isSchemaMode
-                    ? String(localized: "No schemas match \"\(viewModel.searchText)\"")
-                    : String(localized: "No databases match \"\(viewModel.searchText)\""))
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
+                    ? String(format: String(localized: "No schemas match \"%@\""), viewModel.searchText)
+                    : String(format: String(localized: "No databases match \"%@\""), viewModel.searchText))
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
         }
@@ -418,27 +380,32 @@ struct DatabaseSwitcherSheet: View {
         .padding(12)
     }
 
+    // MARK: - Drop Helpers
+
+    private var canDropSelected: Bool {
+        guard !isSchemaMode,
+              PluginManager.shared.supportsDropDatabase(for: databaseType),
+              let selected = viewModel.selectedDatabase,
+              selected != activeName
+        else { return false }
+        let isSystem = viewModel.filteredDatabases.first { $0.name == selected }?.isSystemDatabase ?? false
+        return !isSystem
+    }
+
+    private func initiateDropForSelected() {
+        guard canDropSelected, let selected = viewModel.selectedDatabase else { return }
+        databaseToDrop = selected
+        showDropDialog = true
+    }
+
     // MARK: - Actions
 
-    private func moveSelection(up: Bool) {
-        let allDbs = viewModel.recentDatabaseMetadata + viewModel.allDatabases
-        guard !allDbs.isEmpty else { return }
-
-        // Defer state update to avoid "Publishing changes from within view updates" warning
-        Task { @MainActor in
-            if let selected = viewModel.selectedDatabase,
-               let currentIndex = allDbs.firstIndex(where: { $0.name == selected })
-            {
-                if up {
-                    let newIndex = max(0, currentIndex - 1)
-                    viewModel.selectedDatabase = allDbs[newIndex].name
-                } else {
-                    let newIndex = min(allDbs.count - 1, currentIndex + 1)
-                    viewModel.selectedDatabase = allDbs[newIndex].name
-                }
-            } else {
-                viewModel.selectedDatabase = up ? allDbs.last?.name : allDbs.first?.name
-            }
+    private func refreshCreateSupport() async {
+        do {
+            let spec = try await viewModel.loadCreateDatabaseForm()
+            supportsCreateDatabase = spec != nil
+        } catch {
+            supportsCreateDatabase = false
         }
     }
 
@@ -451,9 +418,6 @@ struct DatabaseSwitcherSheet: View {
             return
         }
 
-        // Track access
-        viewModel.trackAccess(database: database)
-
         // Call appropriate callback
         if viewModel.isSchemaMode, PluginManager.shared.supportsSchemaSwitching(for: databaseType), let onSelectSchema {
             onSelectSchema(database)
@@ -461,35 +425,6 @@ struct DatabaseSwitcherSheet: View {
             onSelect(database)
         }
         dismiss()
-    }
-}
-
-// MARK: - DoubleClickView
-
-/// NSViewRepresentable that detects double-clicks without interfering with native List selection
-private struct DoubleClickView: NSViewRepresentable {
-    let onDoubleClick: () -> Void
-
-    func makeNSView(context: Context) -> NSView {
-        let view = PassThroughDoubleClickView()
-        view.onDoubleClick = onDoubleClick
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        (nsView as? PassThroughDoubleClickView)?.onDoubleClick = onDoubleClick
-    }
-}
-
-private class PassThroughDoubleClickView: NSView {
-    var onDoubleClick: (() -> Void)?
-
-    override func mouseDown(with event: NSEvent) {
-        if event.clickCount == 2 {
-            onDoubleClick?()
-        }
-        // Always forward to next responder for List selection
-        super.mouseDown(with: event)
     }
 }
 

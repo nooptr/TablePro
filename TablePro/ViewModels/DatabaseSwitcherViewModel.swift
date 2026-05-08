@@ -25,8 +25,9 @@ final class DatabaseSwitcherViewModel {
     // MARK: - Published State
 
     var databases: [DatabaseMetadata] = []
-    var recentDatabases: [String] = []
-    var searchText = ""
+    var searchText = "" {
+        didSet { selectedDatabase = filteredDatabases.first?.name }
+    }
     var selectedDatabase: String?
     var isLoading = false
     var errorMessage: String?
@@ -54,19 +55,6 @@ final class DatabaseSwitcherViewModel {
         }
     }
 
-    var recentDatabaseMetadata: [DatabaseMetadata] {
-        recentDatabases.compactMap { dbName in
-            databases.first { $0.name == dbName }
-        }
-    }
-
-    var allDatabases: [DatabaseMetadata] {
-        // Filter out recent databases from "all" list
-        filteredDatabases.filter { db in
-            !recentDatabases.contains(db.name)
-        }
-    }
-
     // MARK: - Initialization
 
     init(
@@ -78,7 +66,6 @@ final class DatabaseSwitcherViewModel {
         self.currentSchema = currentSchema
         self.databaseType = databaseType
         self.mode = PluginManager.shared.supportsSchemaSwitching(for: databaseType) ? .schema : .database
-        self.recentDatabases = UserDefaults.standard.recentDatabases(for: connectionId)
     }
 
     // MARK: - Public Methods
@@ -117,6 +104,7 @@ final class DatabaseSwitcherViewModel {
                 do {
                     let metadataList = try await driver.fetchAllDatabaseMetadata()
                     databases = metadataList.sorted { $0.name < $1.name }
+                    preselectDatabase()
                 } catch {
                     Self.logger.error("Failed to fetch database metadata: \(error)")
                 }
@@ -143,19 +131,53 @@ final class DatabaseSwitcherViewModel {
         await fetchDatabases()
     }
 
-    /// Create a new database
-    func createDatabase(name: String, charset: String, collation: String?) async throws {
+    func loadCreateDatabaseForm() async throws -> CreateDatabaseFormSpec? {
+        guard let driver = DatabaseManager.shared.driver(for: connectionId) else {
+            throw DatabaseError.notConnected
+        }
+        return try await driver.createDatabaseFormSpec()
+    }
+
+    func createDatabase(name: String, values: [String: String]) async throws {
+        guard let driver = DatabaseManager.shared.driver(for: connectionId) else {
+            throw DatabaseError.notConnected
+        }
+        let request = CreateDatabaseRequest(name: name, values: values)
+        try await driver.createDatabase(request)
+    }
+
+    /// Drop a database
+    func dropDatabase(name: String) async throws {
         guard let driver = DatabaseManager.shared.driver(for: connectionId) else {
             throw DatabaseError.notConnected
         }
 
-        try await driver.createDatabase(name: name, charset: charset, collation: collation)
+        try await driver.dropDatabase(name: name)
     }
 
-    /// Track database access
-    func trackAccess(database: String) {
-        UserDefaults.standard.trackDatabaseAccess(database, for: connectionId)
-        recentDatabases = UserDefaults.standard.recentDatabases(for: connectionId)
+    // MARK: - Keyboard Navigation
+
+    func moveUp() {
+        let items = filteredDatabases
+        guard !items.isEmpty else { return }
+        guard let current = selectedDatabase,
+              let index = items.firstIndex(where: { $0.name == current }),
+              index > 0
+        else { return }
+        selectedDatabase = items[index - 1].name
+    }
+
+    func moveDown() {
+        let items = filteredDatabases
+        guard !items.isEmpty else { return }
+        if let current = selectedDatabase,
+           let index = items.firstIndex(where: { $0.name == current }),
+           index < items.count - 1
+        {
+            selectedDatabase = items[index + 1].name
+        } else if selectedDatabase == nil {
+            selectedDatabase = items.first?.name
+        }
     }
 
     // MARK: - Private Methods

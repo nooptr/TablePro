@@ -10,9 +10,20 @@ import Foundation
 @testable import TablePro
 import Testing
 
-@Suite("QueryHistoryStorage", .serialized)
+@Suite("QueryHistoryStorage")
 struct QueryHistoryStorageTests {
-    private let storage = QueryHistoryStorage.shared
+    private let storage: QueryHistoryStorage
+
+    init() {
+        self.storage = Self.makeIsolatedStorage()
+    }
+
+    static func makeIsolatedStorage() -> QueryHistoryStorage {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tablepro-tests")
+            .appendingPathComponent("query_history_\(UUID().uuidString).db")
+        return QueryHistoryStorage(databaseURL: url, removeDatabaseOnDeinit: true)
+    }
 
     private func makeEntry(
         id: UUID = UUID(),
@@ -38,7 +49,7 @@ struct QueryHistoryStorageTests {
 
     @Test("Isolated instance initializes without deadlock")
     func isolatedInitDoesNotDeadlock() async {
-        let isolated = QueryHistoryStorage(isolatedForTesting: true)
+        let isolated = Self.makeIsolatedStorage()
         let entries = await isolated.fetchHistory()
         #expect(entries.isEmpty)
     }
@@ -185,12 +196,50 @@ struct QueryHistoryStorageTests {
 
     @Test("clearAllHistory removes all entries")
     func clearAllHistoryRemovesAll() async {
-        let isolated = QueryHistoryStorage(isolatedForTesting: true)
+        let isolated = Self.makeIsolatedStorage()
         _ = await isolated.addHistory(makeEntry(query: "SELECT clear_test"))
         let result = await isolated.clearAllHistory()
         #expect(result == true)
         let remaining = await isolated.fetchHistory(limit: 100)
         #expect(remaining.isEmpty)
+    }
+
+    @Test("fetchHistory with since/until window excludes entries outside the range")
+    func fetchHistorySinceUntilWindow() async {
+        let connId = UUID()
+        let now = Date()
+        let oneHourAgo = now.addingTimeInterval(-3_600)
+        let twoHoursAgo = now.addingTimeInterval(-7_200)
+
+        let outside = QueryHistoryEntry(
+            query: "SELECT outside_window",
+            connectionId: connId,
+            databaseName: "testdb",
+            executedAt: twoHoursAgo,
+            executionTime: 0.01,
+            rowCount: 1,
+            wasSuccessful: true
+        )
+        let inside = QueryHistoryEntry(
+            query: "SELECT inside_window",
+            connectionId: connId,
+            databaseName: "testdb",
+            executedAt: oneHourAgo,
+            executionTime: 0.01,
+            rowCount: 1,
+            wasSuccessful: true
+        )
+
+        _ = await storage.addHistory(outside)
+        _ = await storage.addHistory(inside)
+
+        let windowed = await storage.fetchHistory(
+            connectionId: connId,
+            since: now.addingTimeInterval(-5_400),
+            until: now
+        )
+        #expect(windowed.count == 1)
+        #expect(windowed.first?.query == "SELECT inside_window")
     }
 
     @Test("Combined connectionId + dateFilter works")

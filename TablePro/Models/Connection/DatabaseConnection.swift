@@ -11,204 +11,6 @@ import SwiftUI
 
 // MARK: - SSH Configuration
 
-/// SSH authentication method
-enum SSHAuthMethod: String, CaseIterable, Identifiable, Codable {
-    case password = "Password"
-    case privateKey = "Private Key"
-    case sshAgent = "SSH Agent"
-    case keyboardInteractive = "Keyboard Interactive"
-
-    var id: String { rawValue }
-
-    var displayName: String {
-        switch self {
-        case .password: return String(localized: "Password")
-        case .privateKey: return String(localized: "Private Key")
-        case .sshAgent: return String(localized: "SSH Agent")
-        case .keyboardInteractive: return String(localized: "Keyboard Interactive")
-        }
-    }
-
-    var iconName: String {
-        switch self {
-        case .password: return "key.fill"
-        case .privateKey: return "doc.text.fill"
-        case .sshAgent: return "person.badge.key.fill"
-        case .keyboardInteractive: return "lock.rotation"
-        }
-    }
-}
-
-enum SSHAgentSocketOption: String, CaseIterable, Identifiable {
-    case systemDefault
-    case onePassword
-    case custom
-
-    static let onePasswordSocketPath = "~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"
-    private static let onePasswordAliasPath = "~/.1password/agent.sock"
-
-    var id: String { rawValue }
-
-    var displayName: String {
-        switch self {
-        case .systemDefault:
-            return "SSH_AUTH_SOCK"
-        case .onePassword:
-            return "1Password"
-        case .custom:
-            return String(localized: "Custom Path")
-        }
-    }
-
-    init(socketPath: String) {
-        let trimmedPath = socketPath.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        switch trimmedPath {
-        case "":
-            self = .systemDefault
-        case Self.onePasswordSocketPath, Self.onePasswordAliasPath:
-            self = .onePassword
-        default:
-            self = .custom
-        }
-    }
-
-    func resolvedPath(customPath: String) -> String {
-        switch self {
-        case .systemDefault:
-            return ""
-        case .onePassword:
-            return Self.onePasswordSocketPath
-        case .custom:
-            return customPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-    }
-}
-
-enum SSHJumpAuthMethod: String, CaseIterable, Identifiable, Codable {
-    case privateKey = "Private Key"
-    case sshAgent = "SSH Agent"
-
-    var id: String { rawValue }
-}
-
-struct SSHJumpHost: Codable, Hashable, Identifiable {
-    var id = UUID()
-    var host: String = ""
-    var port: Int = 22
-    var username: String = ""
-    var authMethod: SSHJumpAuthMethod = .sshAgent
-    var privateKeyPath: String = ""
-
-    var isValid: Bool {
-        !host.isEmpty && !username.isEmpty &&
-        (authMethod == .sshAgent || !privateKeyPath.isEmpty)
-    }
-
-    var proxyJumpString: String {
-        "\(username)@\(host):\(port)"
-    }
-}
-
-/// SSH tunnel configuration for database connections
-struct SSHConfiguration: Codable, Hashable {
-    var enabled: Bool = false
-    var host: String = ""
-    var port: Int = 22
-    var username: String = ""
-    var authMethod: SSHAuthMethod = .password
-    var privateKeyPath: String = ""  // Path to identity file (e.g., ~/.ssh/id_rsa)
-    var useSSHConfig: Bool = true  // Auto-fill from ~/.ssh/config when selecting host
-    var agentSocketPath: String = ""  // Custom SSH_AUTH_SOCK path (empty = use system default)
-    var jumpHosts: [SSHJumpHost] = []
-    var totpMode: TOTPMode = .none
-    var totpAlgorithm: TOTPAlgorithm = .sha1
-    var totpDigits: Int = 6
-    var totpPeriod: Int = 30
-
-    /// Check if SSH configuration is complete enough for connection
-    var isValid: Bool {
-        guard enabled else { return true }  // Not enabled = valid (skip SSH)
-        guard !host.isEmpty, !username.isEmpty else { return false }
-
-        let authValid: Bool
-        switch authMethod {
-        case .password:
-            authValid = true
-        case .privateKey:
-            authValid = !privateKeyPath.isEmpty
-        case .sshAgent:
-            authValid = true
-        case .keyboardInteractive:
-            authValid = true
-        }
-
-        return authValid && jumpHosts.allSatisfy(\.isValid)
-    }
-}
-
-extension SSHConfiguration {
-    enum CodingKeys: String, CodingKey {
-        case enabled, host, port, username, authMethod, privateKeyPath, useSSHConfig, agentSocketPath, jumpHosts
-        case totpMode, totpAlgorithm, totpDigits, totpPeriod
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        enabled = try container.decode(Bool.self, forKey: .enabled)
-        host = try container.decode(String.self, forKey: .host)
-        port = try container.decode(Int.self, forKey: .port)
-        username = try container.decode(String.self, forKey: .username)
-        authMethod = try container.decode(SSHAuthMethod.self, forKey: .authMethod)
-        privateKeyPath = try container.decode(String.self, forKey: .privateKeyPath)
-        useSSHConfig = try container.decode(Bool.self, forKey: .useSSHConfig)
-        agentSocketPath = try container.decode(String.self, forKey: .agentSocketPath)
-        jumpHosts = try container.decodeIfPresent([SSHJumpHost].self, forKey: .jumpHosts) ?? []
-        totpMode = try container.decodeIfPresent(TOTPMode.self, forKey: .totpMode) ?? .none
-        totpAlgorithm = try container.decodeIfPresent(TOTPAlgorithm.self, forKey: .totpAlgorithm) ?? .sha1
-        totpDigits = try container.decodeIfPresent(Int.self, forKey: .totpDigits) ?? 6
-        totpPeriod = try container.decodeIfPresent(Int.self, forKey: .totpPeriod) ?? 30
-    }
-}
-
-// MARK: - SSL Configuration
-
-/// SSL/TLS connection mode
-enum SSLMode: String, CaseIterable, Identifiable, Codable {
-    case disabled = "Disabled"
-    case preferred = "Preferred"
-    case required = "Required"
-    case verifyCa = "Verify CA"
-    case verifyIdentity = "Verify Identity"
-
-    var id: String { rawValue }
-
-    var description: String {
-        switch self {
-        case .disabled: return String(localized: "No SSL encryption")
-        case .preferred: return String(localized: "Use SSL if available")
-        case .required: return String(localized: "Require SSL, skip verification")
-        case .verifyCa: return String(localized: "Verify server certificate")
-        case .verifyIdentity: return String(localized: "Verify certificate and hostname")
-        }
-    }
-}
-
-/// SSL/TLS configuration for database connections
-struct SSLConfiguration: Codable, Hashable {
-    var mode: SSLMode = .disabled
-    var caCertificatePath: String = ""
-    var clientCertificatePath: String = ""
-    var clientKeyPath: String = ""
-
-    /// Whether SSL is effectively enabled
-    var isEnabled: Bool { mode != .disabled }
-
-    /// Whether certificate verification is enabled
-    var verifiesCertificate: Bool { mode == .verifyCa || mode == .verifyIdentity }
-}
-
-// MARK: - Database Type
 
 /// Represents the type of database
 struct DatabaseType: Hashable, Identifiable, Sendable {
@@ -239,6 +41,8 @@ extension DatabaseType {
     static let cloudflareD1 = DatabaseType(rawValue: "Cloudflare D1")
     static let dynamodb = DatabaseType(rawValue: "DynamoDB")
     static let bigQuery = DatabaseType(rawValue: "BigQuery")
+    static let libsql = DatabaseType(rawValue: "libSQL")
+    static let turso = DatabaseType(rawValue: "Turso")
 }
 
 extension DatabaseType: Codable {
@@ -282,7 +86,7 @@ extension DatabaseType {
     }
 
     var iconName: String {
-        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.iconName ?? "database-icon"
+        PluginMetadataRegistry.shared.snapshot(forTypeId: rawValue)?.iconName ?? "database-icon"
     }
 
     /// Returns the correct SwiftUI Image for this database type, handling both
@@ -299,6 +103,39 @@ extension DatabaseType {
         PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.defaultPort ?? 0
     }
 
+    var category: DatabaseCategory {
+        PluginMetadataRegistry.shared.snapshot(forTypeId: rawValue)?.connection.category ?? .other
+    }
+
+    var tagline: String? {
+        let raw = PluginMetadataRegistry.shared.snapshot(forTypeId: rawValue)?.connection.tagline ?? ""
+        return raw.isEmpty ? nil : raw
+    }
+
+    var brandColor: Color {
+        switch rawValue {
+        case "MySQL": Color(hex: "00758F")
+        case "MariaDB": Color(hex: "C0765A")
+        case "PostgreSQL": Color(hex: "336791")
+        case "Redshift": Color(hex: "527FFF")
+        case "SQLite": Color(hex: "0F80CC")
+        case "SQL Server": Color(hex: "CC2927")
+        case "Oracle": Color(hex: "C74634")
+        case "MongoDB": Color(hex: "00684A")
+        case "Redis": Color(hex: "FF4438")
+        case "ClickHouse": Color(hex: "FFCC01")
+        case "DuckDB": Color(hex: "FFC827")
+        case "Cassandra": Color(hex: "1287B1")
+        case "ScyllaDB": Color(hex: "00C9C2")
+        case "etcd": Color(hex: "419EDA")
+        case "Cloudflare D1": Color(hex: "F38020")
+        case "libSQL", "Turso": Color(hex: "4FF8D2")
+        case "DynamoDB": Color(hex: "4053D6")
+        case "BigQuery": Color(hex: "4285F4")
+        default: Color.accentColor
+        }
+    }
+
     var requiresAuthentication: Bool {
         PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.requiresAuthentication ?? true
     }
@@ -309,6 +146,64 @@ extension DatabaseType {
 
     var supportsSchemaEditing: Bool {
         PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.supportsSchemaEditing ?? true
+    }
+
+    var supportsAddColumn: Bool {
+        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.capabilities.supportsAddColumn ?? true
+    }
+
+    var supportsModifyColumn: Bool {
+        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.capabilities.supportsModifyColumn ?? true
+    }
+
+    var supportsDropColumn: Bool {
+        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.capabilities.supportsDropColumn ?? true
+    }
+
+    var supportsRenameColumn: Bool {
+        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.capabilities.supportsRenameColumn ?? false
+    }
+
+    var supportsAddIndex: Bool {
+        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.capabilities.supportsAddIndex ?? true
+    }
+
+    var supportsDropIndex: Bool {
+        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.capabilities.supportsDropIndex ?? true
+    }
+
+    var supportsModifyPrimaryKey: Bool {
+        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.capabilities.supportsModifyPrimaryKey ?? true
+    }
+}
+
+// MARK: - External Access
+
+enum ExternalAccessLevel: String, Codable, Sendable, CaseIterable, Identifiable {
+    case blocked
+    case readOnly
+    case readWrite
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .blocked: return String(localized: "Blocked")
+        case .readOnly: return String(localized: "Read Only")
+        case .readWrite: return String(localized: "Read & Write")
+        }
+    }
+
+    private var rank: Int {
+        switch self {
+        case .blocked: 0
+        case .readOnly: 1
+        case .readWrite: 2
+        }
+    }
+
+    func satisfies(_ required: ExternalAccessLevel) -> Bool {
+        rank >= required.rank
     }
 }
 
@@ -378,11 +273,18 @@ struct DatabaseConnection: Identifiable, Hashable {
     var tagId: UUID?
     var groupId: UUID?
     var sshProfileId: UUID?
+    var sshTunnelMode: SSHTunnelMode
     var safeModeLevel: SafeModeLevel
     var aiPolicy: AIConnectionPolicy?
+    var aiRules: String?
+    var aiAlwaysAllowedTools: Set<String> = []
+    var externalAccess: ExternalAccessLevel = .readOnly
     var additionalFields: [String: String] = [:]
     var redisDatabase: Int?
     var startupCommands: String?
+    var sortOrder: Int
+    var localOnly: Bool = false
+    var isSample: Bool = false
 
     var mongoAuthSource: String? {
         get { additionalFields["mongoAuthSource"]?.nilIfEmpty }
@@ -453,8 +355,12 @@ struct DatabaseConnection: Identifiable, Hashable {
         tagId: UUID? = nil,
         groupId: UUID? = nil,
         sshProfileId: UUID? = nil,
+        sshTunnelMode: SSHTunnelMode = .disabled,
         safeModeLevel: SafeModeLevel = .silent,
         aiPolicy: AIConnectionPolicy? = nil,
+        aiRules: String? = nil,
+        aiAlwaysAllowedTools: Set<String> = [],
+        externalAccess: ExternalAccessLevel = .readOnly,
         mongoAuthSource: String? = nil,
         mongoReadPreference: String? = nil,
         mongoWriteConcern: String? = nil,
@@ -465,6 +371,9 @@ struct DatabaseConnection: Identifiable, Hashable {
         mssqlSchema: String? = nil,
         oracleServiceName: String? = nil,
         startupCommands: String? = nil,
+        sortOrder: Int = 0,
+        localOnly: Bool = false,
+        isSample: Bool = false,
         additionalFields: [String: String]? = nil
     ) {
         self.id = id
@@ -481,9 +390,30 @@ struct DatabaseConnection: Identifiable, Hashable {
         self.groupId = groupId
         self.sshProfileId = sshProfileId
         self.safeModeLevel = safeModeLevel
+
+        // Auto-derive sshTunnelMode from legacy fields if not explicitly set
+        if sshTunnelMode == .disabled {
+            if let profileId = sshProfileId {
+                var snapshot = sshConfig
+                snapshot.enabled = true
+                self.sshTunnelMode = .profile(id: profileId, snapshot: snapshot)
+            } else if sshConfig.enabled {
+                self.sshTunnelMode = .inline(sshConfig)
+            } else {
+                self.sshTunnelMode = .disabled
+            }
+        } else {
+            self.sshTunnelMode = sshTunnelMode
+        }
         self.aiPolicy = aiPolicy
+        self.aiRules = aiRules
+        self.aiAlwaysAllowedTools = aiAlwaysAllowedTools
+        self.externalAccess = externalAccess
         self.redisDatabase = redisDatabase
         self.startupCommands = startupCommands
+        self.sortOrder = sortOrder
+        self.localOnly = localOnly
+        self.isSample = isSample
         if let additionalFields {
             self.additionalFields = additionalFields
         } else {
@@ -512,9 +442,102 @@ extension DatabaseConnection {
     static let preview = DatabaseConnection(name: "Preview Connection")
 }
 
+// MARK: - Display Helpers
+
+extension DatabaseConnection {
+    var hostDisplayString: String {
+        if let mongoHosts = additionalFields["mongoHosts"], mongoHosts.contains(",") {
+            let count = mongoHosts.split(separator: ",").count
+            return String(format: String(localized: "%@ (+%d more)"), "\(host):\(port)", count - 1)
+        }
+        return "\(host):\(port)"
+    }
+}
+
 // MARK: - Codable Conformance
 
-extension DatabaseConnection: Codable {}
+extension DatabaseConnection: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case id, name, host, port, database, username, type
+        case sshConfig, sslConfig, color, tagId, groupId, sshProfileId
+        case sshTunnelMode, safeModeLevel, aiPolicy, aiRules, aiAlwaysAllowedTools, externalAccess, additionalFields
+        case redisDatabase, startupCommands, sortOrder, localOnly, isSample
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        host = try container.decodeIfPresent(String.self, forKey: .host) ?? "localhost"
+        port = try container.decodeIfPresent(Int.self, forKey: .port) ?? 3_306
+        database = try container.decodeIfPresent(String.self, forKey: .database) ?? ""
+        username = try container.decodeIfPresent(String.self, forKey: .username) ?? "root"
+        type = try container.decodeIfPresent(DatabaseType.self, forKey: .type) ?? .mysql
+        sshConfig = try container.decodeIfPresent(SSHConfiguration.self, forKey: .sshConfig) ?? SSHConfiguration()
+        sslConfig = try container.decodeIfPresent(SSLConfiguration.self, forKey: .sslConfig) ?? SSLConfiguration()
+        color = try container.decodeIfPresent(ConnectionColor.self, forKey: .color) ?? .none
+        tagId = try container.decodeIfPresent(UUID.self, forKey: .tagId)
+        groupId = try container.decodeIfPresent(UUID.self, forKey: .groupId)
+        sshProfileId = try container.decodeIfPresent(UUID.self, forKey: .sshProfileId)
+        safeModeLevel = try container.decodeIfPresent(SafeModeLevel.self, forKey: .safeModeLevel) ?? .silent
+        aiPolicy = try container.decodeIfPresent(AIConnectionPolicy.self, forKey: .aiPolicy)
+        aiRules = try container.decodeIfPresent(String.self, forKey: .aiRules)
+        aiAlwaysAllowedTools = try container.decodeIfPresent(Set<String>.self, forKey: .aiAlwaysAllowedTools) ?? []
+        externalAccess = try container.decodeIfPresent(ExternalAccessLevel.self, forKey: .externalAccess) ?? .readOnly
+        additionalFields = try container.decodeIfPresent([String: String].self, forKey: .additionalFields) ?? [:]
+        redisDatabase = try container.decodeIfPresent(Int.self, forKey: .redisDatabase)
+        startupCommands = try container.decodeIfPresent(String.self, forKey: .startupCommands)
+        sortOrder = try container.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
+        localOnly = try container.decodeIfPresent(Bool.self, forKey: .localOnly) ?? false
+        isSample = try container.decodeIfPresent(Bool.self, forKey: .isSample) ?? false
+
+        // Migrate from legacy fields if sshTunnelMode is not present
+        if let tunnelMode = try container.decodeIfPresent(SSHTunnelMode.self, forKey: .sshTunnelMode) {
+            sshTunnelMode = tunnelMode
+        } else {
+            if let profileId = sshProfileId {
+                var snapshot = sshConfig
+                snapshot.enabled = true
+                sshTunnelMode = .profile(id: profileId, snapshot: snapshot)
+            } else if sshConfig.enabled {
+                sshTunnelMode = .inline(sshConfig)
+            } else {
+                sshTunnelMode = .disabled
+            }
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(host, forKey: .host)
+        try container.encode(port, forKey: .port)
+        try container.encode(database, forKey: .database)
+        try container.encode(username, forKey: .username)
+        try container.encode(type, forKey: .type)
+        try container.encode(sshConfig, forKey: .sshConfig)
+        try container.encode(sslConfig, forKey: .sslConfig)
+        try container.encode(color, forKey: .color)
+        try container.encodeIfPresent(tagId, forKey: .tagId)
+        try container.encodeIfPresent(groupId, forKey: .groupId)
+        try container.encodeIfPresent(sshProfileId, forKey: .sshProfileId)
+        try container.encode(sshTunnelMode, forKey: .sshTunnelMode)
+        try container.encode(safeModeLevel, forKey: .safeModeLevel)
+        try container.encodeIfPresent(aiPolicy, forKey: .aiPolicy)
+        try container.encodeIfPresent(aiRules, forKey: .aiRules)
+        if !aiAlwaysAllowedTools.isEmpty {
+            try container.encode(aiAlwaysAllowedTools, forKey: .aiAlwaysAllowedTools)
+        }
+        try container.encode(externalAccess, forKey: .externalAccess)
+        try container.encode(additionalFields, forKey: .additionalFields)
+        try container.encodeIfPresent(redisDatabase, forKey: .redisDatabase)
+        try container.encodeIfPresent(startupCommands, forKey: .startupCommands)
+        try container.encode(sortOrder, forKey: .sortOrder)
+        try container.encode(localOnly, forKey: .localOnly)
+        try container.encode(isSample, forKey: .isSample)
+    }
+}
 
 // MARK: - String Helpers
 

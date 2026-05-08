@@ -8,6 +8,7 @@ import Testing
 @testable import TablePro
 
 @Suite("Database URL Scheme Detection")
+@MainActor
 struct DatabaseURLSchemeTests {
 
     // MARK: - Standard Schemes
@@ -245,5 +246,104 @@ struct DatabaseURLSchemeTests {
             Issue.record("Expected success"); return
         }
         #expect(parsed.type == .postgresql)
+    }
+
+    // MARK: - Driver Hint Stripping
+
+    @Test("PostgreSQL+psycopg scheme strips driver hint")
+    func postgresqlPsycopgScheme() {
+        let result = ConnectionURLParser.parse("postgresql+psycopg://user:pass@localhost:5432/mydb")
+        guard case .success(let parsed) = result else {
+            Issue.record("Expected success"); return
+        }
+        #expect(parsed.type == .postgresql)
+        #expect(parsed.host == "localhost")
+        #expect(parsed.database == "mydb")
+    }
+
+    @Test("PostgreSQL+asyncpg scheme strips driver hint")
+    func postgresqlAsyncpgScheme() {
+        let result = ConnectionURLParser.parse("postgresql+asyncpg://user:pass@localhost/mydb")
+        guard case .success(let parsed) = result else {
+            Issue.record("Expected success"); return
+        }
+        #expect(parsed.type == .postgresql)
+    }
+
+    @Test("MySQL+pymysql scheme strips driver hint")
+    func mysqlPymysqlScheme() {
+        let result = ConnectionURLParser.parse("mysql+pymysql://user:pass@localhost:3306/mydb")
+        guard case .success(let parsed) = result else {
+            Issue.record("Expected success"); return
+        }
+        #expect(parsed.type == .mysql)
+    }
+
+    @Test("MongoDB+srv scheme preserved (not stripped)")
+    func mongodbSrvPreserved() {
+        let result = ConnectionURLParser.parse("mongodb+srv://user:pass@cluster.example.com/mydb")
+        guard case .success(let parsed) = result else {
+            Issue.record("Expected success"); return
+        }
+        #expect(parsed.type == .mongodb)
+    }
+
+    @Test("PostgreSQL+ssh still enables SSH mode")
+    func postgresqlSshStillWorks() {
+        let result = ConnectionURLParser.parse("postgresql+ssh://user:pass@localhost/mydb")
+        guard case .success(let parsed) = result else {
+            Issue.record("Expected success"); return
+        }
+        #expect(parsed.type == .postgresql)
+    }
+
+    // MARK: - MongoDB Multi-Host
+
+    @Test("MongoDB multi-host URI parses all hosts")
+    func mongodbMultiHost() {
+        let result = ConnectionURLParser.parse("mongodb://h1:27017,h2:27018,h3:27019/mydb?replicaSet=rs0")
+        guard case .success(let parsed) = result else {
+            Issue.record("Expected success, got: \(result)"); return
+        }
+        #expect(parsed.type == .mongodb)
+        #expect(parsed.host == "h1")
+        #expect(parsed.port == 27017)
+        #expect(parsed.database == "mydb")
+        #expect(parsed.multiHost == "h1:27017,h2:27018,h3:27019")
+        #expect(parsed.mongoQueryParams["replicaSet"] == "rs0")
+    }
+
+    @Test("MongoDB multi-host with credentials parses correctly")
+    func mongodbMultiHostWithAuth() {
+        let result = ConnectionURLParser.parse("mongodb://admin:secret@h1:27017,h2:27017/testdb")
+        guard case .success(let parsed) = result else {
+            Issue.record("Expected success, got: \(result)"); return
+        }
+        #expect(parsed.host == "h1")
+        #expect(parsed.username == "admin")
+        #expect(parsed.password == "secret")
+        #expect(parsed.database == "testdb")
+        #expect(parsed.multiHost == "h1:27017,h2:27017")
+    }
+
+    @Test("MongoDB single-host falls through to standard parser")
+    func mongodbSingleHostNoMultiHost() {
+        let result = ConnectionURLParser.parse("mongodb://user:pass@localhost:27017/mydb")
+        guard case .success(let parsed) = result else {
+            Issue.record("Expected success"); return
+        }
+        #expect(parsed.host == "localhost")
+        #expect(parsed.multiHost == nil)
+    }
+
+    @Test("MongoDB multi-host without port uses default")
+    func mongodbMultiHostDefaultPort() {
+        let result = ConnectionURLParser.parse("mongodb://h1,h2:27018/db")
+        guard case .success(let parsed) = result else {
+            Issue.record("Expected success, got: \(result)"); return
+        }
+        #expect(parsed.host == "h1")
+        #expect(parsed.port == nil)
+        #expect(parsed.multiHost == "h1,h2:27018")
     }
 }

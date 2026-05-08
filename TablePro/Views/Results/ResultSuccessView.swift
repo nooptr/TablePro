@@ -13,22 +13,32 @@ struct ResultSuccessView: View {
     let executionTime: TimeInterval?
     let statusMessage: String?
 
+    private var primaryMessage: String {
+        if rowsAffected == 0, let status = statusMessage, !status.isEmpty {
+            return status
+        }
+        if rowsAffected == 0 {
+            return String(localized: "Query executed successfully")
+        }
+        return String(format: String(localized: "%lld row(s) affected"), Int64(rowsAffected))
+    }
+
     var body: some View {
         VStack(spacing: 16) {
             Spacer()
             Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 36))
-                .foregroundStyle(.green)
-            Text(String(format: String(localized: "%lld row(s) affected"), Int64(rowsAffected)))
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.body))
+                .font(.largeTitle)
+                .foregroundStyle(Color(nsColor: .systemGreen))
+            Text(primaryMessage)
+                .font(.body)
             if let time = executionTime {
                 Text(String(format: "%.3fs", time))
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
-            if let status = statusMessage, !status.isEmpty {
+            if rowsAffected > 0, let status = statusMessage, !status.isEmpty {
                 Text(status)
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
             Spacer()

@@ -1,64 +1,194 @@
 ---
 title: Architecture
-description: MVVM structure, database driver protocol, actor-based SSH tunnels, and autocomplete engine internals
+description: App structure, plugin system, data flow, and key components
 ---
 
 # Architecture
 
 TablePro is built with:
 
-- **SwiftUI** for the UI
-- **AppKit** for low-level macOS integration
-- **Swift Concurrency** (async/await, actors) for concurrent operations
-- **Native C libraries** for database connectivity
+- **SwiftUI** for the UI layer
+- **AppKit** for low-level macOS integration (windows, menus, native tabs)
+- **Swift Concurrency** (async/await, actors) for all async work
+- **Native C libraries** for database connectivity (linked as static `.a` files)
 
-```mermaid
-block-beta
-    columns 3
+## Design Patterns
 
-    block:ui["User Interface"]:3
-        Views["Views<br>(SwiftUI)"]
-        ViewModels["ViewModels<br>(Observable)"]
-        Theme["Theme<br>(Colors)"]
-    end
+### MVVM
 
-    block:logic["Business Logic"]:3
-        Drivers["Database<br>Drivers"]
-        Autocomplete["Autocomplete<br>Engine"]
-        SSH["SSH<br>Tunnel"]
-    end
+- **Models**: structs (value types, Codable)
+- **ViewModels**: `@Observable` classes (Swift 5.9+)
+- **Views**: SwiftUI, with AppKit bridging where needed
 
-    block:data["Data Layer"]:3
-        Models["Models<br>(Structs)"]
-        Storage["Storage<br>(JSON)"]
-        Keychain["Keychain<br>(Passwords)"]
-    end
+### Protocol-Oriented Drivers
 
-    block:native["Native Libraries"]:3
-        libmariadb["libmariadb<br>(MySQL)"]
-        libpq["libpq<br>(PostgreSQL)"]
-        SQLite["SQLite<br>(Built-in)"]
-    end
+All database connectivity goes through one protocol:
+
+```swift
+protocol DatabaseDriver: AnyObject {
+    func connect() async throws
+    func disconnect()
+    func execute(query: String) async throws -> QueryResult
+    func fetchTables() async throws -> [TableInfo]
+    // ...
+}
+```
+
+No switch statements on database type. No hardcoded driver list. Plugins register themselves, and the factory resolves them by `DatabaseType.pluginTypeId`.
+
+### Actor Isolation
+
+Thread-safe shared state uses Swift actors:
+
+```swift
+actor SSHTunnelManager {
+    private var tunnels: [UUID: SSHTunnel] = [:]
+    func createTunnel(connectionId: UUID, ...) async throws -> Int { ... }
+}
 ```
 
 ## Dependencies
 
-SPM dependencies:
-
-| Package | Version | Purpose |
-|---------|---------|---------|
-| **CodeEditSourceEditor** | 0.15.2+ | Tree-sitter-powered code editor for the SQL editor |
-| **Sparkle** | 2.x | Auto-update framework with EdDSA signing |
+| Package | Purpose |
+|---------|---------|
+| CodeEditSourceEditor | Tree-sitter SQL editor |
+| Sparkle (2.8.1) | Auto-update with EdDSA signing |
+| OracleNIO | Oracle driver (SPM, used by OracleDriverPlugin) |
 
 <Note>
-CodeEditSourceEditor bundles a SwiftLint plugin that requires `-skipPackagePluginValidation` for CLI builds. See [Building](/development/building).
+CodeEditSourceEditor bundles a SwiftLint plugin, which is why `-skipPackagePluginValidation` is required for CLI builds.
 </Note>
+
+## Plugin System
+
+All database drivers are `.tableplugin` bundles loaded at runtime. This keeps the app binary small and makes adding new databases a matter of dropping in a bundle.
+
+**Key files:**
+
+| Component | Location | Role |
+|-----------|----------|------|
+| TableProPluginKit | `Plugins/TableProPluginKit/` | Shared framework with `DriverPlugin` and `PluginDatabaseDriver` protocols |
+| PluginManager | `Core/Plugins/PluginManager.swift` | Discovers, loads, version-checks plugin bundles |
+| PluginDriverAdapter | `Core/Plugins/PluginDriverAdapter.swift` | Bridges `PluginDatabaseDriver` to core `DatabaseDriver` |
+| DatabaseDriverFactory | `Core/Database/DatabaseDriver.swift` | Resolves `DatabaseType` to loaded plugin |
+
+### Driver Plugins
+
+| Plugin | Database Types | C Bridge | Distribution |
+|--------|---------------|----------|--------------|
+| MySQLDriverPlugin | MySQL, MariaDB | CMariaDB (libmariadb) | Built-in |
+| PostgreSQLDriverPlugin | PostgreSQL, Redshift | CLibPQ (libpq) | Built-in |
+| SQLiteDriverPlugin | SQLite | Foundation sqlite3 | Built-in |
+| ClickHouseDriverPlugin | ClickHouse | URLSession HTTP | Built-in |
+| MSSQLDriverPlugin | SQL Server | CFreeTDS | Built-in |
+| RedisDriverPlugin | Redis | CRedis | Built-in |
+| MongoDBDriverPlugin | MongoDB | CLibMongoc | Registry |
+| DuckDBDriverPlugin | DuckDB | CDuckDB | Registry |
+| OracleDriverPlugin | Oracle | OracleNIO (SPM) | Registry |
+| CassandraDriverPlugin | Cassandra, ScyllaDB | CCassandra | Registry |
+| EtcdDriverPlugin | Etcd | gRPC/HTTP | Registry |
+| CloudflareD1Plugin | Cloudflare D1 | URLSession HTTP | Registry |
+| DynamoDBDriverPlugin | DynamoDB | AWS SDK | Registry |
+| BigQueryDriverPlugin | BigQuery | URLSession REST | Registry |
+
+Built-in plugins ship inside the app bundle. Registry plugins are downloaded on demand from the [plugin registry](/development/plugin-registry).
+
+## Key Components
+
+### DatabaseManager
+
+Connection pool and lifecycle management. Primary interface between UI and drivers. Handles connect, disconnect, reconnect, and session tracking.
+
+### ConnectionHealthMonitor
+
+Pings active connections every 30 seconds. Auto-reconnects with exponential backoff on failure.
+
+### Autocomplete Engine
+
+```mermaid
+flowchart LR
+    CE["CompletionEngine"] --> SCA["SQLContextAnalyzer"]
+    CE --> SSP["SQLSchemaProvider"]
+    SSP --> Tables
+    SSP --> Columns
+    SCA --> Keywords["SQL Keywords"]
+```
+
+- **CompletionEngine**: entry point, produces ranked suggestions
+- **SQLContextAnalyzer**: parses cursor position context (table ref, column ref, keyword)
+- **SQLSchemaProvider**: actor that caches and serves schema data
+
+### MCP Layer
+
+The MCP server lives under `Core/MCP/` and is split into five horizontal layers. Each layer talks only to the layer below it.
+
+```mermaid
+flowchart TD
+    Wire["Wire (Codable values)<br/>JsonRpcMessage, JsonRpcCodec, HttpRequestParser, SseDecoder"]
+    Transport["Transport (NWListener, URLSession, FileHandle)<br/>MCPHttpServerTransport, MCPStdioMessageTransport, MCPStreamableHttpClientTransport"]
+    Session["Session / Auth / RateLimit (actors)<br/>MCPSessionStore, MCPBearerTokenAuthenticator, MCPRateLimiter"]
+    Protocol["Protocol (dispatcher + handlers)<br/>MCPProtocolDispatcher, 19 tools, MCPProgressEmitter"]
+    Bridge["Bridge (tablepro-mcp CLI)<br/>BridgeProxy: stdio &lt;-&gt; HTTP"]
+
+    Bridge --> Wire
+    Transport --> Wire
+    Session --> Transport
+    Protocol --> Session
+```
+
+**Wire**: pure Codable types, no I/O. JSON-RPC 2.0, strict-CRLF HTTP, SSE encoder/decoder.
+
+**Transport**: HTTP server uses `NWListener` and binds to `127.0.0.1:<port>` by default. The stream endpoints (`exchanges`, `listenerState`) are bounded `AsyncStream`s consumed by `MCPServerManager`. The bridge's client-side transport uses `URLSession.bytes(for:)` for incremental SSE.
+
+**Session**: `MCPSessionStore` is an actor that owns session lifecycle. Idle timeout is 15 minutes. Token revocation marks sessions with `.tokenRevoked` and the SSE stream emits a typed terminate comment so clients can distinguish revoke from network blip.
+
+**Protocol**: `MCPProtocolDispatcher` spawns a child `Task` per inbound exchange, so two concurrent tool calls run in parallel instead of queueing on the dispatcher actor. Per-request cancellation flows through `MCPInflightRegistry`. Long-running tools emit `notifications/progress` to clients that pass `_meta.progressToken`.
+
+**Bridge**: `tablepro-mcp` is a 50-line composition root. `MCPStdioMessageTransport` host-side, `MCPStreamableHttpClientTransport` upstream. Errors land in os_log and stderr. The host-facing transport writes only validated `JsonRpcMessage` bytes to stdout.
+
+The server accepts protocol versions `2025-03-26`, `2025-06-18`, and `2025-11-25`. See [Versioning](/external-api/versioning) for the negotiation rules and the additive-within-major-version stability policy.
+
+## Data Flow
+
+### Connection
+
+```mermaid
+flowchart TD
+    UI["ConnectionFormView"] --> DM["DatabaseManager"]
+    DM --> SSH["SSHTunnelManager (if SSH)"]
+    DM --> Factory["DatabaseDriverFactory"]
+    Factory --> PM["PluginManager"]
+    PM --> Adapter["PluginDriverAdapter"]
+    Adapter --> Connected["Connection Ready"]
+    SSH --> Connected
+```
+
+### Query Execution
+
+```mermaid
+flowchart TD
+    User["Cmd+Enter"] --> Editor["SQL Editor"]
+    Editor --> DM["DatabaseManager.executeQuery"]
+    DM --> Driver["DatabaseDriver.execute"]
+    Driver --> Result["QueryResult"]
+    Result --> Grid["DataGridView"]
+```
+
+## State Management
+
+| Pattern | What | Where |
+|---------|------|-------|
+| `@Observable` | UI state, sessions, active tab | ViewModels |
+| `@AppStorage` | User preferences | Settings |
+| Keychain | Connection passwords | ConnectionStorage |
+| SQLite FTS5 | Query history (full-text search) | QueryHistoryStorage |
+| JSON files | Tab state persistence | TabStateStorage |
 
 ## Directory Structure
 
 <Tree>
   <Tree.Folder name="TablePro" defaultOpen>
-    <Tree.Folder name="Core">
+    <Tree.Folder name="Core" defaultOpen>
       <Tree.Folder name="Database">
         <Tree.File name="DatabaseDriver.swift" />
         <Tree.File name="DatabaseManager.swift" />
@@ -67,12 +197,44 @@ CodeEditSourceEditor bundles a SwiftLint plugin that requires `-skipPackagePlugi
         <Tree.File name="PluginManager.swift" />
         <Tree.File name="PluginDriverAdapter.swift" />
       </Tree.Folder>
+      <Tree.Folder name="Services">
+        <Tree.Folder name="Export" />
+        <Tree.Folder name="Formatting" />
+        <Tree.Folder name="Infrastructure" />
+        <Tree.Folder name="Licensing" />
+        <Tree.Folder name="Query" />
+      </Tree.Folder>
+      <Tree.Folder name="Utilities">
+        <Tree.Folder name="Connection" />
+        <Tree.Folder name="SQL" />
+        <Tree.Folder name="File" />
+        <Tree.Folder name="UI" />
+      </Tree.Folder>
       <Tree.Folder name="Autocomplete" />
-      <Tree.Folder name="Services" />
       <Tree.Folder name="SSH" />
+      <Tree.Folder name="QuerySupport">
+        <Tree.Folder name="MongoDB" />
+        <Tree.Folder name="Redis" />
+      </Tree.Folder>
     </Tree.Folder>
-    <Tree.Folder name="Views" />
-    <Tree.Folder name="Models" />
+    <Tree.Folder name="Views">
+      <Tree.Folder name="Connection" />
+      <Tree.Folder name="Editor" />
+      <Tree.Folder name="Main" />
+      <Tree.Folder name="Results" />
+      <Tree.Folder name="Settings" />
+      <Tree.Folder name="Sidebar" />
+    </Tree.Folder>
+    <Tree.Folder name="Models">
+      <Tree.Folder name="AI" />
+      <Tree.Folder name="Connection" />
+      <Tree.Folder name="Database" />
+      <Tree.Folder name="Export" />
+      <Tree.Folder name="Query" />
+      <Tree.Folder name="Settings" />
+      <Tree.Folder name="UI" />
+      <Tree.Folder name="Schema" />
+    </Tree.Folder>
     <Tree.Folder name="ViewModels" />
     <Tree.Folder name="Extensions" />
     <Tree.Folder name="Theme" />
@@ -82,316 +244,13 @@ CodeEditSourceEditor bundles a SwiftLint plugin that requires `-skipPackagePlugi
     <Tree.Folder name="TableProPluginKit" />
     <Tree.Folder name="MySQLDriverPlugin" />
     <Tree.Folder name="PostgreSQLDriverPlugin" />
+    <Tree.Folder name="SQLiteDriverPlugin" />
+    <Tree.Folder name="ClickHouseDriverPlugin" />
+    <Tree.Folder name="MSSQLDriverPlugin" />
+    <Tree.Folder name="RedisDriverPlugin" />
     <Tree.File name="..." />
   </Tree.Folder>
   <Tree.Folder name="Libs" />
   <Tree.Folder name="TableProTests" />
   <Tree.Folder name="scripts" />
 </Tree>
-
-## Design Patterns
-
-### MVVM Architecture
-
-```mermaid
-flowchart LR
-    Model["Model<br>(Struct)"] <--> ViewModel["ViewModel<br>(Observable)"] <--> View["View<br>(SwiftUI)"]
-```
-
-**Models**: Pure data structures (structs, enums)
-```swift
-struct DatabaseConnection: Codable, Identifiable {
-    let id: UUID
-    var name: String
-    var host: String
-    var port: Int
-    var type: DatabaseType
-}
-```
-
-**ViewModels**: Observable state containers
-```swift
-@MainActor
-class DatabaseManager: ObservableObject {
-    @Published var sessions: [DatabaseSession] = []
-    @Published var activeSessionId: UUID?
-
-    func connect(to connection: DatabaseConnection) async throws {
-        // Business logic
-    }
-}
-```
-
-**Views**: Declarative SwiftUI
-```swift
-struct ConnectionFormView: View {
-    @StateObject private var dbManager = DatabaseManager.shared
-
-    var body: some View {
-        Form {
-            // UI elements
-        }
-    }
-}
-```
-
-### Protocol-Oriented Design
-
-All database drivers conform to a single protocol:
-
-```swift
-protocol DatabaseDriver: AnyObject {
-    var connection: DatabaseConnection { get }
-    var status: ConnectionStatus { get }
-
-    func connect() async throws
-    func disconnect()
-    func execute(query: String) async throws -> QueryResult
-    func fetchTables() async throws -> [TableInfo]
-    // ...
-}
-```
-
-Database drivers are implemented as `.tableplugin` bundles loaded at runtime. Each plugin implements `DriverPlugin` and `PluginDatabaseDriver` from the shared `TableProPluginKit` framework. `PluginDriverAdapter` bridges `PluginDatabaseDriver` to the core `DatabaseDriver` protocol.
-
-### Actor Isolation
-
-Concurrent operations use Swift actors:
-
-```swift
-actor SSHTunnelManager {
-    static let shared = SSHTunnelManager()
-
-    private var tunnels: [UUID: SSHTunnel] = [:]
-
-    func createTunnel(
-        connectionId: UUID,
-        sshHost: String,
-        // ...
-    ) async throws -> Int {
-        // Thread-safe tunnel management
-    }
-}
-```
-
-### Plugin System
-
-Driver creation uses a plugin-based factory. `PluginManager` discovers and loads `.tableplugin` bundles at runtime. `DatabaseDriverFactory` looks up plugins via `DatabaseType.pluginTypeId` and wraps them with `PluginDriverAdapter` to conform to the core `DatabaseDriver` protocol. No switch statement or hardcoded driver list is needed.
-
-## Key Components
-
-### DatabaseManager
-
-Central manager for all database operations:
-
-- Manages active sessions
-- Coordinates connections/disconnections
-- Handles SSH tunnel lifecycle
-- Publishes state changes to UI
-
-```swift
-@MainActor
-class DatabaseManager: ObservableObject {
-    static let shared = DatabaseManager()
-
-    @Published var sessions: [DatabaseSession] = []
-    @Published var activeSessionId: UUID?
-
-    func connectToSession(_ connection: DatabaseConnection) async throws
-    func disconnectSession(_ id: UUID) async
-    func executeQuery(_ query: String) async throws -> QueryResult
-}
-```
-
-### Database Driver Plugins
-
-Each driver is a `.tableplugin` bundle under `Plugins/`. MySQL, PostgreSQL, and SQLite are built into the app bundle; the rest are distributed via the plugin registry and downloaded on demand.
-
-| Plugin | Database Types | C Bridge | Distribution |
-|--------|---------------|----------|--------------|
-| MySQLDriverPlugin | MySQL, MariaDB | CMariaDB (libmariadb) | Built-in |
-| PostgreSQLDriverPlugin | PostgreSQL, Redshift | CLibPQ (libpq) | Built-in |
-| SQLiteDriverPlugin | SQLite | Foundation sqlite3 | Built-in |
-| ClickHouseDriverPlugin | ClickHouse | URLSession HTTP | Registry |
-| MSSQLDriverPlugin | SQL Server | CFreeTDS | Registry |
-| MongoDBDriverPlugin | MongoDB | CLibMongoc | Registry |
-| RedisDriverPlugin | Redis | CRedis | Registry |
-| DuckDBDriverPlugin | DuckDB | CDuckDB | Registry |
-| OracleDriverPlugin | Oracle | OracleNIO (SPM) | Registry |
-
-### Autocomplete Engine
-
-```mermaid
-flowchart TB
-    Engine["CompletionEngine<br>(Entry)"]
-    Engine --> Context["SQLContext<br>Analyzer"]
-    Engine --> Schema["SQLSchema<br>Provider"]
-    Schema --> Tables["Tables"]
-    Schema --> Columns["Columns"]
-    Context --> Keywords["SQLKeywords"]
-```
-
-- **CompletionEngine**: Main entry point
-- **SQLContextAnalyzer**: Parses query context
-- **SQLSchemaProvider**: Provides schema information
-- **SQLKeywords**: SQL keyword definitions
-
-### SSH Tunnel Manager
-
-Actor-based SSH tunnel management:
-
-```swift
-actor SSHTunnelManager {
-    private var tunnels: [UUID: SSHTunnel] = [:]
-
-    func createTunnel(...) async throws -> Int
-    func closeTunnel(connectionId: UUID) async throws
-    func hasTunnel(connectionId: UUID) -> Bool
-}
-```
-
-Features:
-- Port forwarding via system `ssh`
-- Password and key authentication
-- Health monitoring
-- Automatic cleanup
-
-## Data Flow
-
-### Connection Flow
-
-```mermaid
-flowchart TB
-    User["User clicks Connect"]
-    User --> Form["ConnectionFormView<br>(UI Validation)"]
-    Form --> Manager["DatabaseManager<br>.connectToSession"]
-    Manager --> SSH["SSHTunnelManager"]
-    Manager --> Factory["DatabaseDriverFactory"]
-    Factory --> Plugin["PluginManager<br>(loads .tableplugin)"]
-    Plugin --> Adapter["PluginDriverAdapter"]
-    SSH --> Connected["Connection Established"]
-    Adapter --> Connected
-
-    subgraph optional ["if SSH enabled"]
-        SSH
-    end
-```
-
-### Query Execution Flow
-
-```mermaid
-flowchart TB
-    User["User executes query<br>(Cmd+Enter)"]
-    User --> Editor["EditorTextView<br>(Gets query)"]
-    Editor --> Manager["DatabaseManager<br>.executeQuery"]
-    Manager --> Driver["DatabaseDriver<br>.execute(query)"]
-    Driver --> Result["QueryResult<br>(Rows + Columns)"]
-    Result --> Grid["DataGridView<br>(Display results)"]
-```
-
-## State Management
-
-### Published Properties
-
-UI state uses `@Published`:
-
-```swift
-@MainActor
-class DatabaseManager: ObservableObject {
-    @Published var sessions: [DatabaseSession] = []
-    @Published var activeSessionId: UUID?
-    @Published var isConnecting = false
-}
-```
-
-### App Storage
-
-Settings persist via `@AppStorage`:
-
-```swift
-@AppStorage("appearance.theme") var theme: AppTheme = .system
-@AppStorage("editor.fontSize") var fontSize: Int = 13
-```
-
-### Environment
-
-Shared state via SwiftUI environment:
-
-```swift
-@main
-struct TableProApp: App {
-    @StateObject private var dbManager = DatabaseManager.shared
-
-    var body: some Scene {
-        WindowGroup {
-            ContentView()
-                .environmentObject(dbManager)
-        }
-    }
-}
-```
-
-## Error Handling
-
-### Driver Errors
-
-Each driver defines specific errors:
-
-```swift
-enum MySQLError: Error, LocalizedError {
-    case connectionFailed(String)
-    case queryFailed(String)
-    case authenticationFailed
-
-    var errorDescription: String? {
-        switch self {
-        case .connectionFailed(let msg): return "Connection failed: \(msg)"
-        case .queryFailed(let msg): return "Query failed: \(msg)"
-        case .authenticationFailed: return "Authentication failed"
-        }
-    }
-}
-```
-
-### Error Propagation
-
-Errors propagate through async/await:
-
-```swift
-func executeQuery(_ query: String) async throws -> QueryResult {
-    guard let driver = activeDriver else {
-        throw DatabaseError.notConnected
-    }
-    return try await driver.execute(query: query)
-}
-```
-
-## Testing
-
-### Unit Tests
-
-Tests live in `TableProTests/`:
-
-```swift
-final class MySQLDriverTests: XCTestCase {
-    func testConnectionString() throws {
-        let connection = DatabaseConnection(...)
-        let driver = MySQLDriver(connection: connection)
-        XCTAssertEqual(driver.connectionString, "expected")
-    }
-}
-```
-
-### Integration Tests
-
-```swift
-func testExecuteQuery() async throws {
-    let driver = MySQLDriver(connection: testConnection)
-    try await driver.connect()
-    defer { driver.disconnect() }
-
-    let result = try await driver.execute(query: "SELECT 1")
-    XCTAssertEqual(result.rowCount, 1)
-}
-```
-

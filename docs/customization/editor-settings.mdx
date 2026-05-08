@@ -25,7 +25,7 @@ Configure the SQL editor in **Settings** > **Editor**.
 
 ### Font Family
 
-Available monospace fonts:
+The font picker shows installed monospaced families on your Mac.
 
 | Font | Description |
 |------|-------------|
@@ -35,11 +35,7 @@ Available monospace fonts:
 | **Monaco** | Traditional Mac programming font |
 | **Courier New** | Cross-platform standard |
 
-<Tip>
-**System Mono** automatically uses the best available system monospace font.
-</Tip>
-
-If a selected font isn't available, TablePro falls back to System Mono.
+Falls back to System Mono if a saved font is unavailable.
 
 {/* Screenshot: Font family selector */}
 <Frame caption="Font family selector with available fonts">
@@ -74,15 +70,6 @@ If a selected font isn't available, TablePro falls back to System Mono.
     alt="Font sizes"
   />
 </Frame>
-
-**Recommendations**:
-
-| Size | Best For |
-|------|----------|
-| 11-12 pt | Small screens, seeing more code |
-| 13-14 pt | Standard usage (default) |
-| 15-16 pt | Better readability |
-| 17-18 pt | Large screens, accessibility |
 
 ## Display Settings
 
@@ -157,14 +144,6 @@ If a selected font isn't available, TablePro falls back to System Mono.
 |---------|---------|---------|
 | Tab Width | 1-16 spaces | 4 |
 
-Common choices:
-
-| Width | Usage |
-|-------|-------|
-| 2 spaces | Compact, JavaScript-style |
-| 4 spaces | Standard SQL formatting (recommended) |
-| 8 spaces | Traditional Unix-style |
-
 {/* Screenshot: Tab width setting */}
 <Frame caption="Tab width setting for indentation">
   <img
@@ -179,41 +158,37 @@ Common choices:
   />
 </Frame>
 
-### Auto Indent
+## Editor Behavior
+
+### Auto-Uppercase Keywords
 
 | Option | Description |
 |--------|-------------|
-| **On** | New lines match previous indentation (default) |
-| **Off** | New lines start at column 1 |
+| **Off** | Keywords stay as typed (default) |
+| **On** | SQL keywords auto-uppercase when you type a space or delimiter |
 
-```sql
-SELECT
-    u.id,
-    u.name,
-    |  -- Cursor here, next line auto-indents
-```
+SQL keywords auto-uppercase on word boundaries. Keywords inside strings, comments, and quoted identifiers are unaffected.
 
-{/* Screenshot: Auto-indent */}
-<Frame caption="Auto-indent after SQL clauses">
-  <img
-    className="block dark:hidden"
-    src="/images/editor-auto-indent.png"
-    alt="Auto-indent in editor"
-  />
-  <img
-    className="hidden dark:block"
-    src="/images/editor-auto-indent-dark.png"
-    alt="Auto-indent in editor"
-  />
-</Frame>
+### Query Parameters
 
-## Editor Behavior
+| Option | Description |
+|--------|-------------|
+| **On** | Detect `:name` placeholders and show the parameter panel (default) |
+| **Off** | Send `:name` tokens to the database as-is |
+
+When on, queries with `:name` placeholders show an inline panel for entering values. See [Query Parameters](/features/query-parameters) for details.
 
 ### Autocomplete
 
 Autocomplete is always on. Dismiss with `Escape`. See [Autocomplete](/features/autocomplete) for details.
 
-All editor settings apply immediately. No restart required.
+## JSON Viewer
+
+| Setting | Options | Default |
+|---------|---------|---------|
+| Default view | Text, Tree | Text |
+
+Pick which mode the JSON viewer starts in. You can switch anytime with the toggle in the viewer. Your last choice is remembered.
 
 ## Keyboard Shortcuts
 

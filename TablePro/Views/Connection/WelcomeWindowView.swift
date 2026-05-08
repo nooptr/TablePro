@@ -3,7 +3,6 @@
 //  TablePro
 //
 
-import AppKit
 import os
 import SwiftUI
 import UniformTypeIdentifiers
@@ -15,8 +14,12 @@ struct WelcomeWindowView: View {
     }
 
     @State var vm = WelcomeViewModel()
+    @State private var welcomeChooserState: WelcomeChooserState?
+    @State private var pendingInstallType: DatabaseType?
+    @State private var pendingInstallPayload: DatabaseTypeChooserPayload?
+    @State private var urlImportPresented: Bool = false
+    @State private var searchFocusTrigger: Int = 0
     @FocusState private var focus: FocusField?
-    @Environment(\.openWindow) var openWindow
 
     var body: some View {
         ZStack {
@@ -32,17 +35,15 @@ struct WelcomeWindowView: View {
                     .transition(.move(edge: .trailing))
             }
         }
-        .background(.background)
         .ignoresSafeArea()
-        .frame(minWidth: 650, minHeight: 400)
         .onAppear {
-            vm.setUp(openWindow: openWindow)
-            focus = .search
+            vm.setUp()
+            focus = .connectionList
         }
-        .confirmationDialog(
+        .alert(
             vm.connectionsToDelete.count == 1
                 ? String(localized: "Delete Connection")
-                : String(localized: "Delete \(vm.connectionsToDelete.count) Connections"),
+                : String(format: String(localized: "Delete %d Connections"), vm.connectionsToDelete.count),
             isPresented: $vm.showDeleteConfirmation
         ) {
             Button(String(localized: "Delete"), role: .destructive) {
@@ -56,6 +57,21 @@ struct WelcomeWindowView: View {
                 Text("Are you sure you want to delete \"\(first.name)\"?")
             } else {
                 Text("Are you sure you want to delete \(vm.connectionsToDelete.count) connections? This cannot be undone.")
+            }
+        }
+        .alert(
+            String(localized: "Delete Group"),
+            isPresented: $vm.showDeleteGroupConfirmation
+        ) {
+            Button(String(localized: "Delete"), role: .destructive) {
+                vm.confirmDeleteGroup()
+            }
+            Button(String(localized: "Cancel"), role: .cancel) {
+                vm.groupToDelete = nil
+            }
+        } message: {
+            if let group = vm.groupToDelete {
+                Text("Are you sure you want to delete the group \"\(group.name)\"? Connections in this group will be moved to the top level.")
             }
         }
         .sheet(item: $vm.activeSheet) { sheet in
@@ -80,11 +96,51 @@ struct WelcomeWindowView: View {
                 ConnectionImportSheet(fileURL: url) { count in
                     Task { @MainActor in
                         try? await Task.sleep(for: .milliseconds(300))
-                        vm.showImportResultAlert(count: count)
+                        vm.showImportResult(count: count)
                     }
                 }
             case .exportConnections(let conns):
                 ConnectionExportOptionsSheet(connections: conns)
+            case .importFromApp:
+                ImportFromAppSheet { count in
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(300))
+                        vm.showImportResult(count: count)
+                    }
+                }
+            case .deeplinkImport(let exportable):
+                DeeplinkImportSheet(connection: exportable) {
+                    vm.loadConnections()
+                }
+            }
+        }
+        .modifier(ConnectionCreationOverlays(
+            chooserState: $welcomeChooserState,
+            urlImportPresented: $urlImportPresented
+        ))
+        .onReceive(NotificationCenter.default.publisher(for: .presentDatabaseTypeChooser)) { note in
+            guard
+                let payload = note.userInfo?[DatabaseTypeChooserPayload.userInfoKey]
+                    as? DatabaseTypeChooserPayload
+            else { return }
+            welcomeChooserState = WelcomeChooserState(
+                initialType: payload.initialType,
+                onSelected: { type in
+                    if PluginManager.shared.isDriverInstalled(for: type) {
+                        PendingNewConnectionType.shared.set(type)
+                        payload.onSelected(type)
+                    } else {
+                        pendingInstallPayload = payload
+                        pendingInstallType = type
+                    }
+                }
+            )
+        }
+        .pluginInstallPromptForType(type: $pendingInstallType) { type in
+            if let payload = pendingInstallPayload {
+                PendingNewConnectionType.shared.set(type)
+                payload.onSelected(type)
+                pendingInstallPayload = nil
             }
         }
         .pluginInstallPrompt(connection: $vm.pluginInstallConnection) { connection in
@@ -97,131 +153,138 @@ struct WelcomeWindowView: View {
         } message: {
             Text("Enter a new name for the group.")
         }
+        .alert(
+            String(localized: "Connection Failed"),
+            isPresented: $vm.showConnectionError
+        ) {
+            Button(String(localized: "OK"), role: .cancel) {
+                vm.connectionError = nil
+            }
+        } message: {
+            if let error = vm.connectionError {
+                Text(error)
+            }
+        }
+        .fileImporter(
+            isPresented: $vm.showImportFilePanel,
+            allowedContentTypes: [.tableproConnectionShare],
+            allowsMultipleSelection: false
+        ) { result in
+            if case .success(let urls) = result, let url = urls.first {
+                vm.activeSheet = .importFile(url)
+            }
+        }
+        .alert(
+            (vm.importResultCount ?? 0) > 0
+                ? String(localized: "Import Complete")
+                : String(localized: "No Connections Imported"),
+            isPresented: Binding(
+                get: { vm.importResultCount != nil },
+                set: { if !$0 { vm.importResultCount = nil } }
+            )
+        ) {
+            Button(String(localized: "OK")) { vm.importResultCount = nil }
+        } message: {
+            if let count = vm.importResultCount, count > 0 {
+                Text(count == 1
+                    ? String(localized: "1 connection was imported.")
+                    : String(format: String(localized: "%d connections were imported."), count))
+            } else {
+                Text(String(localized: "All selected connections were skipped."))
+            }
+        }
     }
 
     // MARK: - Layout
 
     private var welcomeContent: some View {
         HStack(spacing: 0) {
-            WelcomeLeftPanel(
+            WelcomeActionsPanel(
                 onActivateLicense: { vm.activeSheet = .activation },
-                onCreateConnection: { openWindow(id: "connection-form") }
+                onCreateConnection: { WindowOpener.shared.openConnectionForm() },
+                onTrySample: { vm.openSampleDatabase() },
+                onImportFromFile: { vm.importConnectionsFromFile() }
             )
+            .frame(width: 240)
+            .background(.regularMaterial)
+
             Divider()
-            rightPanel
+
+            connectionsPanel
         }
         .transition(.opacity)
     }
 
-    // MARK: - Right Panel
+    // MARK: - Connections panel
 
-    private var rightPanel: some View {
+    private var connectionsPanel: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Button(action: { openWindow(id: "connection-form") }) {
-                    Image(systemName: "plus")
-                        .font(.system(size: ThemeEngine.shared.activeTheme.typography.medium, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .frame(
-                            width: ThemeEngine.shared.activeTheme.iconSizes.extraLarge,
-                            height: ThemeEngine.shared.activeTheme.iconSizes.extraLarge
-                        )
-                        .background(
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(Color(nsColor: .quaternaryLabelColor))
-                        )
-                }
-                .buttonStyle(.plain)
-                .help("New Connection (⌘N)")
-
-                Button(action: { vm.pendingMoveToNewGroup = []; vm.activeSheet = .newGroup(parentId: nil) }) {
-                    Image(systemName: "folder.badge.plus")
-                        .font(.system(size: ThemeEngine.shared.activeTheme.typography.medium, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .frame(
-                            width: ThemeEngine.shared.activeTheme.iconSizes.extraLarge,
-                            height: ThemeEngine.shared.activeTheme.iconSizes.extraLarge
-                        )
-                        .background(
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(Color(nsColor: .quaternaryLabelColor))
-                        )
-                }
-                .buttonStyle(.plain)
-                .help(String(localized: "New Group"))
-
-                HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: ThemeEngine.shared.activeTheme.typography.medium))
-                        .foregroundStyle(.tertiary)
-
-                    TextField("Search for connection...", text: $vm.searchText)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: ThemeEngine.shared.activeTheme.typography.body))
-                        .focused($focus, equals: .search)
-                        .onKeyPress(.return) {
-                            vm.connectSelectedConnections()
-                            return .handled
-                        }
-                        .onKeyPress(.escape) {
-                            if !vm.searchText.isEmpty {
-                                vm.searchText = ""
-                            }
-                            focus = .connectionList
-                            return .handled
-                        }
-                        .onKeyPress(characters: .init(charactersIn: "\u{7F}\u{08}"), phases: .down) { keyPress in
-                            guard keyPress.modifiers.contains(.command) else { return .ignored }
-                            let toDelete = vm.selectedConnections
-                            guard !toDelete.isEmpty else { return .ignored }
-                            vm.connectionsToDelete = toDelete
-                            vm.showDeleteConfirmation = true
-                            return .handled
-                        }
-                        .onKeyPress(characters: .init(charactersIn: "jn"), phases: [.down, .repeat]) { keyPress in
-                            guard keyPress.modifiers.contains(.control) else { return .ignored }
-                            vm.moveToNextConnection()
-                            focus = .connectionList
-                            return .handled
-                        }
-                        .onKeyPress(characters: .init(charactersIn: "kp"), phases: [.down, .repeat]) { keyPress in
-                            guard keyPress.modifiers.contains(.control) else { return .ignored }
-                            vm.moveToPreviousConnection()
-                            focus = .connectionList
-                            return .handled
-                        }
-                        .onKeyPress(.downArrow) {
-                            vm.moveToNextConnection()
-                            focus = .connectionList
-                            return .handled
-                        }
-                        .onKeyPress(.upArrow) {
-                            vm.moveToPreviousConnection()
-                            focus = .connectionList
-                            return .handled
-                        }
-                }
-                .padding(.horizontal, ThemeEngine.shared.activeTheme.spacing.sm)
-                .padding(.vertical, 6)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color(nsColor: .quaternaryLabelColor))
-                )
-            }
-            .padding(.horizontal, ThemeEngine.shared.activeTheme.spacing.md)
-            .padding(.vertical, ThemeEngine.shared.activeTheme.spacing.sm)
-
+            connectionsHeader
             Divider()
-
-            if vm.treeItems.isEmpty && vm.filteredConnections.isEmpty {
-                emptyState
-            } else {
-                connectionList
+            ZStack {
+                if vm.treeItems.isEmpty && vm.linkedConnections.isEmpty {
+                    emptyState
+                } else {
+                    connectionList
+                }
             }
         }
-        .frame(minWidth: 350)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .controlBackgroundColor))
         .contentShape(Rectangle())
         .contextMenu { newConnectionContextMenu }
+        .background(findShortcut)
+    }
+
+    private var findShortcut: some View {
+        Button {
+            searchFocusTrigger += 1
+        } label: {
+            EmptyView()
+        }
+        .keyboardShortcut("f", modifiers: .command)
+        .accessibilityHidden(true)
+    }
+
+    private var connectionsHeader: some View {
+        HStack(spacing: 8) {
+            Button {
+                WindowOpener.shared.openConnectionForm()
+            } label: {
+                Image(systemName: "plus")
+                    .frame(width: 14, height: 14)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .help(String(localized: "New Connection (⌘N)"))
+            .accessibilityLabel(String(localized: "New Connection"))
+
+            Button {
+                vm.pendingMoveToNewGroup = []
+                vm.activeSheet = .newGroup(parentId: nil)
+            } label: {
+                Image(systemName: "folder.badge.plus")
+                    .frame(width: 14, height: 14)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .help(String(localized: "New Group"))
+            .accessibilityLabel(String(localized: "New Group"))
+
+            Spacer()
+
+            NativeSearchField(
+                text: $vm.searchText,
+                placeholder: String(localized: "Search for connection..."),
+                controlSize: .regular,
+                focusTrigger: searchFocusTrigger,
+                maxWidth: 240
+            )
+            .focused($focus, equals: .search)
+            .layoutPriority(0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
     }
 
     // MARK: - Connection List
@@ -229,7 +292,9 @@ struct WelcomeWindowView: View {
     private var connectionList: some View {
         ScrollViewReader { proxy in
             List(selection: $vm.selectedConnectionIds) {
-                treeRows(vm.treeItems)
+                TreeRowsView(items: vm.treeItems, parentGroupId: nil, vm: vm) { conn in
+                    connectionRow(for: conn)
+                }
 
                 if !vm.linkedConnections.isEmpty, LicenseManager.shared.isFeatureAvailable(.linkedFolders) {
                     Section {
@@ -250,10 +315,10 @@ struct WelcomeWindowView: View {
             .listStyle(.inset)
             .scrollContentBackground(.hidden)
             .focused($focus, equals: .connectionList)
-            .environment(\.defaultMinListRowHeight, 44)
-            .onKeyPress(.return) {
-                vm.connectSelectedConnections()
-                return .handled
+            .contextMenu(forSelectionType: UUID.self) { ids in
+                contextMenuContent(for: ids)
+            } primaryAction: { ids in
+                primaryAction(for: ids)
             }
             .onKeyPress(characters: .init(charactersIn: "\u{7F}\u{08}"), phases: .down) { keyPress in
                 guard keyPress.modifiers.contains(.command) else { return .ignored }
@@ -299,32 +364,129 @@ struct WelcomeWindowView: View {
         }
     }
 
-    // MARK: - Tree Rendering
+    // MARK: - Rows
 
-    private func treeRows(_ items: [ConnectionGroupTreeNode], parentGroupId: UUID? = nil) -> AnyView {
-        let allConnections = !items.contains { if case .group = $0 { return true } else { return false } }
-        return AnyView(
-            ForEach(items) { item in
-                switch item {
-                case .connection(let conn):
-                    connectionRow(for: conn)
-                case .group(let group, let children):
-                    DisclosureGroup(isExpanded: expandedBinding(for: group.id)) {
-                        treeRows(children, parentGroupId: group.id)
-                    } label: {
-                        groupLabel(for: group)
-                    }
+    func connectionRow(for connection: DatabaseConnection) -> some View {
+        let sshProfile = connection.sshProfileId.flatMap { SSHProfileStorage.shared.profile(for: $0) }
+        return WelcomeConnectionRow(
+            connection: connection,
+            sshProfile: sshProfile
+        )
+        .tag(connection.id)
+        .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
+        .listRowSeparator(.hidden)
+    }
+
+    private func linkedConnectionRow(for linked: LinkedConnection) -> some View {
+        HStack(spacing: 12) {
+            ZStack(alignment: .bottomTrailing) {
+                DatabaseType(rawValue: linked.connection.type).iconImage
+                    .frame(width: 28, height: 28)
+                Image(systemName: "folder.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .offset(x: 2, y: 2)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(linked.connection.name)
+                    .lineLimit(1)
+                Text("\(linked.connection.host):\(linked.connection.port)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .tag(linked.id)
+        .padding(.vertical, 4)
+        .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
+        .contentShape(Rectangle())
+        .listRowSeparator(.hidden)
+    }
+
+    func primaryAction(for ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        for connection in vm.connections where ids.contains(connection.id) {
+            vm.connectToDatabase(connection)
+        }
+        for linked in vm.linkedConnections where ids.contains(linked.id) {
+            vm.connectToLinkedConnection(linked)
+        }
+    }
+
+    // MARK: - Empty State
+
+    @ViewBuilder
+    private var emptyState: some View {
+        if vm.searchText.isEmpty {
+            EmptyStateView(
+                icon: "cylinder.split.1x2",
+                title: String(localized: "No Connections"),
+                description: String(localized: "Try the sample database, or click + above to add your own."),
+                actionTitle: String(localized: "Try Sample Database"),
+                action: { vm.openSampleDatabase() }
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            EmptyStateView(
+                icon: "magnifyingglass",
+                title: String(localized: "No Matching Connections"),
+                description: String(localized: "Try a different search term.")
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    // MARK: - Helpers
+
+    private func scrollToSelection(_ proxy: ScrollViewProxy) {
+        if let id = vm.selectedConnectionIds.first {
+            proxy.scrollTo(id, anchor: .center)
+        }
+    }
+}
+
+// MARK: - Tree Rendering
+
+private struct TreeRowsView<ConnectionContent: View>: View {
+    let items: [ConnectionGroupTreeNode]
+    let parentGroupId: UUID?
+    var vm: WelcomeViewModel
+    let connectionRowBuilder: (DatabaseConnection) -> ConnectionContent
+
+    private var hasGroups: Bool {
+        items.contains { node in
+            if case .group = node { return true }
+            return false
+        }
+    }
+
+    var body: some View {
+        let allConnections = !hasGroups
+        ForEach(items) { item in
+            switch item {
+            case .connection(let conn):
+                connectionRowBuilder(conn)
+            case .group(let group, let children):
+                DisclosureGroup(isExpanded: expandedBinding(for: group.id)) {
+                    TreeRowsView(
+                        items: children,
+                        parentGroupId: group.id,
+                        vm: vm,
+                        connectionRowBuilder: connectionRowBuilder
+                    )
+                } label: {
+                    groupLabel(for: group)
                 }
             }
-            .onMove(perform: allConnections ? { from, to in
-                guard vm.searchText.isEmpty else { return }
-                if let parentGroupId, let group = vm.groups.first(where: { $0.id == parentGroupId }) {
-                    vm.moveGroupedConnections(in: group, from: from, to: to)
-                } else {
-                    vm.moveUngroupedConnections(from: from, to: to)
-                }
-            } : nil)
-        )
+        }
+        .onMove(perform: allConnections ? { from, to in
+            guard vm.searchText.isEmpty else { return }
+            if let parentGroupId, let group = vm.groups.first(where: { $0.id == parentGroupId }) {
+                vm.moveGroupedConnections(in: group, from: from, to: to)
+            } else {
+                vm.moveUngroupedConnections(from: from, to: to)
+            }
+        } : nil)
     }
 
     private func expandedBinding(for groupId: UUID) -> Binding<Bool> {
@@ -340,58 +502,6 @@ struct WelcomeWindowView: View {
         )
     }
 
-    // MARK: - Rows
-
-    private func connectionRow(for connection: DatabaseConnection) -> some View {
-        let sshProfile = connection.sshProfileId.flatMap { SSHProfileStorage.shared.profile(for: $0) }
-        return WelcomeConnectionRow(
-            connection: connection,
-            sshProfile: sshProfile,
-            onConnect: { vm.connectToDatabase(connection) }
-        )
-        .tag(connection.id)
-        .listRowInsets(ThemeEngine.shared.activeTheme.spacing.listRowInsets.swiftUI)
-        .listRowSeparator(.hidden)
-        .contextMenu { contextMenuContent(for: connection) }
-    }
-
-    private func linkedConnectionRow(for linked: LinkedConnection) -> some View {
-        HStack(spacing: 12) {
-            ZStack(alignment: .bottomTrailing) {
-                DatabaseType(rawValue: linked.connection.type).iconImage
-                    .frame(width: 28, height: 28)
-                Image(systemName: "folder.fill")
-                    .font(.system(size: 8))
-                    .foregroundStyle(.secondary)
-                    .offset(x: 2, y: 2)
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(linked.connection.name)
-                    .lineLimit(1)
-                Text("\(linked.connection.host):\(String(linked.connection.port))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-        }
-        .padding(.vertical, ThemeEngine.shared.activeTheme.spacing.xxs)
-        .listRowInsets(ThemeEngine.shared.activeTheme.spacing.listRowInsets.swiftUI)
-        .contentShape(Rectangle())
-        .simultaneousGesture(TapGesture(count: 2).onEnded {
-            vm.connectToLinkedConnection(linked)
-        })
-        .listRowSeparator(.hidden)
-        .contextMenu {
-            Button {
-                vm.connectToLinkedConnection(linked)
-            } label: {
-                Label(String(localized: "Connect"), systemImage: "play.fill")
-            }
-        }
-    }
-
-    // MARK: - Group Label
-
     private func groupLabel(for group: ConnectionGroup) -> some View {
         HStack(spacing: 6) {
             if !group.color.isDefault {
@@ -401,11 +511,11 @@ struct WelcomeWindowView: View {
             }
 
             Text(group.name)
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.small, weight: .semibold))
+                .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.secondary)
 
-            Text("\(connectionCount(in: group.id, connections: vm.connections, groups: vm.groups))")
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.tiny))
+            Text("\(vm.connectionCountByGroup[group.id] ?? 0)")
+                .font(.caption2)
                 .foregroundStyle(.tertiary)
 
             Spacer()
@@ -416,8 +526,6 @@ struct WelcomeWindowView: View {
         }
     }
 
-    // MARK: - Group Context Menu
-
     @ViewBuilder
     private func groupContextMenu(for group: ConnectionGroup) -> some View {
         Button {
@@ -426,7 +534,7 @@ struct WelcomeWindowView: View {
             Label(String(localized: "Rename"), systemImage: "pencil")
         }
 
-        let currentGroupDepth = depthOf(groupId: group.id, groups: vm.groups)
+        let currentGroupDepth = vm.depthByGroup[group.id] ?? 0
         Button {
             vm.createSubgroup(under: group.id)
         } label: {
@@ -477,8 +585,8 @@ struct WelcomeWindowView: View {
                         toParentId: targetGroup.id,
                         groups: vm.groups
                     )
-                    let targetDepth = depthOf(groupId: targetGroup.id, groups: vm.groups)
-                    let subtreeDepth = maxDescendantDepth(groupId: group.id, groups: vm.groups)
+                    let targetDepth = vm.depthByGroup[targetGroup.id] ?? 0
+                    let subtreeDepth = vm.maxDescendantDepthByGroup[group.id] ?? 0
                     let wouldExceedDepth = targetDepth + 1 + subtreeDepth > 3
 
                     Button {
@@ -504,57 +612,54 @@ struct WelcomeWindowView: View {
         Divider()
 
         Button(role: .destructive) {
-            vm.deleteGroup(group)
+            vm.requestDeleteGroup(group)
         } label: {
             Label(String(localized: "Delete Group"), systemImage: "trash")
         }
     }
+}
 
-    // MARK: - Empty State
+// MARK: - Welcome Chooser State
 
-    private var emptyState: some View {
-        VStack(spacing: 12) {
-            Spacer()
+private struct WelcomeChooserState: Identifiable {
+    let id = UUID()
+    let initialType: DatabaseType?
+    let onSelected: (DatabaseType) -> Void
+}
 
-            Image(systemName: "cylinder.split.1x2")
-                .font(.system(size: ThemeEngine.shared.activeTheme.iconSizes.huge))
-                .foregroundStyle(.tertiary)
+// MARK: - Connection Creation Overlays
 
-            if vm.searchText.isEmpty {
-                Text("No Connections")
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.title3, weight: .medium))
-                    .foregroundStyle(.secondary)
+private struct ConnectionCreationOverlays: ViewModifier {
+    @Binding var chooserState: WelcomeChooserState?
+    @Binding var urlImportPresented: Bool
 
-                Text("Create a connection to get started")
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.medium))
-                    .foregroundStyle(.tertiary)
-
-                Button(action: { openWindow(id: "connection-form") }) {
-                    Label("New Connection", systemImage: "plus")
-                }
-                .controlSize(.large)
-                .padding(.top, ThemeEngine.shared.activeTheme.spacing.xxs)
-            } else {
-                Text("No Matching Connections")
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.title3, weight: .medium))
-                    .foregroundStyle(.secondary)
-
-                Text("Try a different search term")
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.medium))
-                    .foregroundStyle(.tertiary)
+    func body(content: Content) -> some View {
+        content
+            .sheet(item: $chooserState) { state in
+                DatabaseTypeChooserSheet(
+                    initialType: state.initialType,
+                    onSelected: { type in
+                        state.onSelected(type)
+                        chooserState = nil
+                    },
+                    onImportFromURL: {
+                        chooserState = nil
+                        urlImportPresented = true
+                    },
+                    onCancel: { chooserState = nil }
+                )
             }
-
-            Spacer()
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    // MARK: - Helpers
-
-    private func scrollToSelection(_ proxy: ScrollViewProxy) {
-        if let id = vm.selectedConnectionIds.first {
-            proxy.scrollTo(id, anchor: .center)
-        }
+            .sheet(isPresented: $urlImportPresented) {
+                ImportFromURLSheet(
+                    onImported: { parsed in
+                        urlImportPresented = false
+                        WindowOpener.shared.openConnectionFormFromURL(parsed)
+                    },
+                    onCancel: {
+                        urlImportPresented = false
+                    }
+                )
+            }
     }
 }
 

@@ -24,19 +24,19 @@ enum ConnectionExportError: LocalizedError {
         case .encodingFailed:
             return String(localized: "Failed to encode connection data")
         case .fileWriteFailed(let path):
-            return String(localized: "Failed to write file: \(path)")
+            return String(format: String(localized: "Failed to write file: %@"), path)
         case .fileReadFailed(let path):
-            return String(localized: "Failed to read file: \(path)")
+            return String(format: String(localized: "Failed to read file: %@"), path)
         case .invalidFormat:
             return String(localized: "This file is not a valid TablePro export")
         case .unsupportedVersion(let version):
-            return String(localized: "This file requires a newer version of TablePro (format version \(version))")
+            return String(format: String(localized: "This file requires a newer version of TablePro (format version %d)"), version)
         case .decodingFailed(let detail):
-            return String(localized: "Failed to parse connection file: \(detail)")
+            return String(format: String(localized: "Failed to parse connection file: %@"), detail)
         case .requiresPassphrase:
             return String(localized: "This file is encrypted and requires a passphrase")
         case .decryptionFailed(let detail):
-            return String(localized: "Decryption failed: \(detail)")
+            return String(format: String(localized: "Decryption failed: %@"), detail)
         }
     }
 }
@@ -126,7 +126,6 @@ enum ConnectionExportService {
                     username: sshConfig.username,
                     authMethod: sshConfig.authMethod.rawValue,
                     privateKeyPath: PathPortability.contractHome(sshConfig.privateKeyPath),
-                    useSSHConfig: sshConfig.useSSHConfig,
                     agentSocketPath: PathPortability.contractHome(sshConfig.agentSocketPath),
                     jumpHosts: jumpHosts,
                     totpMode: sshConfig.totpMode == .none ? nil : sshConfig.totpMode.rawValue,
@@ -188,11 +187,13 @@ enum ConnectionExportService {
                 color: color,
                 tagName: tagName,
                 groupName: groupName,
+                sshProfileId: connection.sshProfileId?.uuidString,
                 safeModeLevel: safeModeLevel,
                 aiPolicy: aiPolicy,
                 additionalFields: additionalFields,
                 redisDatabase: connection.redisDatabase,
-                startupCommands: connection.startupCommands
+                startupCommands: connection.startupCommands,
+                localOnly: connection.localOnly ? true : nil
             )
 
             exportableConnections.append(exportable)
@@ -359,6 +360,7 @@ enum ConnectionExportService {
     static func restoreCredentials(from envelope: ConnectionExportEnvelope, connectionIdMap: [Int: UUID]) {
         guard let credentials = envelope.credentials else { return }
 
+        var restoredCount = 0
         for (indexString, creds) in credentials {
             guard let index = Int(indexString),
                   let connectionId = connectionIdMap[index] else { continue }
@@ -380,9 +382,10 @@ enum ConnectionExportService {
                     ConnectionStorage.shared.savePluginSecureField(value, fieldId: fieldId, for: connectionId)
                 }
             }
+            restoredCount += 1
         }
 
-        logger.info("Restored credentials for \(credentials.count) connections")
+        logger.info("Restored credentials for \(restoredCount) of \(credentials.count) connections")
     }
 
     /// Decode an envelope from raw JSON data. Can be called from any thread.
@@ -571,33 +574,131 @@ enum ConnectionExportService {
 
     // MARK: - Deeplink Builder
 
-    static func buildImportDeeplink(for connection: DatabaseConnection) -> String {
+    static func buildImportDeeplink(for connection: DatabaseConnection) -> String? {
+        let envelope = buildEnvelope(for: [connection])
+        guard let exportable = envelope.connections.first else { return nil }
+
         var components = URLComponents()
         components.scheme = "tablepro"
         components.host = "import"
 
         var queryItems: [URLQueryItem] = [
-            URLQueryItem(name: "name", value: connection.name),
-            URLQueryItem(name: "host", value: connection.host),
-            URLQueryItem(name: "port", value: String(connection.port)),
-            URLQueryItem(name: "type", value: connection.type.rawValue)
+            URLQueryItem(name: "name", value: exportable.name),
+            URLQueryItem(name: "host", value: exportable.host),
+            URLQueryItem(name: "port", value: String(exportable.port)),
+            URLQueryItem(name: "type", value: exportable.type)
         ]
 
-        if !connection.username.isEmpty {
-            queryItems.append(URLQueryItem(name: "username", value: connection.username))
+        if !exportable.username.isEmpty {
+            queryItems.append(URLQueryItem(name: "username", value: exportable.username))
         }
-        if !connection.database.isEmpty {
-            queryItems.append(URLQueryItem(name: "database", value: connection.database))
+        if !exportable.database.isEmpty {
+            queryItems.append(URLQueryItem(name: "database", value: exportable.database))
+        }
+
+        if let ssh = exportable.sshConfig {
+            queryItems.append(URLQueryItem(name: "ssh", value: "1"))
+            queryItems.append(URLQueryItem(name: "sshHost", value: ssh.host))
+            if let port = ssh.port, port != 22 {
+                queryItems.append(URLQueryItem(name: "sshPort", value: String(port)))
+            }
+            if !ssh.username.isEmpty {
+                queryItems.append(URLQueryItem(name: "sshUsername", value: ssh.username))
+            }
+            queryItems.append(URLQueryItem(name: "sshAuthMethod", value: ssh.authMethod))
+            if !ssh.privateKeyPath.isEmpty {
+                queryItems.append(URLQueryItem(name: "sshPrivateKeyPath", value: ssh.privateKeyPath))
+            }
+            if !ssh.agentSocketPath.isEmpty {
+                queryItems.append(URLQueryItem(name: "sshAgentSocketPath", value: ssh.agentSocketPath))
+            }
+            if let jumpHosts = ssh.jumpHosts, !jumpHosts.isEmpty,
+               let jumpData = try? JSONEncoder().encode(jumpHosts),
+               let jumpStr = String(data: jumpData, encoding: .utf8) {
+                queryItems.append(URLQueryItem(name: "sshJumpHosts", value: jumpStr))
+            }
+            if let totpMode = ssh.totpMode {
+                queryItems.append(URLQueryItem(name: "sshTotpMode", value: totpMode))
+            }
+            if let totpAlgorithm = ssh.totpAlgorithm {
+                queryItems.append(URLQueryItem(name: "sshTotpAlgorithm", value: totpAlgorithm))
+            }
+            if let totpDigits = ssh.totpDigits {
+                queryItems.append(URLQueryItem(name: "sshTotpDigits", value: String(totpDigits)))
+            }
+            if let totpPeriod = ssh.totpPeriod {
+                queryItems.append(URLQueryItem(name: "sshTotpPeriod", value: String(totpPeriod)))
+            }
+        }
+
+        if let ssl = exportable.sslConfig {
+            queryItems.append(URLQueryItem(name: "sslMode", value: ssl.mode))
+            if let path = ssl.caCertificatePath, !path.isEmpty {
+                queryItems.append(URLQueryItem(name: "sslCaCertPath", value: path))
+            }
+            if let path = ssl.clientCertificatePath, !path.isEmpty {
+                queryItems.append(URLQueryItem(name: "sslClientCertPath", value: path))
+            }
+            if let path = ssl.clientKeyPath, !path.isEmpty {
+                queryItems.append(URLQueryItem(name: "sslClientKeyPath", value: path))
+            }
+        }
+
+        if let color = exportable.color {
+            queryItems.append(URLQueryItem(name: "color", value: color))
+        }
+        if let tagName = exportable.tagName {
+            queryItems.append(URLQueryItem(name: "tagName", value: tagName))
+        }
+        if let groupName = exportable.groupName {
+            queryItems.append(URLQueryItem(name: "groupName", value: groupName))
+        }
+        if let safeModeLevel = exportable.safeModeLevel {
+            queryItems.append(URLQueryItem(name: "safeModeLevel", value: safeModeLevel))
+        }
+        if let aiPolicy = exportable.aiPolicy {
+            queryItems.append(URLQueryItem(name: "aiPolicy", value: aiPolicy))
+        }
+        if let redisDb = exportable.redisDatabase {
+            queryItems.append(URLQueryItem(name: "redisDatabase", value: String(redisDb)))
+        }
+        if let commands = exportable.startupCommands, !commands.isEmpty {
+            queryItems.append(URLQueryItem(name: "startupCommands", value: commands))
+        }
+        if exportable.localOnly == true {
+            queryItems.append(URLQueryItem(name: "localOnly", value: "1"))
+        }
+
+        if let fields = exportable.additionalFields {
+            for (key, value) in fields.sorted(by: { $0.key < $1.key }) {
+                queryItems.append(URLQueryItem(name: "af_\(key)", value: value))
+            }
         }
 
         components.queryItems = queryItems
+        guard let url = components.url?.absoluteString, !url.isEmpty else {
+            logger.warning("Failed to build import deeplink for '\(connection.name)'")
+            return nil
+        }
+        if (url as NSString).length > 2_000 {
+            logger.warning("Import deeplink for '\(connection.name)' is \((url as NSString).length) chars — may be truncated by some apps")
+        }
+        return url
+    }
 
-        return components.url?.absoluteString ?? ""
+    static func buildCompactJSON(for connection: DatabaseConnection) -> String {
+        let envelope = buildEnvelope(for: [connection])
+        guard let exportable = envelope.connections.first else { return "{}" }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        guard let data = try? encoder.encode(exportable),
+              let json = String(data: data, encoding: .utf8) else { return "{}" }
+        return json
     }
 
     // MARK: - Private Helpers
 
-    private static func buildDatabaseConnection(
+    static func buildDatabaseConnection(
         id: UUID,
         from exportable: ExportableConnection,
         name: String
@@ -612,7 +713,6 @@ enum ConnectionExportService {
             config.username = ssh.username
             config.authMethod = SSHAuthMethod(rawValue: ssh.authMethod) ?? .password
             config.privateKeyPath = PathPortability.expandHome(ssh.privateKeyPath)
-            config.useSSHConfig = ssh.useSSHConfig
             config.agentSocketPath = PathPortability.expandHome(ssh.agentSocketPath)
             config.jumpHosts = (ssh.jumpHosts ?? []).map { jump in
                 SSHJumpHost(
@@ -653,10 +753,15 @@ enum ConnectionExportService {
             GroupStorage.shared.loadGroups().first { $0.name.lowercased() == name.lowercased() }?.id
         }
 
+        let parsedSSHProfileId = exportable.sshProfileId.flatMap { UUID(uuidString: $0) }
+
+        let finalHost = exportable.host.trimmingCharacters(in: .whitespaces).isEmpty
+            ? "localhost" : exportable.host
+
         return DatabaseConnection(
             id: id,
             name: name,
-            host: exportable.host,
+            host: finalHost,
             port: exportable.port,
             database: exportable.database,
             username: exportable.username,
@@ -666,10 +771,12 @@ enum ConnectionExportService {
             color: exportable.color.flatMap { ConnectionColor(rawValue: $0) } ?? .none,
             tagId: tagId,
             groupId: groupId,
+            sshProfileId: parsedSSHProfileId,
             safeModeLevel: exportable.safeModeLevel.flatMap { SafeModeLevel(rawValue: $0) } ?? .silent,
             aiPolicy: exportable.aiPolicy.flatMap { AIConnectionPolicy(rawValue: $0) },
             redisDatabase: exportable.redisDatabase,
             startupCommands: exportable.startupCommands,
+            localOnly: exportable.localOnly ?? false,
             additionalFields: exportable.additionalFields
         )
     }

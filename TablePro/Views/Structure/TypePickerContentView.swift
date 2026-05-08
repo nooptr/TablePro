@@ -52,12 +52,13 @@ struct TypePickerContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            TextField("Search or type...", text: $searchText)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 13))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 8)
-                .onSubmit { commitFreeform() }
+            NativeSearchField(
+                text: $searchText,
+                placeholder: String(localized: "Search or type..."),
+                onSubmit: { commitFreeform() }
+            )
+            .padding(.horizontal, 8)
+            .padding(.vertical, 8)
 
             Divider()
 
@@ -65,13 +66,14 @@ struct TypePickerContentView: View {
                 ForEach(visibleCategories, id: \.name) { category in
                     Section(header: Text(category.name)) {
                         ForEach(category.types, id: \.self) { type in
-                            typeRow(type)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .contentShape(Rectangle())
-                                .onTapGesture { commitType(type) }
-                                .listRowInsets(EdgeInsets(
-                                    top: 2, leading: 6, bottom: 2, trailing: 6
-                                ))
+                            Button { commitType(type) } label: {
+                                typeRow(type)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.plain)
+                            .listRowInsets(EdgeInsets(
+                                top: 2, leading: 6, bottom: 2, trailing: 6
+                            ))
                         }
                     }
                 }
@@ -87,13 +89,13 @@ struct TypePickerContentView: View {
     private func typeRow(_ type: String) -> some View {
         if type.caseInsensitiveCompare(currentValue) == .orderedSame {
             Text(type)
-                .font(.system(size: 12, design: .monospaced))
+                .font(.system(.callout, design: .monospaced))
                 .foregroundStyle(.tint)
                 .lineLimit(1)
                 .truncationMode(.tail)
         } else {
             Text(type)
-                .font(.system(size: 12, design: .monospaced))
+                .font(.system(.callout, design: .monospaced))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.tail)

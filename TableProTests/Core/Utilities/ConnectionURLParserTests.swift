@@ -444,6 +444,88 @@ struct ConnectionURLParserTests {
         #expect(parsed.usePrivateKey == true)
     }
 
+    @Test("SSH URL with SSH password")
+    func testSSHURLWithSSHPassword() {
+        let result = ConnectionURLParser.parse("mysql+ssh://root:sshpass@jumphost:22/dbuser:dbpass@localhost/db")
+        guard case .success(let parsed) = result else {
+            Issue.record("Expected success"); return
+        }
+        #expect(parsed.sshUsername == "root")
+        #expect(parsed.sshPassword == "sshpass")
+        #expect(parsed.sshHost == "jumphost")
+        #expect(parsed.sshPort == 22)
+        #expect(parsed.username == "dbuser")
+        #expect(parsed.password == "dbpass")
+    }
+
+    @Test("SSH URL without SSH password")
+    func testSSHURLWithoutSSHPassword() {
+        let result = ConnectionURLParser.parse("mysql+ssh://root@jumphost:22/dbuser:dbpass@localhost/db")
+        guard case .success(let parsed) = result else {
+            Issue.record("Expected success"); return
+        }
+        #expect(parsed.sshUsername == "root")
+        #expect(parsed.sshPassword == nil)
+    }
+
+    @Test("SSH URL with percent-encoded SSH password")
+    func testSSHURLWithPercentEncodedSSHPassword() {
+        let result = ConnectionURLParser.parse("mysql+ssh://root:p%40ss%3Aword@jumphost:22/dbuser@localhost/db")
+        guard case .success(let parsed) = result else {
+            Issue.record("Expected success"); return
+        }
+        #expect(parsed.sshUsername == "root")
+        #expect(parsed.sshPassword == "p@ss:word")
+    }
+
+    @Test("SafeModeLevel parsed from URL")
+    func testSafeModeLevelParsed() {
+        let result = ConnectionURLParser.parse("mysql://root:pass@localhost/db?safeModeLevel=2")
+        guard case .success(let parsed) = result else {
+            Issue.record("Expected success"); return
+        }
+        #expect(parsed.safeModeLevel == 2)
+    }
+
+    @Test("SafeModeLevel nil when absent")
+    func testSafeModeLevelNilWhenAbsent() {
+        let result = ConnectionURLParser.parse("mysql://root:pass@localhost/db")
+        guard case .success(let parsed) = result else {
+            Issue.record("Expected success"); return
+        }
+        #expect(parsed.safeModeLevel == nil)
+    }
+
+    @Test("SafeModeLevel mapping for invalid integer")
+    func testSafeModeLevelInvalidValue() {
+        #expect(SafeModeLevel.from(urlInteger: 99) == nil)
+        #expect(SafeModeLevel.from(urlInteger: -1) == nil)
+        #expect(SafeModeLevel.from(urlInteger: 0) == .silent)
+        #expect(SafeModeLevel.from(urlInteger: 1) == .alert)
+        #expect(SafeModeLevel.from(urlInteger: 2) == .readOnly)
+    }
+
+    @Test("Redis URL parses database index from path")
+    func testRedisDatabaseIndexParsed() {
+        let result = ConnectionURLParser.parse("redis://localhost:6379/3")
+        guard case .success(let parsed) = result else {
+            Issue.record("Expected success"); return
+        }
+        #expect(parsed.type == .redis)
+        #expect(parsed.redisDatabase == 3)
+        #expect(parsed.database == "")
+    }
+
+    @Test("Query params are case-insensitive")
+    func testQueryParamsCaseInsensitive() {
+        let result = ConnectionURLParser.parse("postgresql://user:pass@host/db?SSLMODE=require&STATUSCOLOR=FF3B30")
+        guard case .success(let parsed) = result else {
+            Issue.record("Expected success"); return
+        }
+        #expect(parsed.sslMode == .required)
+        #expect(parsed.statusColor == "FF3B30")
+    }
+
     @Test("Non-SSH URL has nil SSH fields")
     func testNonSSHURLHasNilSSHFields() {
         let result = ConnectionURLParser.parse("mysql://root:pass@localhost:3306/db")
@@ -453,6 +535,7 @@ struct ConnectionURLParserTests {
         #expect(parsed.sshHost == nil)
         #expect(parsed.sshPort == nil)
         #expect(parsed.sshUsername == nil)
+        #expect(parsed.sshPassword == nil)
         #expect(parsed.usePrivateKey == nil)
         #expect(parsed.connectionName == nil)
     }
@@ -857,6 +940,62 @@ struct ConnectionURLParserTests {
         #expect(parsed.agentSocket == SSHAgentSocketOption.onePasswordSocketPath)
         #expect(parsed.sshHost == "bastion")
         #expect(parsed.sshPort == 2222)
+    }
+
+    // MARK: - DuckDB (file-based)
+
+    @Test("DuckDB absolute file path")
+    func testDuckDBAbsolutePath() {
+        let result = ConnectionURLParser.parse("duckdb:///Users/me/analytics.duckdb")
+        guard case .success(let parsed) = result else {
+            Issue.record("Expected success"); return
+        }
+        #expect(parsed.type == .duckdb)
+        #expect(parsed.database == "/Users/me/analytics.duckdb")
+        #expect(parsed.host == "")
+    }
+
+    @Test("DuckDB relative file path")
+    func testDuckDBRelativePath() {
+        let result = ConnectionURLParser.parse("duckdb://data.duckdb")
+        guard case .success(let parsed) = result else {
+            Issue.record("Expected success"); return
+        }
+        #expect(parsed.type == .duckdb)
+        #expect(parsed.database == "data.duckdb")
+    }
+
+    // MARK: - etcds TLS
+
+    @Test("etcds scheme enables SSL")
+    func testEtcdsSchemeEnablesSSL() {
+        let result = ConnectionURLParser.parse("etcds://host:2379")
+        guard case .success(let parsed) = result else {
+            Issue.record("Expected success"); return
+        }
+        #expect(parsed.sslMode == .required)
+    }
+
+    @Test("etcd scheme does not enable SSL")
+    func testEtcdSchemeNoSSL() {
+        let result = ConnectionURLParser.parse("etcd://host:2379")
+        guard case .success(let parsed) = result else {
+            Issue.record("Expected success"); return
+        }
+        #expect(parsed.sslMode == nil)
+    }
+
+    // MARK: - Oracle service name
+
+    @Test("Oracle URL extracts service name")
+    func testOracleServiceName() {
+        let result = ConnectionURLParser.parse("oracle://user:pass@host:1521/ORCL")
+        guard case .success(let parsed) = result else {
+            Issue.record("Expected success"); return
+        }
+        #expect(parsed.type == .oracle)
+        #expect(parsed.oracleServiceName == "ORCL")
+        #expect(parsed.database == "")
     }
 
     @Test("SSH URL with both usePrivateKey and useSSHAgent prefers last")

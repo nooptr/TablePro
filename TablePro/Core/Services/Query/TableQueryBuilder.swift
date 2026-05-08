@@ -52,8 +52,16 @@ struct TableQueryBuilder {
 
     // MARK: - Query Building
 
+    private func qualifiedTable(_ tableName: String, schema: String?) -> String {
+        if let schema {
+            return "\(quote(schema)).\(quote(tableName))"
+        }
+        return quote(tableName)
+    }
+
     func buildBaseQuery(
         tableName: String,
+        schemaName: String? = nil,
         sortState: SortState? = nil,
         columns: [String] = [],
         limit: Int = 200,
@@ -70,7 +78,7 @@ struct TableQueryBuilder {
             }
         }
 
-        let quotedTable = quote(tableName)
+        let quotedTable = qualifiedTable(tableName, schema: schemaName)
         let selectClause = buildSelectClause(columns: columns, exclusions: columnExclusions)
         var query = "SELECT \(selectClause) FROM \(quotedTable)"
 
@@ -84,6 +92,7 @@ struct TableQueryBuilder {
 
     func buildFilteredQuery(
         tableName: String,
+        schemaName: String? = nil,
         filters: [TableFilter],
         logicMode: FilterLogicMode = .and,
         sortState: SortState? = nil,
@@ -96,7 +105,15 @@ struct TableQueryBuilder {
             let sortCols = sortColumnsAsTuples(sortState)
             let filterTuples = filters
                 .filter { $0.isEnabled && !$0.columnName.isEmpty }
-                .map { ($0.columnName, $0.filterOperator.rawValue, $0.value) }
+                .map { filter in
+                    let value: String
+                    if filter.filterOperator == .between, let second = filter.secondValue {
+                        value = "\(filter.value),\(second)"
+                    } else {
+                        value = filter.value
+                    }
+                    return (filter.columnName, filter.filterOperator.rawValue, value)
+                }
             if let result = pluginDriver.buildFilteredQuery(
                 table: tableName, filters: filterTuples,
                 logicMode: logicMode == .and ? "and" : "or",
@@ -106,7 +123,7 @@ struct TableQueryBuilder {
             }
         }
 
-        let quotedTable = quote(tableName)
+        let quotedTable = qualifiedTable(tableName, schema: schemaName)
         let selectClause = buildSelectClause(columns: columns, exclusions: columnExclusions)
         var query = "SELECT \(selectClause) FROM \(quotedTable)"
 

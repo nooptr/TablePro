@@ -16,24 +16,23 @@ extension MainContentCoordinator {
         onDiscard: @escaping () -> Void
     ) {
         // If showing structure view, let it handle refresh notifications
-        if let tabIndex = tabManager.selectedTabIndex,
-           tabManager.tabs[tabIndex].showStructure {
+        if let (tab, _) = tabManager.selectedTabAndIndex,
+           tab.display.resultsViewMode == .structure {
             return
         }
 
         let hasEditedCells = changeManager.hasChanges
 
         if hasEditedCells || hasPendingTableOps {
-            Task { @MainActor in
+            Task {
                 let window = NSApp.keyWindow
                 let confirmed = await confirmDiscardChanges(action: .refresh, window: window)
                 if confirmed {
                     onDiscard()
                     changeManager.clearChangesAndUndoHistory()
-                    // Only execute query if we're in a table tab
                     // Query tabs should not auto-execute on refresh (use Cmd+Enter to execute)
-                    if let tabIndex = tabManager.selectedTabIndex,
-                       tabManager.tabs[tabIndex].tabType == .table {
+                    if let (tab, tabIndex) = tabManager.selectedTabAndIndex,
+                       tab.tabType == .table {
                         currentQueryTask?.cancel()
                         rebuildTableQuery(at: tabIndex)
                         runQuery()
@@ -41,10 +40,8 @@ extension MainContentCoordinator {
                 }
             }
         } else {
-            // Only execute query if we're in a table tab
-            // Query tabs should not auto-execute on refresh (use Cmd+Enter to execute)
-            if let tabIndex = tabManager.selectedTabIndex,
-               tabManager.tabs[tabIndex].tabType == .table {
+            if let (tab, tabIndex) = tabManager.selectedTabAndIndex,
+               tab.tabType == .table {
                 currentQueryTask?.cancel()
                 rebuildTableQuery(at: tabIndex)
                 runQuery()

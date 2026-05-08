@@ -14,7 +14,8 @@ TablePro syncs your connections, groups, settings, and SSH profiles across all y
 | **Connections** | Yes | Host, port, username, database type, SSH/SSL config |
 | **Passwords** | Optional | Opt-in via iCloud Keychain (end-to-end encrypted) |
 | **Groups & Tags** | Yes | Full connection organization, including nested group hierarchy (parent-child relationships and sort order) |
-| **App Settings** | Yes | All 8 categories (General, Appearance, Editor, Data Grid, History, Tabs, Keyboard, AI) |
+| **App Settings** | Yes | All settings categories (General, Appearance, Editor, Keyboard, AI, Terminal) |
+| **Linked SQL Folders** | No | Folder paths are per-Mac. Link the same Git repo on each Mac after cloning. Cached file metadata (`linked_sql_index.db`) is also local. |
 
 <Note>
 Passwords are not synced by default. Enable **Password sync** under the Connections toggle to sync passwords via Apple's iCloud Keychain (end-to-end encrypted). With password sync off, you need to enter the password once on each new Mac.
@@ -22,7 +23,7 @@ Passwords are not synced by default. Enable **Password sync** under the Connecti
 
 ## Enabling iCloud Sync
 
-Open **Settings** (`Cmd+,`) > **Sync**, toggle iCloud Sync on, choose which categories to sync, and click **Sync Now**. Sync is off by default.
+Open **Settings** (`Cmd+,`) > **Account**, toggle iCloud Sync on, choose which categories to sync, and click **Sync Now**. Sync is off by default.
 
 {/* Screenshot: Sync settings tab */}
 <Frame caption="iCloud Sync settings">
@@ -38,9 +39,18 @@ Open **Settings** (`Cmd+,`) > **Sync**, toggle iCloud Sync on, choose which cate
   />
 </Frame>
 
-Each data type has its own toggle: Connections, Groups & Tags, SSH Profiles, and App Settings. Enable **Passwords** to sync credentials via iCloud Keychain (end-to-end encrypted). Off by default.
+Each data type has its own toggle: Connections, Groups & Tags, SSH Profiles, and App Settings.
 
-TablePro auto-syncs on app launch, when you switch back to it, and 2 seconds after you modify synced data. Use the **Sync Now** button to trigger a manual sync.
+## Excluding individual connections
+
+Some connections (e.g., localhost, dev databases) don't make sense on other devices. Mark them as **Local only** to keep them off iCloud:
+
+- **Connection form**: open the **Advanced** tab and toggle **Local only**
+- **Context menu**: right-click a connection and choose **Exclude from iCloud Sync**
+
+Local-only connections show an `icloud.slash` icon in the sidebar. The flag is preserved when duplicating or exporting connections.
+
+TablePro auto-syncs on app launch, when you switch back to it, and 2 seconds after you modify synced data.
 
 When the same record changes on two Macs, you choose to keep the local or remote version. Conflicts are per-record, not per-category.
 
@@ -75,6 +85,8 @@ The welcome window footer shows sync status: Synced, Syncing, Error (hover for d
 </Frame>
 
 iCloud Sync requires a Pro license. When a license expires, sync stops but local data remains. Re-activate your license to resume.
+
+## Troubleshooting
 
 If no records sync, confirm iCloud is signed in and iCloud Drive is enabled, then click **Sync Now**. For "iCloud account unavailable," sign in via **System Settings** > **Apple Account**.
 

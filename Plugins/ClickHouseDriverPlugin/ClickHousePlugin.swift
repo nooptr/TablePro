@@ -29,6 +29,7 @@ final class ClickHousePlugin: NSObject, TableProPlugin, DriverPlugin {
         ExplainVariant(id: "estimate", label: "Estimate", sqlPrefix: "EXPLAIN ESTIMATE"),
     ]
     static let brandColorHex = "#FFD100"
+    static let postConnectActions: [PostConnectAction] = [.selectDatabaseFromLastSession]
     static let supportsForeignKeys = false
     static let systemDatabaseNames: [String] = ["information_schema", "INFORMATION_SCHEMA", "system"]
     static let columnTypesByCategory: [String: [String]] = [
@@ -52,6 +53,7 @@ final class ClickHousePlugin: NSObject, TableProPlugin, DriverPlugin {
 
     static let structureColumnFields: [StructureColumnField] = [.name, .type, .nullable, .defaultValue, .comment]
     static let supportsQueryProgress = true
+    static let supportsDropDatabase = true
 
     static let sqlDialect: SQLDialectDescriptor? = SQLDialectDescriptor(
         identifierQuote: "`",
@@ -270,28 +272,6 @@ final class ClickHousePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             executionTime: executionTime,
             isTruncated: result.isTruncated
         )
-    }
-
-    func fetchRowCount(query: String) async throws -> Int {
-        let countQuery = "SELECT count() FROM (\(query)) AS __cnt"
-        let result = try await execute(query: countQuery)
-        guard let row = result.rows.first,
-              let cell = row.first,
-              let str = cell,
-              let count = Int(str) else {
-            return 0
-        }
-        return count
-    }
-
-    func fetchRows(query: String, offset: Int, limit: Int) async throws -> PluginQueryResult {
-        var base = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        while base.hasSuffix(";") {
-            base = String(base.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        base = stripLimitOffset(from: base)
-        let paginated = "\(base) LIMIT \(limit) OFFSET \(offset)"
-        return try await execute(query: paginated)
     }
 
     // MARK: - Schema Operations
@@ -577,9 +557,18 @@ final class ClickHousePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         }
     }
 
-    func createDatabase(name: String, charset: String, collation: String?) async throws {
-        let escapedName = name.replacingOccurrences(of: "`", with: "``")
+    func createDatabaseFormSpec() async throws -> PluginCreateDatabaseFormSpec? {
+        PluginCreateDatabaseFormSpec(fields: [], footnote: nil)
+    }
+
+    func createDatabase(_ request: PluginCreateDatabaseRequest) async throws {
+        let escapedName = request.name.replacingOccurrences(of: "`", with: "``")
         _ = try await execute(query: "CREATE DATABASE `\(escapedName)`")
+    }
+
+    func dropDatabase(name: String) async throws {
+        let escapedName = name.replacingOccurrences(of: "`", with: "``")
+        _ = try await execute(query: "DROP DATABASE `\(escapedName)`")
     }
 
     // MARK: - All Tables Metadata
@@ -996,7 +985,7 @@ final class ClickHousePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 return Self.unescapeTsvField(field)
             }
             rows.append(row)
-            if rows.count >= PluginRowLimits.defaultMax {
+            if rows.count >= PluginRowLimits.emergencyMax {
                 truncated = true
                 break
             }
@@ -1036,37 +1025,6 @@ final class ClickHousePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         }
 
         return result
-    }
-
-    private func stripLimitOffset(from query: String) -> String {
-        let ns = query as NSString
-        let len = ns.length
-        guard len > 0 else { return query }
-
-        let upper = query.uppercased() as NSString
-        var depth = 0
-        var i = len - 1
-
-        while i >= 4 {
-            let ch = upper.character(at: i)
-            if ch == 0x29 { depth += 1 }
-            else if ch == 0x28 { depth -= 1 }
-            else if depth == 0 && ch == 0x54 {
-                let start = i - 4
-                if start >= 0 {
-                    let candidate = upper.substring(with: NSRange(location: start, length: 5))
-                    if candidate == "LIMIT" {
-                        if start == 0 || CharacterSet.whitespacesAndNewlines
-                            .contains(UnicodeScalar(upper.character(at: start - 1)) ?? UnicodeScalar(0)) {
-                            return ns.substring(to: start)
-                                .trimmingCharacters(in: .whitespacesAndNewlines)
-                        }
-                    }
-                }
-            }
-            i -= 1
-        }
-        return query
     }
 
     /// Convert `?` placeholders to `{p1:String}` and build parameter map for ClickHouse HTTP params.
@@ -1110,6 +1068,153 @@ final class ClickHousePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         }
 
         return (converted, paramMap)
+    }
+
+    // MARK: - Streaming
+
+    func streamRows(query: String) -> AsyncThrowingStream<PluginStreamElement, Error> {
+        return AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
+            let streamTask = Task {
+                do {
+                    try await self.performStreamRows(query: query, continuation: continuation)
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { @Sendable _ in
+                streamTask.cancel()
+            }
+        }
+    }
+
+    private func performStreamRows(
+        query: String,
+        continuation: AsyncThrowingStream<PluginStreamElement, Error>.Continuation
+    ) async throws {
+        lock.lock()
+        guard let session = self.session else {
+            lock.unlock()
+            throw ClickHouseError.notConnected
+        }
+        let database = _currentDatabase
+        lock.unlock()
+
+        var trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        while trimmedQuery.hasSuffix(";") {
+            trimmedQuery = String(trimmedQuery.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        let headerResult = try await executeRaw("\(trimmedQuery) LIMIT 0")
+        continuation.yield(.header(PluginStreamHeader(
+            columns: headerResult.columns,
+            columnTypeNames: headerResult.columnTypeNames,
+            estimatedRowCount: nil
+        )))
+
+        let columnOrder = headerResult.columns
+
+        guard !columnOrder.isEmpty else {
+            continuation.finish()
+            return
+        }
+
+        let streamRequest = try buildStreamRequest(
+            query: trimmedQuery, database: database
+        )
+
+        let (bytes, response) = try await session.bytes(for: streamRequest)
+
+        if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode >= 400 {
+            var body = ""
+            for try await line in bytes.lines {
+                body += line
+            }
+            throw ClickHouseError(message: body.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+
+        let batchSize = 5_000
+        var batch: [PluginRow] = []
+        batch.reserveCapacity(batchSize)
+
+        for try await line in bytes.lines {
+            try Task.checkCancellation()
+
+            let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedLine.isEmpty { continue }
+
+            guard let lineData = trimmedLine.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
+                continue
+            }
+
+            var row: [String?] = []
+            for colName in columnOrder {
+                if let value = json[colName] {
+                    if value is NSNull {
+                        row.append(nil)
+                    } else if let str = value as? String {
+                        row.append(str)
+                    } else if let num = value as? NSNumber {
+                        row.append(num.stringValue)
+                    } else {
+                        if let jsonData = try? JSONSerialization.data(withJSONObject: value),
+                           let jsonStr = String(data: jsonData, encoding: .utf8) {
+                            row.append(jsonStr)
+                        } else {
+                            row.append(String(describing: value))
+                        }
+                    }
+                } else {
+                    row.append(nil)
+                }
+            }
+
+            batch.append(row)
+            if batch.count >= batchSize {
+                continuation.yield(.rows(batch))
+                batch.removeAll(keepingCapacity: true)
+            }
+        }
+
+        if !batch.isEmpty {
+            continuation.yield(.rows(batch))
+        }
+
+        continuation.finish()
+    }
+
+    private func buildStreamRequest(query: String, database: String) throws -> URLRequest {
+        let useTLS = config.additionalFields["sslMode"] != nil
+            && config.additionalFields["sslMode"] != "Disabled"
+
+        var components = URLComponents()
+        components.scheme = useTLS ? "https" : "http"
+        components.host = config.host
+        components.port = config.port
+        components.path = "/"
+
+        var queryItems = [URLQueryItem]()
+        if !database.isEmpty {
+            queryItems.append(URLQueryItem(name: "database", value: database))
+        }
+        if !queryItems.isEmpty {
+            components.queryItems = queryItems
+        }
+
+        guard let url = components.url else {
+            throw ClickHouseError(message: "Failed to construct request URL")
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+
+        let credentials = "\(config.username):\(config.password)"
+        if let credData = credentials.data(using: .utf8) {
+            request.setValue("Basic \(credData.base64EncodedString())", forHTTPHeaderField: "Authorization")
+        }
+
+        request.httpBody = (query + " FORMAT JSONEachRow").data(using: .utf8)
+        return request
     }
 
     // MARK: - Create Table DDL
@@ -1164,6 +1269,39 @@ final class ClickHousePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             return value
         }
         return "'\(escapeStringLiteral(value))'"
+    }
+
+    // MARK: - ALTER TABLE DDL
+
+    func generateAddColumnSQL(table: String, column: PluginColumnDefinition) -> String? {
+        "ALTER TABLE \(quoteIdentifier(table)) ADD COLUMN \(clickhouseColumnDefinition(column))"
+    }
+
+    func generateModifyColumnSQL(table: String, oldColumn: PluginColumnDefinition, newColumn: PluginColumnDefinition) -> String? {
+        let tableName = quoteIdentifier(table)
+        var stmts: [String] = []
+        if oldColumn.name != newColumn.name {
+            stmts.append("ALTER TABLE \(tableName) RENAME COLUMN \(quoteIdentifier(oldColumn.name)) TO \(quoteIdentifier(newColumn.name))")
+        }
+        if oldColumn.dataType != newColumn.dataType || oldColumn.isNullable != newColumn.isNullable
+            || oldColumn.defaultValue != newColumn.defaultValue || oldColumn.comment != newColumn.comment {
+            stmts.append("ALTER TABLE \(tableName) MODIFY COLUMN \(clickhouseColumnDefinition(newColumn))")
+        }
+        return stmts.isEmpty ? nil : stmts.joined(separator: ";\n")
+    }
+
+    func generateDropColumnSQL(table: String, columnName: String) -> String? {
+        "ALTER TABLE \(quoteIdentifier(table)) DROP COLUMN \(quoteIdentifier(columnName))"
+    }
+
+    func generateAddIndexSQL(table: String, index: PluginIndexDefinition) -> String? {
+        let cols = index.columns.map { quoteIdentifier($0) }.joined(separator: ", ")
+        let indexType = index.indexType ?? "minmax"
+        return "ALTER TABLE \(quoteIdentifier(table)) ADD INDEX \(quoteIdentifier(index.name)) (\(cols)) TYPE \(indexType) GRANULARITY 1"
+    }
+
+    func generateDropIndexSQL(table: String, indexName: String) -> String? {
+        "ALTER TABLE \(quoteIdentifier(table)) DROP INDEX \(quoteIdentifier(indexName))"
     }
 
     // MARK: - TLS Delegate

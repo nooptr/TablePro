@@ -41,9 +41,7 @@ struct ForeignKeyPopoverContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            TextField("Search...", text: $searchText)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 13))
+            NativeSearchField(text: $searchText, placeholder: String(localized: "Search..."))
                 .padding(.horizontal, 8)
                 .padding(.vertical, 8)
 
@@ -56,21 +54,22 @@ struct ForeignKeyPopoverContentView: View {
             } else if filteredValues.isEmpty {
                 Text("No values found")
                     .foregroundStyle(.secondary)
-                    .font(.system(size: 12))
+                    .font(.callout)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .frame(height: 60)
             } else {
                 List(filteredValues, selection: $selectedId) { value in
-                    rowLabel(for: value)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            onCommit(value.id)
-                            onDismiss()
-                        }
-                        .listRowInsets(EdgeInsets(
-                            top: 2, leading: 6, bottom: 2, trailing: 6
-                        ))
+                    Button {
+                        onCommit(value.id)
+                        onDismiss()
+                    } label: {
+                        rowLabel(for: value)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+                    .listRowInsets(EdgeInsets(
+                        top: 2, leading: 6, bottom: 2, trailing: 6
+                    ))
                 }
                 .listStyle(.plain)
                 .environment(\.defaultMinListRowHeight, Self.rowHeight)
@@ -86,6 +85,9 @@ struct ForeignKeyPopoverContentView: View {
         .frame(width: 420)
         .fixedSize(horizontal: false, vertical: true)
         .task { await fetchForeignKeyValues() }
+        .onChange(of: searchText) {
+            selectedId = filteredValues.first?.id
+        }
     }
 
     // MARK: - Row View
@@ -94,13 +96,13 @@ struct ForeignKeyPopoverContentView: View {
     private func rowLabel(for value: FKValue) -> some View {
         if value.id == currentValue {
             Text(value.display)
-                .font(.system(size: 12, design: .monospaced))
+                .font(.system(.callout, design: .monospaced))
                 .foregroundStyle(.tint)
                 .lineLimit(1)
                 .truncationMode(.tail)
         } else {
             Text(value.display)
-                .font(.system(size: 12, design: .monospaced))
+                .font(.system(.callout, design: .monospaced))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -116,13 +118,17 @@ struct ForeignKeyPopoverContentView: View {
             return
         }
 
-        let quotedTable = driver.quoteIdentifier(fkInfo.referencedTable)
+        let quotedTable: String
+        if let schema = fkInfo.referencedSchema {
+            quotedTable = "\(driver.quoteIdentifier(schema)).\(driver.quoteIdentifier(fkInfo.referencedTable))"
+        } else {
+            quotedTable = driver.quoteIdentifier(fkInfo.referencedTable)
+        }
         let quotedColumn = driver.quoteIdentifier(fkInfo.referencedColumn)
 
-        // Try to find a display column (first text-like column that isn't the FK column)
         var displayColumn: String?
         do {
-            let columnInfos = try await driver.fetchColumns(table: fkInfo.referencedTable)
+            let columnInfos = try await driver.fetchColumns(table: fkInfo.referencedTable, schema: fkInfo.referencedSchema)
             displayColumn = columnInfos.first(where: { col in
                 col.name != fkInfo.referencedColumn &&
                 !col.isPrimaryKey &&
@@ -151,7 +157,7 @@ struct ForeignKeyPopoverContentView: View {
             let result = try await driver.execute(query: query)
             var values: [FKValue] = []
             for row in result.rows {
-                guard let idVal = row.first ?? nil else { continue }
+                guard !row.isEmpty, let idVal = row[0] else { continue }
                 let displayVal: String
                 if displayColumn != nil, row.count > 1, let second = row[1] {
                     displayVal = "\(idVal) — \(second)"

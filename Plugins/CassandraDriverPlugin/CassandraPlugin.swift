@@ -104,6 +104,8 @@ internal final class CassandraPlugin: NSObject, TableProPlugin, DriverPlugin {
         )
     }
 
+    static let supportsDropDatabase = true
+
     func createDriver(config: DriverConnectionConfig) -> any PluginDatabaseDriver {
         CassandraPluginDriver(config: config)
     }
@@ -706,6 +708,114 @@ private actor CassandraConnectionActor {
         return "Unknown error"
     }
 
+    func streamQuery(
+        _ cql: String,
+        continuation: AsyncThrowingStream<PluginStreamElement, Error>.Continuation
+    ) throws {
+        guard let session else {
+            throw CassandraPluginError.notConnected
+        }
+
+        let pageSize: Int32 = 5_000
+        let statement = cass_statement_new(cql, 0)
+        guard let statement else {
+            throw CassandraPluginError.queryFailed("Failed to create statement")
+        }
+
+        cass_statement_set_paging_size(statement, pageSize)
+
+        var headerSent = false
+
+        defer { cass_statement_free(statement) }
+
+        while true {
+            let future = cass_session_execute(session, statement)
+            guard let future else {
+                throw CassandraPluginError.queryFailed("Failed to execute query")
+            }
+
+            cass_future_wait(future)
+            let rc = cass_future_error_code(future)
+
+            if rc != CASS_OK {
+                let errorMessage = extractFutureError(future)
+                cass_future_free(future)
+                throw CassandraPluginError.queryFailed(errorMessage)
+            }
+
+            let result = cass_future_get_result(future)
+            cass_future_free(future)
+
+            guard let result else { break }
+
+            if !headerSent {
+                let colCount = cass_result_column_count(result)
+                var columns: [String] = []
+                var columnTypeNames: [String] = []
+
+                for i in 0..<colCount {
+                    var namePtr: UnsafePointer<CChar>?
+                    var nameLength: Int = 0
+                    cass_result_column_name(result, i, &namePtr, &nameLength)
+                    if let namePtr {
+                        columns.append(String(cString: namePtr))
+                    } else {
+                        columns.append("column_\(i)")
+                    }
+                    let colType = cass_result_column_type(result, i)
+                    columnTypeNames.append(Self.cassTypeName(colType))
+                }
+
+                continuation.yield(.header(PluginStreamHeader(
+                    columns: columns,
+                    columnTypeNames: columnTypeNames,
+                    estimatedRowCount: nil
+                )))
+                headerSent = true
+            }
+
+            let colCount = cass_result_column_count(result)
+            let iterator = cass_iterator_from_result(result)
+
+            if let iterator {
+                while cass_iterator_next(iterator) == cass_true {
+                    let row = cass_iterator_get_row(iterator)
+                    guard let row else { continue }
+
+                    var rowData: [String?] = []
+                    for col in 0..<colCount {
+                        let value = cass_row_get_column(row, col)
+                        if let value, cass_value_is_null(value) == cass_false {
+                            rowData.append(Self.extractStringValue(value))
+                        } else {
+                            rowData.append(nil)
+                        }
+                    }
+                    continuation.yield(.rows([rowData]))
+                }
+                cass_iterator_free(iterator)
+            }
+
+            let hasMore = cass_result_has_more_pages(result) == cass_true
+
+            if hasMore {
+                cass_statement_set_paging_state(statement, result)
+            }
+
+            cass_result_free(result)
+
+            if !hasMore { break }
+        }
+
+        if !headerSent {
+            continuation.yield(.header(PluginStreamHeader(
+                columns: [],
+                columnTypeNames: [],
+                estimatedRowCount: nil
+            )))
+        }
+    }
+
     private func escapeIdentifier(_ value: String) -> String {
         value.replacingOccurrences(of: "\"", with: "\"\"")
     }
@@ -832,23 +942,24 @@ internal final class CassandraPluginDriver: PluginDatabaseDriver, @unchecked Sen
         )
     }
 
-    // MARK: - Pagination
+    // MARK: - Streaming
 
-    func fetchRowCount(query: String) async throws -> Int {
-        // CQL does not support subqueries, so we can't wrap an arbitrary query in SELECT COUNT(*) FROM (...).
-        // Return -1 to signal unknown count; the UI will hide the total page count.
-        -1
-    }
+    func streamRows(query: String) -> AsyncThrowingStream<PluginStreamElement, Error> {
+        let cql = stripTrailingSemicolon(query)
+        return AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
+            let streamTask = Task {
+                do {
+                    try await self.connectionActor.streamQuery(cql, continuation: continuation)
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
 
-    func fetchRows(query: String, offset: Int, limit: Int) async throws -> PluginQueryResult {
-        // CQL does not support OFFSET. Only the first page (offset=0) can be fetched via simple LIMIT.
-        // For offset>0, throw so the caller knows pagination is unsupported for arbitrary queries.
-        if offset > 0 {
-            throw CassandraPluginError.unsupportedOperation
+            continuation.onTermination = { @Sendable _ in
+                streamTask.cancel()
+            }
         }
-        let baseQuery = stripTrailingSemicolon(query)
-        let paginatedQuery = "\(baseQuery) LIMIT \(limit)"
-        return try await execute(query: paginatedQuery)
     }
 
     // MARK: - Schema Operations
@@ -1107,13 +1218,22 @@ internal final class CassandraPluginDriver: PluginDatabaseDriver, @unchecked Sen
         return databases.map { PluginDatabaseMetadata(name: $0) }
     }
 
-    func createDatabase(name: String, charset: String, collation: String?) async throws {
-        let safeKs = escapeIdentifier(name)
+    func createDatabaseFormSpec() async throws -> PluginCreateDatabaseFormSpec? {
+        PluginCreateDatabaseFormSpec(fields: [], footnote: nil)
+    }
+
+    func createDatabase(_ request: PluginCreateDatabaseRequest) async throws {
+        let safeKs = escapeIdentifier(request.name)
         let query = """
             CREATE KEYSPACE "\(safeKs)"
             WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 3}
         """
         _ = try await execute(query: query)
+    }
+
+    func dropDatabase(name: String) async throws {
+        let safeKs = escapeIdentifier(name)
+        _ = try await execute(query: "DROP KEYSPACE \"\(safeKs)\"")
     }
 
     func switchDatabase(to database: String) async throws {
@@ -1132,6 +1252,21 @@ internal final class CassandraPluginDriver: PluginDatabaseDriver, @unchecked Sen
     func switchSchema(to schema: String) async throws {
         // Cassandra uses keyspaces instead of schemas
         try await switchDatabase(to: schema)
+    }
+
+    // MARK: - ALTER TABLE DDL
+
+    func generateAddColumnSQL(table: String, column: PluginColumnDefinition) -> String? {
+        "ALTER TABLE \(qualifiedTableName(table)) ADD \(quoteIdentifier(column.name)) \(column.dataType)"
+    }
+
+    func generateDropColumnSQL(table: String, columnName: String) -> String? {
+        "ALTER TABLE \(qualifiedTableName(table)) DROP \(quoteIdentifier(columnName))"
+    }
+
+    private func qualifiedTableName(_ table: String) -> String {
+        let ks = resolveKeyspace(nil)
+        return "\(quoteIdentifier(ks)).\(quoteIdentifier(table))"
     }
 
     // MARK: - Private Helpers

@@ -48,7 +48,8 @@ actor ConnectionHealthMonitor {
 
     private var state: HealthState = .healthy
     private var monitoringTask: Task<Void, Never>?
-    private var wakeUpContinuation: AsyncStream<Void>.Continuation?
+    private var pingCount: Int = 0
+    private var lastPingTime: ContinuousClock.Instant?
 
     // MARK: - Initialization
 
@@ -92,9 +93,6 @@ actor ConnectionHealthMonitor {
 
         Self.logger.trace("Starting health monitoring for connection \(self.connectionId)")
 
-        let (wakeUpStream, continuation) = AsyncStream<Void>.makeStream()
-        self.wakeUpContinuation = continuation
-
         monitoringTask = Task { [weak self] in
             guard let self else { return }
 
@@ -103,26 +101,8 @@ actor ConnectionHealthMonitor {
             guard !Task.isCancelled else { return }
 
             while !Task.isCancelled {
-                // Race between the normal ping interval and an early wake-up signal
-                await withTaskGroup(of: Bool.self) { group in
-                    group.addTask {
-                        try? await Task.sleep(for: .seconds(Self.pingInterval))
-                        return false // normal timer fired
-                    }
-                    group.addTask {
-                        var iterator = wakeUpStream.makeAsyncIterator()
-                        _ = await iterator.next()
-                        return true // woken up early
-                    }
-
-                    // Wait for whichever finishes first, cancel the other
-                    if await group.next() != nil {
-                        group.cancelAll()
-                    }
-                }
-
+                try? await Task.sleep(for: .seconds(Self.pingInterval))
                 guard !Task.isCancelled else { break }
-
                 await self.performHealthCheck()
             }
 
@@ -131,20 +111,15 @@ actor ConnectionHealthMonitor {
     }
 
     /// Stops periodic health monitoring and cancels any in-flight reconnect attempts.
-    func stopMonitoring() {
-        Self.logger.trace("Stopping health monitoring for connection \(self.connectionId)")
-        monitoringTask?.cancel()
-        monitoringTask = nil
-        wakeUpContinuation?.finish()
-        wakeUpContinuation = nil
-    }
-
-    /// Triggers an immediate health check, interrupting the normal 30-second sleep.
     ///
-    /// Call this after a query failure to get faster feedback on connection health
-    /// instead of waiting for the next scheduled ping.
-    func checkNow() {
-        wakeUpContinuation?.yield()
+    /// Awaits the monitoring task's completion to ensure no orphaned tasks
+    /// continue pinging after a new monitor is started.
+    func stopMonitoring() async {
+        Self.logger.trace("Stopping health monitoring for connection \(self.connectionId)")
+        let task = monitoringTask
+        monitoringTask = nil
+        task?.cancel()
+        await task?.value
     }
 
     /// Resets the monitor to `.healthy` after the user manually reconnects.
@@ -167,6 +142,22 @@ actor ConnectionHealthMonitor {
             Self.logger.debug("Skipping health check — state is \(String(describing: self.state)) for connection \(self.connectionId)")
             return
         }
+
+        pingCount += 1
+        let now = ContinuousClock.now
+        if let last = lastPingTime {
+            let interval = (now - last) / .seconds(1)
+            if interval < 5.0 {
+                Self.logger.warning(
+                    "Ping #\(self.pingCount) fired only \(String(format: "%.2f", interval))s after previous for \(self.connectionId)"
+                )
+            } else {
+                Self.logger.debug("Ping #\(self.pingCount) for \(self.connectionId) (interval: \(String(format: "%.1f", interval))s)")
+            }
+        } else {
+            Self.logger.debug("First ping (#\(self.pingCount)) for \(self.connectionId)")
+        }
+        lastPingTime = now
 
         await transitionTo(.checking)
 

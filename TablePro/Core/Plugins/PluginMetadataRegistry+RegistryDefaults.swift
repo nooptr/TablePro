@@ -527,7 +527,8 @@ extension PluginMetadataRegistry {
                     supportsForeignKeyDisable: false,
                     supportsReadOnlyMode: false,
                     supportsQueryProgress: false,
-                    requiresReconnectForDatabaseSwitch: false
+                    requiresReconnectForDatabaseSwitch: false,
+                    supportsDropDatabase: true
                 ),
                 schema: PluginMetadataSnapshot.SchemaInfo(
                     defaultSchemaName: "public",
@@ -548,6 +549,13 @@ extension PluginMetadataRegistry {
                 ),
                 connection: PluginMetadataSnapshot.ConnectionConfig(
                     additionalConnectionFields: [
+                        ConnectionField(
+                            id: "mongoHosts",
+                            label: "Hosts",
+                            placeholder: "localhost:27017",
+                            fieldType: .hostList,
+                            section: .connection
+                        ),
                         ConnectionField(
                             id: "mongoAuthSource", label: "Auth Database", placeholder: "admin"
                         ),
@@ -574,7 +582,9 @@ extension PluginMetadataRegistry {
                                 .init(value: "3", label: "3")
                             ])
                         )
-                    ]
+                    ],
+                    category: .document,
+                    tagline: String(localized: "JSON-style document database")
                 )
             )),
             ("Redis", PluginMetadataSnapshot(
@@ -598,7 +608,8 @@ extension PluginMetadataRegistry {
                     supportsForeignKeyDisable: false,
                     supportsReadOnlyMode: false,
                     supportsQueryProgress: false,
-                    requiresReconnectForDatabaseSwitch: false
+                    requiresReconnectForDatabaseSwitch: false,
+                    supportsDropDatabase: false
                 ),
                 schema: PluginMetadataSnapshot.SchemaInfo(
                     defaultSchemaName: "public",
@@ -625,7 +636,9 @@ extension PluginMetadataRegistry {
                             defaultValue: "0",
                             fieldType: .stepper(range: ConnectionField.IntRange(0...15))
                         )
-                    ]
+                    ],
+                    category: .keyValue,
+                    tagline: String(localized: "In-memory data store and cache")
                 )
             )),
             ("SQL Server", PluginMetadataSnapshot(
@@ -634,12 +647,25 @@ extension PluginMetadataRegistry {
                 isDownloadable: true, primaryUrlScheme: "sqlserver", parameterStyle: .questionMark,
                 navigationModel: .standard, explainVariants: [], pathFieldRole: .database,
                 supportsHealthMonitor: true, urlSchemes: ["sqlserver", "mssql"],
-                postConnectActions: [.selectDatabaseFromLastSession],
+                postConnectActions: [.selectDatabaseFromLastSession, .selectSchemaFromLastSession],
                 brandColorHex: "#E34517",
                 queryLanguageName: "SQL", editorLanguage: .sql,
                 connectionMode: .network, supportsDatabaseSwitching: true,
                 supportsColumnReorder: false,
-                capabilities: .defaults,
+                capabilities: PluginMetadataSnapshot.CapabilityFlags(
+                    supportsSchemaSwitching: true,
+                    supportsImport: true,
+                    supportsExport: true,
+                    supportsSSH: true,
+                    supportsSSL: true,
+                    supportsCascadeDrop: false,
+                    supportsForeignKeyDisable: true,
+                    supportsReadOnlyMode: true,
+                    supportsQueryProgress: false,
+                    requiresReconnectForDatabaseSwitch: false,
+                    supportsDropDatabase: true,
+                    supportsRenameColumn: true
+                ),
                 schema: PluginMetadataSnapshot.SchemaInfo(
                     defaultSchemaName: "dbo",
                     defaultGroupName: "main",
@@ -662,7 +688,9 @@ extension PluginMetadataRegistry {
                         ConnectionField(
                             id: "mssqlSchema", label: "Schema", placeholder: "dbo", defaultValue: "dbo"
                         )
-                    ]
+                    ],
+                    category: .relational,
+                    tagline: String(localized: "Microsoft's enterprise SQL database")
                 )
             )),
             ("Oracle", PluginMetadataSnapshot(
@@ -670,13 +698,14 @@ extension PluginMetadataRegistry {
                 requiresAuthentication: true, supportsForeignKeys: true, supportsSchemaEditing: true,
                 isDownloadable: true, primaryUrlScheme: "oracle", parameterStyle: .questionMark,
                 navigationModel: .standard, explainVariants: [], pathFieldRole: .serviceName,
-                supportsHealthMonitor: true, urlSchemes: ["oracle"], postConnectActions: [],
+                supportsHealthMonitor: true, urlSchemes: ["oracle"],
+                postConnectActions: [.selectSchemaFromLastSession],
                 brandColorHex: "#C3160B",
                 queryLanguageName: "SQL", editorLanguage: .sql,
                 connectionMode: .network, supportsDatabaseSwitching: true,
                 supportsColumnReorder: false,
                 capabilities: PluginMetadataSnapshot.CapabilityFlags(
-                    supportsSchemaSwitching: false,
+                    supportsSchemaSwitching: true,
                     supportsImport: true,
                     supportsExport: true,
                     supportsSSH: true,
@@ -685,7 +714,9 @@ extension PluginMetadataRegistry {
                     supportsForeignKeyDisable: false,
                     supportsReadOnlyMode: true,
                     supportsQueryProgress: false,
-                    requiresReconnectForDatabaseSwitch: false
+                    requiresReconnectForDatabaseSwitch: false,
+                    supportsDropDatabase: false,
+                    supportsRenameColumn: true
                 ),
                 schema: PluginMetadataSnapshot.SchemaInfo(
                     defaultSchemaName: "public",
@@ -711,7 +742,9 @@ extension PluginMetadataRegistry {
                         ConnectionField(
                             id: "oracleServiceName", label: "Service Name", placeholder: "ORCL"
                         )
-                    ]
+                    ],
+                    category: .relational,
+                    tagline: String(localized: "Enterprise SQL with PL/SQL")
                 )
             )),
             ("ClickHouse", PluginMetadataSnapshot(
@@ -726,7 +759,7 @@ extension PluginMetadataRegistry {
                     ExplainVariant(id: "estimate", label: "Estimate", sqlPrefix: "EXPLAIN ESTIMATE")
                 ],
                 pathFieldRole: .database,
-                supportsHealthMonitor: true, urlSchemes: ["clickhouse", "ch"], postConnectActions: [],
+                supportsHealthMonitor: true, urlSchemes: ["clickhouse", "ch"], postConnectActions: [.selectDatabaseFromLastSession],
                 brandColorHex: "#FFD100",
                 queryLanguageName: "SQL", editorLanguage: .sql,
                 connectionMode: .network, supportsDatabaseSwitching: true,
@@ -741,7 +774,9 @@ extension PluginMetadataRegistry {
                     supportsForeignKeyDisable: true,
                     supportsReadOnlyMode: true,
                     supportsQueryProgress: true,
-                    requiresReconnectForDatabaseSwitch: false
+                    requiresReconnectForDatabaseSwitch: false,
+                    supportsDropDatabase: true,
+                    supportsModifyPrimaryKey: false
                 ),
                 schema: PluginMetadataSnapshot.SchemaInfo(
                     defaultSchemaName: "public",
@@ -760,19 +795,39 @@ extension PluginMetadataRegistry {
                     statementCompletions: [],
                     columnTypesByCategory: clickhouseColumnTypes
                 ),
-                connection: .defaults
+                connection: PluginMetadataSnapshot.ConnectionConfig(
+                    category: .analytical,
+                    tagline: String(localized: "Column-oriented OLAP for big data")
+                )
             )),
             ("DuckDB", PluginMetadataSnapshot(
                 displayName: "DuckDB", iconName: "duckdb-icon", defaultPort: 0,
                 requiresAuthentication: false, supportsForeignKeys: true, supportsSchemaEditing: true,
                 isDownloadable: true, primaryUrlScheme: "duckdb", parameterStyle: .dollar,
-                navigationModel: .standard, explainVariants: [], pathFieldRole: .filePath,
+                navigationModel: .standard,
+                explainVariants: [
+                    ExplainVariant(id: "explain", label: "EXPLAIN", sqlPrefix: "EXPLAIN"),
+                ],
+                pathFieldRole: .filePath,
                 supportsHealthMonitor: false, urlSchemes: ["duckdb"], postConnectActions: [],
                 brandColorHex: "#FFD900",
                 queryLanguageName: "SQL", editorLanguage: .sql,
                 connectionMode: .fileBased, supportsDatabaseSwitching: false,
                 supportsColumnReorder: false,
-                capabilities: .defaults,
+                capabilities: PluginMetadataSnapshot.CapabilityFlags(
+                    supportsSchemaSwitching: false,
+                    supportsImport: true,
+                    supportsExport: true,
+                    supportsSSH: false,
+                    supportsSSL: false,
+                    supportsCascadeDrop: false,
+                    supportsForeignKeyDisable: true,
+                    supportsReadOnlyMode: true,
+                    supportsQueryProgress: false,
+                    requiresReconnectForDatabaseSwitch: false,
+                    supportsDropDatabase: false,
+                    supportsRenameColumn: true
+                ),
                 schema: PluginMetadataSnapshot.SchemaInfo(
                     defaultSchemaName: "public",
                     defaultGroupName: "main",
@@ -790,7 +845,10 @@ extension PluginMetadataRegistry {
                     statementCompletions: [],
                     columnTypesByCategory: duckdbColumnTypes
                 ),
-                connection: .defaults
+                connection: PluginMetadataSnapshot.ConnectionConfig(
+                    category: .analytical,
+                    tagline: String(localized: "Embedded analytical SQL")
+                )
             )),
             ("Cassandra", PluginMetadataSnapshot(
                 displayName: "Cassandra / ScyllaDB", iconName: "cassandra-icon", defaultPort: 9_042,
@@ -813,7 +871,12 @@ extension PluginMetadataRegistry {
                     supportsForeignKeyDisable: false,
                     supportsReadOnlyMode: true,
                     supportsQueryProgress: false,
-                    requiresReconnectForDatabaseSwitch: false
+                    requiresReconnectForDatabaseSwitch: false,
+                    supportsDropDatabase: true,
+                    supportsModifyColumn: false,
+                    supportsAddIndex: false,
+                    supportsDropIndex: false,
+                    supportsModifyPrimaryKey: false
                 ),
                 schema: PluginMetadataSnapshot.SchemaInfo(
                     defaultSchemaName: "public",
@@ -843,7 +906,9 @@ extension PluginMetadataRegistry {
                             placeholder: "/path/to/ca-cert.pem",
                             section: .advanced
                         )
-                    ]
+                    ],
+                    category: .wideColumn,
+                    tagline: String(localized: "Distributed wide-column store")
                 )
             )),
             ("ScyllaDB", PluginMetadataSnapshot(
@@ -867,7 +932,12 @@ extension PluginMetadataRegistry {
                     supportsForeignKeyDisable: false,
                     supportsReadOnlyMode: true,
                     supportsQueryProgress: false,
-                    requiresReconnectForDatabaseSwitch: false
+                    requiresReconnectForDatabaseSwitch: false,
+                    supportsDropDatabase: true,
+                    supportsModifyColumn: false,
+                    supportsAddIndex: false,
+                    supportsDropIndex: false,
+                    supportsModifyPrimaryKey: false
                 ),
                 schema: PluginMetadataSnapshot.SchemaInfo(
                     defaultSchemaName: "public",
@@ -897,7 +967,9 @@ extension PluginMetadataRegistry {
                             placeholder: "/path/to/ca-cert.pem",
                             section: .advanced
                         )
-                    ]
+                    ],
+                    category: .wideColumn,
+                    tagline: String(localized: "C++ rewrite of Cassandra, faster")
                 )
             )),
             ("etcd", PluginMetadataSnapshot(
@@ -920,7 +992,8 @@ extension PluginMetadataRegistry {
                     supportsForeignKeyDisable: false,
                     supportsReadOnlyMode: false,
                     supportsQueryProgress: false,
-                    requiresReconnectForDatabaseSwitch: false
+                    requiresReconnectForDatabaseSwitch: false,
+                    supportsDropDatabase: false
                 ),
                 schema: PluginMetadataSnapshot.SchemaInfo(
                     defaultSchemaName: "public",
@@ -976,7 +1049,9 @@ extension PluginMetadataRegistry {
                             placeholder: "/path/to/client-key.pem",
                             section: .advanced
                         ),
-                    ]
+                    ],
+                    category: .coordination,
+                    tagline: String(localized: "Distributed key-value store for service discovery")
                 )
             )),
             ("Cloudflare D1", PluginMetadataSnapshot(
@@ -1002,7 +1077,8 @@ extension PluginMetadataRegistry {
                     supportsForeignKeyDisable: true,
                     supportsReadOnlyMode: true,
                     supportsQueryProgress: false,
-                    requiresReconnectForDatabaseSwitch: false
+                    requiresReconnectForDatabaseSwitch: false,
+                    supportsDropDatabase: true
                 ),
                 schema: PluginMetadataSnapshot.SchemaInfo(
                     defaultSchemaName: "main",
@@ -1030,9 +1106,70 @@ extension PluginMetadataRegistry {
                             required: true,
                             section: .authentication
                         )
-                    ]
+                    ],
+                    category: .cloud,
+                    tagline: String(localized: "Serverless SQLite at the edge")
                 )
-            ))
+            )),
+            ("libSQL", PluginMetadataSnapshot(
+                displayName: "libSQL / Turso", iconName: "libsql-icon", defaultPort: 0,
+                requiresAuthentication: false, supportsForeignKeys: true, supportsSchemaEditing: true,
+                isDownloadable: true, primaryUrlScheme: "libsql", parameterStyle: .questionMark,
+                navigationModel: .standard, explainVariants: [
+                    ExplainVariant(id: "plan", label: "Query Plan", sqlPrefix: "EXPLAIN QUERY PLAN")
+                ],
+                pathFieldRole: .database,
+                supportsHealthMonitor: true, urlSchemes: ["libsql"], postConnectActions: [],
+                brandColorHex: "#4FF8D2",
+                queryLanguageName: "SQL", editorLanguage: .sql,
+                connectionMode: .apiOnly, supportsDatabaseSwitching: false,
+                supportsColumnReorder: false,
+                capabilities: PluginMetadataSnapshot.CapabilityFlags(
+                    supportsSchemaSwitching: false,
+                    supportsImport: false,
+                    supportsExport: true,
+                    supportsSSH: false,
+                    supportsSSL: false,
+                    supportsCascadeDrop: false,
+                    supportsForeignKeyDisable: true,
+                    supportsReadOnlyMode: true,
+                    supportsQueryProgress: false,
+                    requiresReconnectForDatabaseSwitch: false,
+                    supportsDropDatabase: false,
+                    supportsModifyColumn: false,
+                    supportsRenameColumn: true
+                ),
+                schema: PluginMetadataSnapshot.SchemaInfo(
+                    defaultSchemaName: "main",
+                    defaultGroupName: "main",
+                    tableEntityName: "Tables",
+                    defaultPrimaryKeyColumn: nil,
+                    immutableColumns: [],
+                    systemDatabaseNames: [],
+                    systemSchemaNames: [],
+                    fileExtensions: [],
+                    databaseGroupingStrategy: .flat,
+                    structureColumnFields: [.name, .type, .nullable, .defaultValue]
+                ),
+                editor: PluginMetadataSnapshot.EditorConfig(
+                    sqlDialect: d1Dialect,
+                    statementCompletions: [],
+                    columnTypesByCategory: d1ColumnTypes
+                ),
+                connection: PluginMetadataSnapshot.ConnectionConfig(
+                    additionalConnectionFields: [
+                        ConnectionField(
+                            id: "databaseUrl",
+                            label: String(localized: "Database URL"),
+                            placeholder: "https://your-db.turso.io",
+                            required: true,
+                            section: .authentication
+                        )
+                    ],
+                    category: .cloud,
+                    tagline: String(localized: "Distributed SQLite by Turso")
+                )
+            )),
         ] + cloudPluginDefaults()
     }
     // swiftlint:enable function_body_length

@@ -464,9 +464,9 @@ final class MariaDBPluginConnection: @unchecked Sendable {
         }
 
         var rows: [[String?]] = []
-        rows.reserveCapacity(min(1_000, PluginRowLimits.defaultMax))
+        rows.reserveCapacity(min(1_000, PluginRowLimits.emergencyMax))
 
-        let maxRows = PluginRowLimits.defaultMax
+        let maxRows = PluginRowLimits.emergencyMax
         var truncated = false
 
         while let rowPtr = mysql_fetch_row(resultPtr) {
@@ -500,8 +500,7 @@ final class MariaDBPluginConnection: @unchecked Sendable {
 
             for i in 0..<numFields {
                 if let fieldPtr = rowPtr[i] {
-                    let lengthValue: UInt = lengths?[i] ?? 0
-                    let length = Int(lengthValue)
+                    let length = Int(clamping: lengths?[i] ?? 0)
                     let bufferPtr = UnsafeRawBufferPointer(start: fieldPtr, count: length)
 
                     if columnTypes[i] == 255 {
@@ -622,6 +621,7 @@ final class MariaDBPluginConnection: @unchecked Sendable {
             for bind in resultBinds {
                 bind.length?.deallocate()
                 bind.is_null?.deallocate()
+                bind.error?.deallocate()
             }
         }
 
@@ -635,6 +635,7 @@ final class MariaDBPluginConnection: @unchecked Sendable {
             resultBinds[i].buffer_length = UInt(bufferSize)
             resultBinds[i].length = UnsafeMutablePointer<UInt>.allocate(capacity: 1)
             resultBinds[i].is_null = UnsafeMutablePointer<my_bool>.allocate(capacity: 1)
+            resultBinds[i].error = UnsafeMutablePointer<my_bool>.allocate(capacity: 1)
         }
 
         if mysql_stmt_bind_result(stmt, &resultBinds) != 0 {
@@ -642,10 +643,13 @@ final class MariaDBPluginConnection: @unchecked Sendable {
         }
 
         var rows: [[String?]] = []
-        let maxRows = PluginRowLimits.defaultMax
+        let maxRows = PluginRowLimits.emergencyMax
         var truncated = false
 
-        while mysql_stmt_fetch(stmt) == 0 {
+        while true {
+            let fetchStatus = mysql_stmt_fetch(stmt)
+            if fetchStatus != 0 && fetchStatus != MYSQL_DATA_TRUNCATED { break }
+
             stateLock.lock()
             let shouldCancel = _isCancelled
             if shouldCancel { _isCancelled = false }
@@ -657,6 +661,25 @@ final class MariaDBPluginConnection: @unchecked Sendable {
             if rows.count >= maxRows {
                 truncated = true
                 break
+            }
+
+            // Re-fetch truncated columns with correctly sized buffers
+            if fetchStatus == MYSQL_DATA_TRUNCATED {
+                for i in 0..<numFields {
+                    let actualLength = Int(resultBinds[i].length?.pointee ?? 0)
+                    if actualLength > Int(resultBinds[i].buffer_length) {
+                        let newBuffer = UnsafeMutableRawPointer.allocate(
+                            byteCount: actualLength, alignment: 1
+                        )
+                        resultBuffers[i].deallocate()
+                        resultBuffers[i] = newBuffer
+                        resultBinds[i].buffer = newBuffer
+                        resultBinds[i].buffer_length = UInt(actualLength)
+                        if mysql_stmt_fetch_column(stmt, &resultBinds[i], UInt32(i), 0) != 0 {
+                            logger.warning("mysql_stmt_fetch_column failed for column \(i)")
+                        }
+                    }
+                }
             }
 
             var row: [String?] = []
@@ -778,6 +801,160 @@ final class MariaDBPluginConnection: @unchecked Sendable {
             rows: fetchResult.rows, affectedRows: UInt64(fetchResult.rows.count),
             insertId: 0, isTruncated: fetchResult.isTruncated
         )
+    }
+
+    // MARK: - Streaming Query
+
+    func streamQuery(_ query: String) -> AsyncThrowingStream<PluginStreamElement, Error> {
+        let queryToRun = String(query)
+        let queue = self.queue
+
+        final class StreamState: @unchecked Sendable {
+            var resultPtr: UnsafeMutablePointer<MYSQL_RES>?
+            var drained = false
+            let lock = NSLock()
+        }
+        let streamState = StreamState()
+
+        return AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
+            continuation.onTermination = { @Sendable _ in
+                queue.async {
+                    streamState.lock.lock()
+                    let ptr = streamState.resultPtr
+                    let alreadyDrained = streamState.drained
+                    streamState.drained = true
+                    streamState.lock.unlock()
+                    guard let resultPtr = ptr, !alreadyDrained else { return }
+                    while mysql_fetch_row(resultPtr) != nil {}
+                    mysql_free_result(resultPtr)
+                }
+            }
+
+            queue.async { [self] in
+                guard !isShuttingDown, let mysql = self.mysql else {
+                    continuation.finish(throwing: MariaDBPluginError.notConnected)
+                    return
+                }
+
+                let queryStatus = queryToRun.withCString { queryPtr in
+                    mysql_real_query(mysql, queryPtr, UInt(queryToRun.utf8.count))
+                }
+
+                if queryStatus != 0 {
+                    continuation.finish(throwing: self.getError())
+                    return
+                }
+
+                let resultPtr = mysql_use_result(mysql)
+
+                if resultPtr == nil {
+                    let fieldCount = mysql_field_count(mysql)
+                    if fieldCount == 0 {
+                        continuation.finish()
+                    } else {
+                        continuation.finish(throwing: self.getError())
+                    }
+                    return
+                }
+
+                streamState.lock.lock()
+                streamState.resultPtr = resultPtr
+                streamState.lock.unlock()
+
+                let numFields = Int(mysql_num_fields(resultPtr))
+                var columns: [String] = []
+                var columnTypes: [UInt32] = []
+                var columnTypeNames: [String] = []
+                columns.reserveCapacity(numFields)
+                columnTypes.reserveCapacity(numFields)
+                columnTypeNames.reserveCapacity(numFields)
+
+                if let fields = mysql_fetch_fields(resultPtr) {
+                    for i in 0..<numFields {
+                        let field = fields[i]
+                        if let namePtr = field.name {
+                            columns.append(String(cString: namePtr))
+                        } else {
+                            columns.append("column_\(i)")
+                        }
+                        let fieldFlags = UInt(field.flags)
+                        var fieldType = field.type.rawValue
+                        if (fieldFlags & mysqlEnumFlag) != 0 { fieldType = 247 }
+                        if (fieldFlags & mysqlSetFlag) != 0 { fieldType = 248 }
+                        columnTypes.append(fieldType)
+                        columnTypeNames.append(mysqlTypeToString(fields + i))
+                    }
+                }
+
+                continuation.yield(.header(PluginStreamHeader(
+                    columns: columns,
+                    columnTypeNames: columnTypeNames,
+                    estimatedRowCount: nil
+                )))
+
+                let batchSize = 5_000
+                var batch: [PluginRow] = []
+                batch.reserveCapacity(batchSize)
+                while let rowPtr = mysql_fetch_row(resultPtr) {
+                    if Task.isCancelled {
+                        while mysql_fetch_row(resultPtr) != nil {}
+                        streamState.lock.lock()
+                        streamState.drained = true
+                        streamState.lock.unlock()
+                        mysql_free_result(resultPtr)
+                        continuation.finish(throwing: CancellationError())
+                        return
+                    }
+
+                    let lengths = mysql_fetch_lengths(resultPtr)
+
+                    var row: [String?] = []
+                    row.reserveCapacity(numFields)
+
+                    for i in 0..<numFields {
+                        if let fieldPtr = rowPtr[i] {
+                            let length = Int(clamping: lengths?[i] ?? 0)
+                            let bufferPtr = UnsafeRawBufferPointer(start: fieldPtr, count: length)
+
+                            if columnTypes[i] == 255 {
+                                row.append(GeometryWKBParser.parse(bufferPtr))
+                            } else if let str = String(bytes: bufferPtr, encoding: .utf8) {
+                                row.append(str)
+                            } else {
+                                row.append(String(bytes: bufferPtr, encoding: .isoLatin1) ?? "")
+                            }
+                        } else {
+                            row.append(nil)
+                        }
+                    }
+
+                    batch.append(row)
+                    if batch.count >= batchSize {
+                        continuation.yield(.rows(batch))
+                        batch.removeAll(keepingCapacity: true)
+                    }
+                }
+                if !batch.isEmpty {
+                    continuation.yield(.rows(batch))
+                }
+
+                if mysql_errno(mysql) != 0 {
+                    let error = self.getError()
+                    streamState.lock.lock()
+                    streamState.drained = true
+                    streamState.lock.unlock()
+                    mysql_free_result(resultPtr)
+                    continuation.finish(throwing: error)
+                    return
+                }
+
+                streamState.lock.lock()
+                streamState.drained = true
+                streamState.lock.unlock()
+                mysql_free_result(resultPtr)
+                continuation.finish()
+            }
+        }
     }
 
     // MARK: - Server Information

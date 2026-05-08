@@ -258,6 +258,77 @@ private actor DuckDBConnectionActor {
         return raw
     }
 
+    func streamQuery(
+        _ query: String,
+        continuation: AsyncThrowingStream<PluginStreamElement, Error>.Continuation
+    ) throws {
+        guard let conn = connection else {
+            throw DuckDBPluginError.notConnected
+        }
+
+        var result = duckdb_result()
+        let state = duckdb_query(conn, query, &result)
+
+        if state == DuckDBError {
+            let errorMsg: String
+            if let errPtr = duckdb_result_error(&result) {
+                errorMsg = String(cString: errPtr)
+            } else {
+                errorMsg = "Unknown DuckDB error"
+            }
+            duckdb_destroy_result(&result)
+            throw DuckDBPluginError.queryFailed(errorMsg)
+        }
+
+        let colCount = duckdb_column_count(&result)
+        let rowCount = duckdb_row_count(&result)
+
+        var columns: [String] = []
+        var columnTypeNames: [String] = []
+
+        for i in 0..<colCount {
+            if let namePtr = duckdb_column_name(&result, i) {
+                columns.append(String(cString: namePtr))
+            } else {
+                columns.append("column_\(i)")
+            }
+            let colType = duckdb_column_type(&result, i)
+            columnTypeNames.append(Self.typeName(for: colType))
+        }
+
+        continuation.yield(.header(PluginStreamHeader(
+            columns: columns,
+            columnTypeNames: columnTypeNames,
+            estimatedRowCount: Int(rowCount)
+        )))
+
+        for row in 0..<rowCount {
+            if Task.isCancelled {
+                duckdb_destroy_result(&result)
+                continuation.finish(throwing: CancellationError())
+                return
+            }
+
+            var rowData: [String?] = []
+            for col in 0..<colCount {
+                if duckdb_value_is_null(&result, col, row) {
+                    rowData.append(nil)
+                } else if let valPtr = duckdb_value_varchar(&result, col, row) {
+                    rowData.append(String(cString: valPtr))
+                    duckdb_free(valPtr)
+                } else {
+                    let colType = duckdb_column_type(&result, col)
+                    rowData.append(Self.extractFallbackValue(&result, col: col, row: row, type: colType))
+                }
+            }
+
+            continuation.yield(.rows([rowData]))
+        }
+
+        duckdb_destroy_result(&result)
+        continuation.finish()
+    }
+
     private static func extractResult(
         from result: inout duckdb_result,
         startTime: Date
@@ -285,8 +356,8 @@ private actor DuckDBConnectionActor {
         var rows: [[String?]] = []
         var truncated = false
 
-        let maxRows = min(rowCount, UInt64(PluginRowLimits.defaultMax))
-        if rowCount > UInt64(PluginRowLimits.defaultMax) {
+        let maxRows = min(rowCount, UInt64(PluginRowLimits.emergencyMax))
+        if rowCount > UInt64(PluginRowLimits.emergencyMax) {
             truncated = true
         }
 
@@ -563,8 +634,12 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         try await connectionActor.open(path: path)
 
         // Enable auto-install and auto-load of extensions (e.g. core_functions)
-        try? await connectionActor.executeQuery("SET autoinstall_known_extensions=1")
-        try? await connectionActor.executeQuery("SET autoload_known_extensions=1")
+        do {
+            try await connectionActor.executeQuery("SET autoinstall_known_extensions=1")
+            try await connectionActor.executeQuery("SET autoload_known_extensions=1")
+        } catch {
+            Self.logger.warning("Failed to enable DuckDB extension autoloading: \(error.localizedDescription)")
+        }
 
         if let conn = await connectionActor.connectionHandleForInterrupt {
             setInterruptHandle(conn)
@@ -624,20 +699,20 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         duckdb_interrupt(conn)
     }
 
-    // MARK: - Pagination
+    // MARK: - Streaming
 
-    func fetchRowCount(query: String) async throws -> Int {
-        let baseQuery = stripLimitOffset(from: query)
-        let countQuery = "SELECT COUNT(*) FROM (\(baseQuery)) AS _count_subquery"
-        let result = try await execute(query: countQuery)
-        guard let firstRow = result.rows.first, let countStr = firstRow.first else { return 0 }
-        return Int(countStr ?? "0") ?? 0
-    }
+    func streamRows(query: String) -> AsyncThrowingStream<PluginStreamElement, Error> {
+        let actor = connectionActor
 
-    func fetchRows(query: String, offset: Int, limit: Int) async throws -> PluginQueryResult {
-        let baseQuery = stripLimitOffset(from: query)
-        let paginatedQuery = "\(baseQuery) LIMIT \(limit) OFFSET \(offset)"
-        return try await execute(query: paginatedQuery)
+        return AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
+            Task {
+                do {
+                    try await actor.streamQuery(query, continuation: continuation)
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
     }
 
     // MARK: - Schema Operations
@@ -969,10 +1044,6 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         PluginDatabaseMetadata(name: database)
     }
 
-    func createDatabase(name: String, charset: String, collation: String?) async throws {
-        throw DuckDBPluginError.unsupportedOperation
-    }
-
     // MARK: - EXPLAIN
 
     func buildExplainQuery(_ sql: String) -> String? {
@@ -1022,95 +1093,6 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
 
     private func escapeIdentifier(_ value: String) -> String {
         value.replacingOccurrences(of: "\"", with: "\"\"")
-    }
-
-    private func stripLimitOffset(from query: String) -> String {
-        var result = query.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Strip trailing semicolons
-        while result.hasSuffix(";") {
-            result = String(result.dropLast()).trimmingCharacters(in: .whitespaces)
-        }
-
-        // Only strip LIMIT/OFFSET at the top level (depth 0) from the end.
-        // Strip OFFSET first (comes after LIMIT), then LIMIT.
-        for keyword in ["OFFSET", "LIMIT"] {
-            let upper = result.uppercased() as NSString
-            if let pos = findLastTopLevelKeyword(keyword, upper: upper, length: upper.length) {
-                result = (result as NSString).substring(to: pos)
-                    .trimmingCharacters(in: .whitespaces)
-            }
-        }
-
-        return result
-    }
-
-    private func findLastTopLevelKeyword(
-        _ keyword: String,
-        upper: NSString,
-        length: Int
-    ) -> Int? {
-        let keyLen = keyword.count
-        let parenOpen = UInt16(UnicodeScalar("(").value)
-        let parenClose = UInt16(UnicodeScalar(")").value)
-        let singleQuote = UInt16(UnicodeScalar("'").value)
-        let doubleQuote = UInt16(UnicodeScalar("\"").value)
-
-        var depth = 0
-        var inString = false
-        var inIdentifier = false
-        var i = length - 1
-
-        while i >= 0 {
-            let ch = upper.character(at: i)
-
-            if inString {
-                if ch == singleQuote {
-                    if i > 0 && upper.character(at: i - 1) == singleQuote {
-                        i -= 1
-                    } else {
-                        inString = false
-                    }
-                }
-            } else if inIdentifier {
-                if ch == doubleQuote {
-                    if i > 0 && upper.character(at: i - 1) == doubleQuote {
-                        i -= 1
-                    } else {
-                        inIdentifier = false
-                    }
-                }
-            } else {
-                if ch == singleQuote {
-                    inString = true
-                } else if ch == doubleQuote {
-                    inIdentifier = true
-                } else if ch == parenClose {
-                    depth += 1
-                } else if ch == parenOpen {
-                    depth -= 1
-                } else if depth == 0 {
-                    let start = i - keyLen + 1
-                    if start >= 0 {
-                        let candidate = upper.substring(with: NSRange(location: start, length: keyLen))
-                        if candidate == keyword {
-                            let beforeOk = start == 0 || {
-                                guard let scalar = Unicode.Scalar(upper.character(at: start - 1)) else {
-                                    return false
-                                }
-                                return CharacterSet.whitespaces.contains(scalar)
-                            }()
-                            if beforeOk {
-                                return start
-                            }
-                        }
-                    }
-                }
-            }
-            i -= 1
-        }
-
-        return nil
     }
 
     private func fetchPrimaryKeyColumns(
@@ -1221,6 +1203,82 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             def += " ON UPDATE \(fk.onUpdate)"
         }
         return def
+    }
+
+    private func qualifiedTableName(_ table: String) -> String {
+        "\(quoteIdentifier(_currentSchema)).\(quoteIdentifier(table))"
+    }
+
+    // MARK: - ALTER TABLE DDL
+
+    func generateAddColumnSQL(table: String, column: PluginColumnDefinition) -> String? {
+        let qt = qualifiedTableName(table)
+        let colDef = duckdbColumnDefinition(column, inlinePK: false)
+        return "ALTER TABLE \(qt) ADD COLUMN \(colDef)"
+    }
+
+    func generateModifyColumnSQL(table: String, oldColumn: PluginColumnDefinition, newColumn: PluginColumnDefinition) -> String? {
+        let qt = qualifiedTableName(table)
+        var stmts: [String] = []
+
+        if oldColumn.name != newColumn.name {
+            stmts.append("ALTER TABLE \(qt) RENAME COLUMN \(quoteIdentifier(oldColumn.name)) TO \(quoteIdentifier(newColumn.name))")
+        }
+
+        let colName = quoteIdentifier(newColumn.name)
+
+        if oldColumn.dataType.uppercased() != newColumn.dataType.uppercased() {
+            stmts.append("ALTER TABLE \(qt) ALTER COLUMN \(colName) TYPE \(newColumn.dataType)")
+        }
+
+        if oldColumn.isNullable != newColumn.isNullable {
+            let clause = newColumn.isNullable ? "DROP NOT NULL" : "SET NOT NULL"
+            stmts.append("ALTER TABLE \(qt) ALTER COLUMN \(colName) \(clause)")
+        }
+
+        if oldColumn.defaultValue != newColumn.defaultValue {
+            if let defaultValue = newColumn.defaultValue {
+                stmts.append("ALTER TABLE \(qt) ALTER COLUMN \(colName) SET DEFAULT \(duckdbDefaultValue(defaultValue))")
+            } else {
+                stmts.append("ALTER TABLE \(qt) ALTER COLUMN \(colName) DROP DEFAULT")
+            }
+        }
+
+        return stmts.isEmpty ? nil : stmts.joined(separator: ";\n")
+    }
+
+    func generateDropColumnSQL(table: String, columnName: String) -> String? {
+        "ALTER TABLE \(qualifiedTableName(table)) DROP COLUMN \(quoteIdentifier(columnName))"
+    }
+
+    func generateAddIndexSQL(table: String, index: PluginIndexDefinition) -> String? {
+        duckdbIndexDefinition(index, qualifiedTable: qualifiedTableName(table))
+    }
+
+    func generateDropIndexSQL(table: String, indexName: String) -> String? {
+        "DROP INDEX \(quoteIdentifier(indexName))"
+    }
+
+    func generateAddForeignKeySQL(table: String, fk: PluginForeignKeyDefinition) -> String? {
+        "ALTER TABLE \(qualifiedTableName(table)) ADD \(duckdbForeignKeyDefinition(fk))"
+    }
+
+    func generateDropForeignKeySQL(table: String, constraintName: String) -> String? {
+        "ALTER TABLE \(qualifiedTableName(table)) DROP CONSTRAINT \(quoteIdentifier(constraintName))"
+    }
+
+    func generateModifyPrimaryKeySQL(table: String, oldColumns: [String], newColumns: [String], constraintName: String?) -> [String]? {
+        let qt = qualifiedTableName(table)
+        var stmts: [String] = []
+        if !oldColumns.isEmpty {
+            let name = constraintName.map { quoteIdentifier($0) } ?? "/* unknown constraint */"
+            stmts.append("ALTER TABLE \(qt) DROP CONSTRAINT \(name)")
+        }
+        if !newColumns.isEmpty {
+            let cols = newColumns.map { quoteIdentifier($0) }.joined(separator: ", ")
+            stmts.append("ALTER TABLE \(qt) ADD PRIMARY KEY (\(cols))")
+        }
+        return stmts.isEmpty ? nil : stmts
     }
 
     private static let indexColumnsRegex = try? NSRegularExpression(

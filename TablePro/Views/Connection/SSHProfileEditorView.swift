@@ -50,6 +50,7 @@ struct SSHProfileEditorView: View {
     @State private var connectionsUsingProfile = 0
     @State private var isTesting = false
     @State private var testSucceeded = false
+    @State private var testError: String?
     @State private var testTask: Task<Void, Never>?
 
     private var isStoredProfile: Bool {
@@ -93,10 +94,13 @@ struct SSHProfileEditorView: View {
             Divider()
             bottomBar
         }
-        .frame(minWidth: 480, minHeight: 500)
+        .frame(minWidth: 480, idealHeight: 500)
         .onAppear {
-            sshConfigEntries = SSHConfigParser.parse()
             loadExistingProfile()
+        }
+        .task {
+            let entries = await Task.detached { SSHConfigParser.parse() }.value
+            sshConfigEntries = entries
         }
         .onChange(of: host) { _, _ in testSucceeded = false }
         .onChange(of: port) { _, _ in testSucceeded = false }
@@ -150,13 +154,17 @@ struct SSHProfileEditorView: View {
             if authMethod == .password {
                 SecureField(String(localized: "Password"), text: $sshPassword)
             } else if authMethod == .sshAgent {
-                Picker("Agent Socket", selection: $agentSocketOption) {
+                Picker(String(localized: "Agent Socket"), selection: $agentSocketOption) {
                     ForEach(SSHAgentSocketOption.allCases) { option in
                         Text(option.displayName).tag(option)
                     }
                 }
                 if agentSocketOption == .custom {
-                    TextField("Custom Path", text: $customAgentSocketPath, prompt: Text("/path/to/agent.sock"))
+                    TextField(
+                        String(localized: "Custom Path"),
+                        text: $customAgentSocketPath,
+                        prompt: Text("/path/to/agent.sock")
+                    )
                 }
                 Text("Keys are provided by the SSH agent (e.g. 1Password, ssh-agent).")
                     .font(.caption)
@@ -221,22 +229,23 @@ struct SSHProfileEditorView: View {
     private var jumpHostsSection: some View {
         Section {
             DisclosureGroup(String(localized: "Jump Hosts")) {
-                ForEach($jumpHosts) { $jumpHost in
+                ForEach(jumpHosts) { jumpHost in
+                    let jumpHostBinding = $jumpHosts.element(jumpHost)
                     DisclosureGroup {
-                        TextField(String(localized: "Host"), text: $jumpHost.host, prompt: Text("bastion.example.com"))
+                        TextField(String(localized: "Host"), text: jumpHostBinding.host, prompt: Text("bastion.example.com"))
                         HStack {
                             TextField(
                                 String(localized: "Port"),
                                 text: Binding(
-                                    get: { String(jumpHost.port) },
-                                    set: { jumpHost.port = Int($0) ?? 22 }
+                                    get: { jumpHostBinding.wrappedValue.port.map(String.init) ?? "" },
+                                    set: { jumpHostBinding.wrappedValue.port = Int($0) }
                                 ),
                                 prompt: Text("22")
                             )
                             .frame(width: 80)
-                            TextField(String(localized: "Username"), text: $jumpHost.username, prompt: Text("admin"))
+                            TextField(String(localized: "Username"), text: jumpHostBinding.username, prompt: Text("admin"))
                         }
-                        Picker(String(localized: "Auth"), selection: $jumpHost.authMethod) {
+                        Picker(String(localized: "Auth"), selection: jumpHostBinding.authMethod) {
                             ForEach(SSHJumpAuthMethod.allCases) { method in
                                 Text(method.rawValue).tag(method)
                             }
@@ -244,9 +253,9 @@ struct SSHProfileEditorView: View {
                         if jumpHost.authMethod == .privateKey {
                             LabeledContent(String(localized: "Key File")) {
                                 HStack {
-                                    TextField("", text: $jumpHost.privateKeyPath, prompt: Text("~/.ssh/id_rsa"))
+                                    TextField("", text: jumpHostBinding.privateKeyPath, prompt: Text("~/.ssh/id_rsa"))
                                     Button(String(localized: "Browse")) {
-                                        browseForJumpHostKey(jumpHost: $jumpHost)
+                                        browseForJumpHostKey(jumpHost: jumpHostBinding)
                                     }
                                     .controlSize(.small)
                                 }
@@ -265,9 +274,12 @@ struct SSHProfileEditorView: View {
                                 let idToRemove = jumpHost.id
                                 withAnimation { jumpHosts.removeAll { $0.id == idToRemove } }
                             } label: {
-                                Image(systemName: "minus.circle.fill").foregroundStyle(.red)
+                                Image(systemName: "minus.circle.fill")
+                                    .frame(width: 24, height: 24)
+                                    .foregroundStyle(Color(nsColor: .systemRed))
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel(String(localized: "Remove jump host"))
                         }
                     }
                 }
@@ -300,12 +312,12 @@ struct SSHProfileEditorView: View {
                 } label: {
                     Text("Delete Profile")
                 }
-                .confirmationDialog(
+                .alert(
                     "Delete SSH Profile?",
-                    isPresented: $showingDeleteConfirmation,
-                    titleVisibility: .visible
+                    isPresented: $showingDeleteConfirmation
                 ) {
                     Button("Delete", role: .destructive) { deleteProfile() }
+                    Button("Cancel", role: .cancel) {}
                 } message: {
                     if connectionsUsingProfile > 0 {
                         Text("\(connectionsUsingProfile) connection(s) use this profile. They will fall back to no SSH tunnel.")
@@ -320,14 +332,32 @@ struct SSHProfileEditorView: View {
                     if isTesting {
                         ProgressView()
                             .controlSize(.small)
+                    } else if testSucceeded {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(Color(nsColor: .systemGreen))
+                    } else if testError != nil {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(Color(nsColor: .systemRed))
                     } else {
-                        Image(systemName: testSucceeded ? "checkmark.circle.fill" : "bolt.horizontal")
-                            .foregroundStyle(testSucceeded ? .green : .secondary)
+                        Image(systemName: "antenna.radiowaves.left.and.right")
+                            .foregroundStyle(.secondary)
                     }
                     Text("Test Connection")
                 }
             }
             .disabled(isTesting || !isValid)
+
+            if testSucceeded {
+                Text(String(localized: "Connected"))
+                    .font(.caption)
+                    .foregroundStyle(Color(nsColor: .systemGreen))
+            } else if let testError {
+                Label(testError, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(Color(nsColor: .systemOrange))
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+            }
 
             Spacer()
 
@@ -347,7 +377,7 @@ struct SSHProfileEditorView: View {
         guard let profile = existingProfile else { return }
         profileName = profile.name
         host = profile.host
-        port = String(profile.port)
+        port = profile.port.map(String.init) ?? ""
         username = profile.username
         authMethod = profile.authMethod
         privateKeyPath = profile.privateKeyPath
@@ -376,11 +406,10 @@ struct SSHProfileEditorView: View {
             id: profileId,
             name: profileName.trimmingCharacters(in: .whitespaces),
             host: host,
-            port: Int(port) ?? 22,
+            port: Int(port),
             username: username,
             authMethod: authMethod,
             privateKeyPath: privateKeyPath,
-            useSSHConfig: !selectedSSHConfigHost.isEmpty,
             agentSocketPath: resolvedAgentSocketPath,
             jumpHosts: jumpHosts,
             totpMode: totpMode,
@@ -418,19 +447,17 @@ struct SSHProfileEditorView: View {
         dismiss()
     }
 
-    private func testSSHConnection() {
+    func testSSHConnection() {
         isTesting = true
         testSucceeded = false
-        let window = NSApp.keyWindow
+        testError = nil
 
-        // Use .none for promptAtConnect during test — avoids showing an uncontextualized
-        // TOTP modal. The SSH connection is still tested (auth without TOTP).
         let testTotpMode: TOTPMode = totpMode == .promptAtConnect ? .none : totpMode
 
         let config = SSHConfiguration(
             enabled: true,
             host: host,
-            port: Int(port) ?? 22,
+            port: Int(port),
             username: username,
             authMethod: authMethod,
             privateKeyPath: privateKeyPath,
@@ -464,11 +491,7 @@ struct SSHProfileEditorView: View {
                 await MainActor.run {
                     isTesting = false
                     testSucceeded = false
-                    AlertHelper.showErrorSheet(
-                        title: String(localized: "SSH Connection Test Failed"),
-                        message: error.localizedDescription,
-                        window: window
-                    )
+                    testError = error.localizedDescription
                 }
             }
         }
@@ -484,38 +507,18 @@ struct SSHProfileEditorView: View {
     // MARK: - SSH Config Helpers
 
     private func applySSHConfigEntry(_ configHost: String) {
-        guard let entry = sshConfigEntries.first(where: { $0.host == configHost }) else { return }
-
-        host = entry.hostname ?? entry.host
-        if let entryPort = entry.port {
-            port = String(entryPort)
-        }
-        if let user = entry.user {
-            username = user
-        }
-        if let agentPath = entry.identityAgent {
-            let option = SSHAgentSocketOption(socketPath: agentPath)
-            agentSocketOption = option
-            if option == .custom {
-                customAgentSocketPath = agentPath.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-            authMethod = .sshAgent
-        } else if let keyPath = entry.identityFile {
-            privateKeyPath = keyPath
-            authMethod = .privateKey
-        }
-        if let proxyJump = entry.proxyJump {
-            jumpHosts = SSHConfigParser.parseProxyJump(proxyJump)
-        }
+        guard !configHost.isEmpty else { return }
+        host = configHost
     }
 
     private func browseForPrivateKey() {
+        guard let window = NSApp.keyWindow else { return }
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh")
         panel.showsHiddenFiles = true
-        panel.begin { response in
+        panel.beginSheetModal(for: window) { response in
             if response == .OK, let url = panel.url {
                 privateKeyPath = url.path(percentEncoded: false)
             }
@@ -523,12 +526,13 @@ struct SSHProfileEditorView: View {
     }
 
     private func browseForJumpHostKey(jumpHost: Binding<SSHJumpHost>) {
+        guard let window = NSApp.keyWindow else { return }
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh")
         panel.showsHiddenFiles = true
-        panel.begin { response in
+        panel.beginSheetModal(for: window) { response in
             if response == .OK, let url = panel.url {
                 jumpHost.wrappedValue.privateKeyPath = url.path(percentEncoded: false)
             }

@@ -24,14 +24,7 @@ internal extension SafeModeLevel {
         case .alertFull: return String(localized: "Alert (Full)")
         case .safeMode: return String(localized: "Safe Mode")
         case .safeModeFull: return String(localized: "Safe Mode (Full)")
-        case .readOnly: return String(localized: "Read-Only")
-        }
-    }
-
-    var requiresPro: Bool {
-        switch self {
-        case .safeMode, .safeModeFull, .readOnly: return true
-        case .silent, .alert, .alertFull: return false
+        case .readOnly: return String(localized: "Read Only")
         }
     }
 
@@ -62,7 +55,7 @@ internal extension SafeModeLevel {
 
     var iconName: String {
         switch self {
-        case .silent: return "lock.open"
+        case .silent: return "lock.open.fill"
         case .alert: return "exclamationmark.triangle"
         case .alertFull: return "exclamationmark.triangle.fill"
         case .safeMode: return "lock.shield"
@@ -74,8 +67,17 @@ internal extension SafeModeLevel {
     var badgeColor: Color {
         switch self {
         case .silent: return .secondary
-        case .alert, .alertFull: return .orange
-        case .safeMode, .safeModeFull, .readOnly: return .red
+        case .alert, .alertFull: return Color(nsColor: .systemOrange)
+        case .safeMode, .safeModeFull, .readOnly: return Color(nsColor: .systemRed)
+        }
+    }
+
+    static func from(urlInteger value: Int) -> SafeModeLevel? {
+        switch value {
+        case 0: return .silent
+        case 1: return .alert
+        case 2: return .readOnly
+        default: return nil
         }
     }
 }

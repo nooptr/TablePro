@@ -14,16 +14,30 @@ extension MainContentView {
     /// Compute selected row data for right sidebar display
     var selectedRowDataForSidebar: [(column: String, value: String?, type: String)]? {
         guard let tab = coordinator.tabManager.selectedTab,
-              !selectedRowIndices.isEmpty,
-              let firstIndex = selectedRowIndices.min(),
-              firstIndex < tab.resultRows.count else { return nil }
+              !coordinator.selectionState.indices.isEmpty,
+              let firstIndex = coordinator.selectionState.indices.min() else { return nil }
+        let tableRows = coordinator.tabSessionRegistry.tableRows(for: tab.id)
+        guard firstIndex < tableRows.rows.count else { return nil }
 
-        let row = tab.resultRows[firstIndex]
+        let row = tableRows.rows[firstIndex].values
         var data: [(column: String, value: String?, type: String)] = []
 
-        for (i, col) in tab.resultColumns.enumerated() {
-            let value = i < row.count ? row[i] : nil
-            let type = i < tab.columnTypes.count ? tab.columnTypes[i].displayName : "string"
+        let service = ValueDisplayFormatService.shared
+        let connId = coordinator.connection.id
+        let tblName = tab.tableContext.tableName
+
+        for (i, col) in tableRows.columns.enumerated() {
+            var value = i < row.count ? row[i] : nil
+            let type = i < tableRows.columnTypes.count ? tableRows.columnTypes[i].displayName : "string"
+
+            // Apply display format if active
+            if let rawValue = value {
+                let format = service.effectiveFormat(columnName: col, connectionId: connId, tableName: tblName)
+                if format != .raw {
+                    value = ValueDisplayFormatService.applyFormat(rawValue, format: format)
+                }
+            }
+
             data.append((column: col, value: value, type: type))
         }
 
@@ -36,16 +50,15 @@ extension MainContentView {
     var isSidebarEditable: Bool {
         guard !coordinator.safeModeLevel.blocksAllWrites,
               let tab = coordinator.tabManager.selectedTab,
-              tab.tabType == .table || tab.tableName != nil,
-              !selectedRowIndices.isEmpty else {
+              tab.tabType == .table || tab.tableContext.tableName != nil,
+              !coordinator.selectionState.indices.isEmpty else {
             return false
         }
         return true
     }
 
-    /// Check if selected row is deleted
     var isSelectedRowDeleted: Bool {
-        guard let firstIndex = selectedRowIndices.min() else { return false }
+        guard let firstIndex = coordinator.selectionState.indices.min() else { return false }
         return coordinator.changeManager.isRowDeleted(firstIndex)
     }
 
@@ -68,15 +81,15 @@ extension MainContentView {
         )
     }
 
-    // MARK: - Show Structure Binding
+    // MARK: - Results View Mode Binding
 
-    /// Binding for showStructure state
-    var showStructureBinding: Binding<Bool> {
+    /// Binding for resultsViewMode state
+    var resultsViewModeBinding: Binding<ResultsViewMode> {
         Binding(
-            get: { coordinator.tabManager.selectedTab?.showStructure ?? false },
+            get: { coordinator.tabManager.selectedTab?.display.resultsViewMode ?? .data },
             set: { newValue in
                 if let index = coordinator.tabManager.selectedTabIndex {
-                    coordinator.tabManager.tabs[index].showStructure = newValue
+                    coordinator.tabManager.tabs[index].display.resultsViewMode = newValue
                 }
             }
         )
@@ -91,30 +104,19 @@ extension MainContentView {
 
     // MARK: - Consolidated onChange Triggers
 
-    /// Trigger for inspector updates — combines result version and table metadata name.
-    /// Replaces separate handlers for `currentTab?.resultRows` and
-    /// `coordinator.tableMetadata?.tableName` that both only called `scheduleInspectorUpdate()`.
-    /// Uses `resultVersion` instead of the full `resultRows` array to avoid deep equality checks.
     var inspectorTrigger: InspectorTrigger {
         InspectorTrigger(
-            tableName: currentTab?.tableName,
-            resultVersion: currentTab?.resultVersion ?? -1,
-            metadataVersion: currentTab?.metadataVersion ?? -1,
-            metadataTableName: coordinator.tableMetadata?.tableName
+            tableName: currentTab?.tableContext.tableName,
+            schemaVersion: currentTab?.schemaVersion ?? -1,
+            metadataVersion: currentTab?.metadataVersion ?? -1
         )
     }
 }
 
-// MARK: - Equatable Trigger Types
-
-/// Lightweight equatable value combining tab table name, result version, and metadata table name
-/// for consolidated inspector onChange observation. Folding `tableName` here avoids a separate
-/// `onChange(of: currentTab?.tableName)` handler that would cascade with this trigger.
 struct InspectorTrigger: Equatable {
     let tableName: String?
-    let resultVersion: Int
+    let schemaVersion: Int
     let metadataVersion: Int
-    let metadataTableName: String?
 }
 
 /// Lightweight equatable value combining all pending-change sources

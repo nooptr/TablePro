@@ -51,11 +51,10 @@ struct HexEditorContentView: View {
 
             Divider()
 
-            VStack(spacing: 4) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text("Editable Hex")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
 
                 HexInputTextView(text: $editableHex)
                     .frame(height: 80)
@@ -68,11 +67,11 @@ struct HexEditorContentView: View {
                     if isTruncated {
                         Text(String(localized: "Truncated — read only"))
                             .font(.caption)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(Color(nsColor: .systemOrange))
                     } else if !isValid, !editableHex.isEmpty {
                         Text(String(localized: "Invalid hex"))
                             .font(.caption)
-                            .foregroundStyle(.red)
+                            .foregroundStyle(Color(nsColor: .systemRed))
                     }
 
                     Spacer()
@@ -170,7 +169,7 @@ private struct HexDumpDisplayView: NSViewRepresentable {
         textView.isEditable = false
         textView.isSelectable = true
         textView.font = NSFont.monospacedSystemFont(
-            ofSize: ThemeEngine.shared.activeTheme.typography.small,
+            ofSize: 11,
             weight: .regular
         )
         textView.textContainerInset = NSSize(width: 8, height: 8)
@@ -207,7 +206,7 @@ private struct HexInputTextView: NSViewRepresentable {
         textView.isEditable = true
         textView.isSelectable = true
         textView.font = NSFont.monospacedSystemFont(
-            ofSize: ThemeEngine.shared.activeTheme.typography.medium,
+            ofSize: 12,
             weight: .regular
         )
         textView.textContainerInset = NSSize(width: 8, height: 8)

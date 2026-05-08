@@ -30,32 +30,33 @@ struct ThemePreviewCard: View {
     // MARK: - Standard Card
 
     private var standardCard: some View {
-        VStack(spacing: ThemeEngine.shared.activeTheme.spacing.xxs) {
-            thumbnail
-                .frame(width: 160, height: 100)
-                .clipShape(RoundedRectangle(cornerRadius: ThemeEngine.shared.activeTheme.cornerRadius.medium))
-                .overlay(
-                    RoundedRectangle(cornerRadius: ThemeEngine.shared.activeTheme.cornerRadius.medium)
-                        .strokeBorder(isActive ? Color.accentColor : Color.clear, lineWidth: 2.5)
-                )
-                .shadow(color: .black.opacity(0.1), radius: 2, y: 1)
+        Button(action: onSelect) {
+            VStack(spacing: 4) {
+                thumbnail
+                    .frame(width: 160, height: 100)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .strokeBorder(isActive ? Color.accentColor : Color.clear, lineWidth: 2.5)
+                    )
+                    .shadow(color: .black.opacity(0.1), radius: 2, y: 1)
 
-            VStack(spacing: 1) {
-                Text(theme.name)
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
-                    .lineLimit(1)
-                    .foregroundStyle(.primary)
+                VStack(spacing: 1) {
+                    Text(theme.name)
+                        .font(.subheadline)
+                        .lineLimit(1)
+                        .foregroundStyle(.primary)
 
-                Text(theme.isBuiltIn
-                    ? String(localized: "Built-in")
-                    : String(localized: "Custom"))
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.tiny))
-                    .foregroundStyle(.secondary)
+                    Text(theme.isBuiltIn
+                        ? String(localized: "Built-in")
+                        : String(localized: "Custom"))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
+        .buttonStyle(.plain)
         .frame(width: 160)
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onSelect)
     }
 
     // MARK: - Compact Card
@@ -103,7 +104,8 @@ struct ThemePreviewCard: View {
     private var sidebarStrip: some View {
         ZStack(alignment: .topLeading) {
             Rectangle()
-                .fill(theme.sidebar.background.swiftUIColor)
+                .fill(theme.sidebar.background?.swiftUIColor
+                    ?? Color(nsColor: .windowBackgroundColor))
 
             VStack(alignment: .leading, spacing: size == .compact ? 3 : 4) {
                 let widths: [CGFloat] = size == .compact
@@ -112,8 +114,10 @@ struct ThemePreviewCard: View {
                 ForEach(0..<4, id: \.self) { i in
                     RoundedRectangle(cornerRadius: 1)
                         .fill(i == 1
-                            ? theme.sidebar.selectedItem.swiftUIColor.opacity(0.6)
-                            : theme.sidebar.text.swiftUIColor.opacity(0.25))
+                            ? (theme.sidebar.selectedItem?.swiftUIColor
+                                ?? Color(nsColor: .selectedContentBackgroundColor)).opacity(0.6)
+                            : (theme.sidebar.text?.swiftUIColor
+                                ?? Color(nsColor: .labelColor)).opacity(0.25))
                         .frame(
                             width: widths[i],
                             height: codeLineHeight

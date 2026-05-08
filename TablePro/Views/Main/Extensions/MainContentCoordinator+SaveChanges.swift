@@ -19,7 +19,7 @@ extension MainContentCoordinator {
     ) {
         guard !safeModeLevel.blocksAllWrites else {
             if let index = tabManager.selectedTabIndex {
-                tabManager.tabs[index].errorMessage = "Cannot save changes: connection is read-only"
+                tabManager.tabs[index].execution.errorMessage = String(localized: "Cannot save changes: connection is read only")
             }
             saveCompletionContinuation?.resume(returning: false)
             saveCompletionContinuation = nil
@@ -44,7 +44,7 @@ extension MainContentCoordinator {
             )
         } catch {
             if let index = tabManager.selectedTabIndex {
-                tabManager.tabs[index].errorMessage = error.localizedDescription
+                tabManager.tabs[index].execution.errorMessage = error.localizedDescription
             }
             saveCompletionContinuation?.resume(returning: false)
             saveCompletionContinuation = nil
@@ -53,7 +53,7 @@ extension MainContentCoordinator {
 
         guard !allStatements.isEmpty else {
             if let index = tabManager.selectedTabIndex {
-                tabManager.tabs[index].errorMessage = "Could not generate SQL for changes."
+                tabManager.tabs[index].execution.errorMessage = String(localized: "Could not generate SQL for changes.")
             }
             saveCompletionContinuation?.resume(returning: false)
             saveCompletionContinuation = nil
@@ -78,7 +78,7 @@ extension MainContentCoordinator {
                 }
             }
             let connId = connection.id
-            Task { @MainActor in
+            Task {
                 let window = NSApp.keyWindow
                 let permission = await SafeModeGuard.checkPermission(
                     level: level,
@@ -176,20 +176,18 @@ extension MainContentCoordinator {
             }
         }
 
-        Task { @MainActor in
+        Task {
             let overallStartTime = Date()
 
             do {
                 guard let driver = DatabaseManager.shared.driver(for: connectionId) else {
                     if let index = tabManager.selectedTabIndex {
-                        tabManager.tabs[index].errorMessage = "Not connected to database"
+                        tabManager.tabs[index].execution.errorMessage = String(localized: "Not connected to database")
                     }
                     throw DatabaseError.notConnected
                 }
 
-                // Redis MULTI/EXEC is not a true transaction (no rollback on failure),
-                // so execute statements individually without wrapping.
-                let useTransaction = dbType != .redis
+                let useTransaction = driver.supportsTransactions
 
                 if useTransaction {
                     try await driver.beginTransaction()
@@ -210,7 +208,7 @@ extension MainContentCoordinator {
                         QueryHistoryManager.shared.recordQuery(
                             query: historySQL.hasSuffix(";") ? historySQL : historySQL + ";",
                             connectionId: conn.id,
-                            databaseName: conn.database,
+                            databaseName: activeDatabaseName,
                             executionTime: executionTime,
                             rowCount: 0,
                             wasSuccessful: true,
@@ -223,15 +221,19 @@ extension MainContentCoordinator {
                     }
                 } catch {
                     if useTransaction {
-                        try? await driver.rollbackTransaction()
+                        do {
+                            try await driver.rollbackTransaction()
+                        } catch {
+                            saveChangesLogger.error("Rollback failed: \(error.localizedDescription, privacy: .public)")
+                        }
                     }
                     throw error
                 }
 
                 changeManager.clearChangesAndUndoHistory()
                 if let index = tabManager.selectedTabIndex {
-                    tabManager.tabs[index].pendingChanges = TabPendingChanges()
-                    tabManager.tabs[index].errorMessage = nil
+                    tabManager.tabs[index].pendingChanges = TabChangeSnapshot()
+                    tabManager.tabs[index].execution.errorMessage = nil
                 }
 
                 if clearTableOps {
@@ -239,13 +241,16 @@ extension MainContentCoordinator {
                     if !deletedTables.isEmpty {
                         let tabIdsToRemove = Set(
                             tabManager.tabs
-                                .filter { $0.tabType == .table && deletedTables.contains($0.tableName ?? "") }
+                                .filter { $0.tabType == .table && deletedTables.contains($0.tableContext.tableName ?? "") }
                                 .map(\.id)
                         )
 
                         if !tabIdsToRemove.isEmpty {
                             let firstRemovedIndex = tabManager.tabs
                                 .firstIndex { tabIdsToRemove.contains($0.id) } ?? 0
+                            for tabId in tabIdsToRemove {
+                                tabSessionRegistry.removeTableRows(for: tabId)
+                            }
                             tabManager.tabs.removeAll { tabIdsToRemove.contains($0.id) }
                             if !tabManager.tabs.isEmpty {
                                 let neighborIndex = min(firstRemovedIndex, tabManager.tabs.count - 1)
@@ -256,7 +261,7 @@ extension MainContentCoordinator {
                         }
                     }
 
-                    reloadSidebar()
+                    Task { await self.refreshTables() }
                 }
 
                 if tabManager.selectedTabIndex != nil && !tabManager.tabs.isEmpty {
@@ -283,7 +288,7 @@ extension MainContentCoordinator {
                 QueryHistoryManager.shared.recordQuery(
                     query: allSQL,
                     connectionId: conn.id,
-                    databaseName: conn.database,
+                    databaseName: activeDatabaseName,
                     executionTime: executionTime,
                     rowCount: 0,
                     wasSuccessful: false,
@@ -291,7 +296,7 @@ extension MainContentCoordinator {
                 )
 
                 if let index = tabManager.selectedTabIndex {
-                    tabManager.tabs[index].errorMessage = "Save failed: \(error.localizedDescription)"
+                    tabManager.tabs[index].execution.errorMessage = String(format: String(localized: "Save failed: %@"), error.localizedDescription)
                 }
 
                 // Show error alert to user

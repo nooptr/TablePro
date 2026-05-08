@@ -32,8 +32,7 @@ internal struct EditorFontCache {
         let scale = Self.computeAccessibilityScale()
         scaleFactor = scale
         let scaledSize = round(CGFloat(min(max(fonts.editorFontSize, 11), 18)) * scale)
-        font = EditorFont(rawValue: fonts.editorFontFamily)?.font(size: scaledSize)
-            ?? NSFont.monospacedSystemFont(ofSize: scaledSize, weight: .regular)
+        font = EditorFontResolver.resolve(familyId: fonts.editorFontFamily, size: scaledSize)
         let lineNumSize = max(round((scaledSize - 2)), 9)
         lineNumberFont = NSFont.monospacedSystemFont(ofSize: lineNumSize, weight: .regular)
     }
@@ -55,8 +54,7 @@ internal struct DataGridFontCacheResolved {
     init(from fonts: ThemeFonts) {
         let scale = EditorFontCache.computeAccessibilityScale()
         let scaledSize = round(CGFloat(min(max(fonts.dataGridFontSize, 10), 18)) * scale)
-        regular = EditorFont(rawValue: fonts.dataGridFontFamily)?.font(size: scaledSize)
-            ?? NSFont.monospacedSystemFont(ofSize: scaledSize, weight: .regular)
+        regular = EditorFontResolver.resolve(familyId: fonts.dataGridFontFamily, size: scaledSize)
         italic = regular.withTraits(.italic)
         medium = NSFontManager.shared.convert(regular, toHaveTrait: .boldFontMask)
         let rowNumSize = max(round(scaledSize - 1), 9)
@@ -96,7 +94,6 @@ internal final class ThemeEngine {
     @ObservationIgnored var highlightCurrentLine: Bool = true
     @ObservationIgnored var showLineNumbers: Bool = true
     @ObservationIgnored var tabWidth: Int = 4
-    @ObservationIgnored var autoIndent: Bool = true
     @ObservationIgnored var wordWrap: Bool = false
 
     // MARK: - Private
@@ -108,18 +105,20 @@ internal final class ThemeEngine {
     // MARK: - Init
 
     private init() {
-        let allThemes = ThemeStorage.loadAllThemes()
-        // Start with the default theme; AppSettingsManager.init() will call
-        // updateAppearanceAndTheme() to activate the correct preferred theme.
         let theme = ThemeDefinition.default
 
         self.activeTheme = theme
         self.colors = ResolvedThemeColors(from: theme)
         self.editorFonts = EditorFontCache(from: theme.fonts)
         self.dataGridFonts = DataGridFontCacheResolved(from: theme.fonts)
-        self.availableThemes = allThemes
+        self.availableThemes = [theme]
 
         observeAccessibilityChanges()
+
+        Task {
+            let themes = await Task.detached { ThemeStorage.loadAllThemes() }.value
+            self.availableThemes = themes
+        }
     }
 
     // MARK: - Theme Lifecycle
@@ -214,7 +213,10 @@ internal final class ThemeEngine {
     }
 
     func reloadAvailableThemes() {
-        availableThemes = ThemeStorage.loadAllThemes()
+        Task {
+            let themes = await Task.detached { ThemeStorage.loadAllThemes() }.value
+            self.availableThemes = themes
+        }
     }
 
     // MARK: - Editor Font Size Zoom
@@ -248,13 +250,11 @@ internal final class ThemeEngine {
         highlightCurrentLine: Bool,
         showLineNumbers: Bool,
         tabWidth: Int,
-        autoIndent: Bool,
         wordWrap: Bool
     ) {
         self.highlightCurrentLine = highlightCurrentLine
         self.showLineNumbers = showLineNumbers
         self.tabWidth = tabWidth
-        self.autoIndent = autoIndent
         self.wordWrap = wordWrap
     }
 
@@ -299,7 +299,7 @@ internal final class ThemeEngine {
     private(set) var effectiveAppearance: ThemeAppearance = .light
     @ObservationIgnored private var currentLightThemeId: String = "tablepro.default-light"
     @ObservationIgnored private var currentDarkThemeId: String = "tablepro.default-dark"
-    @ObservationIgnored private var systemAppearanceObserver: NSObjectProtocol?
+    @ObservationIgnored private var systemAppearanceObservation: NSKeyValueObservation?
 
     /// Central entry point: resolves effective appearance, picks the correct theme, activates it,
     /// and derives NSApp.appearance from the theme's own appearance metadata.
@@ -312,12 +312,13 @@ internal final class ThemeEngine {
         currentLightThemeId = lightThemeId
         currentDarkThemeId = darkThemeId
 
+        applyNSAppAppearance(mode: mode)
+
         let resolved = resolveEffectiveAppearance(mode)
         effectiveAppearance = resolved
 
         let themeId = resolved == .dark ? darkThemeId : lightThemeId
         activateTheme(id: themeId)
-        applyNSAppAppearance(mode: mode)
 
         updateSystemAppearanceObserver(mode: mode)
     }
@@ -331,11 +332,8 @@ internal final class ThemeEngine {
         }
     }
 
-    /// Check if the system is currently in dark mode.
-    /// Reads the global `AppleInterfaceStyle` default directly so we get the real
-    /// system setting, not the app's own forced appearance.
     private func systemIsDark() -> Bool {
-        UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark"
+        NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
     }
 
     /// Set NSApp.appearance based on the appearance mode (not the theme).
@@ -354,28 +352,18 @@ internal final class ThemeEngine {
     // MARK: - System Appearance Observer
 
     private func updateSystemAppearanceObserver(mode: AppAppearanceMode) {
-        // Remove existing observer
-        if let observer = systemAppearanceObserver {
-            DistributedNotificationCenter.default().removeObserver(observer)
-            systemAppearanceObserver = nil
-        }
+        systemAppearanceObservation = nil
 
         guard mode == .auto else { return }
 
-        // Install observer for system appearance changes
-        systemAppearanceObserver = DistributedNotificationCenter.default().addObserver(
-            forName: Notification.Name("AppleInterfaceThemeChangedNotification"),
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
+        systemAppearanceObservation = NSApp?.observe(\.effectiveAppearance) { [weak self] _, _ in
             Task { @MainActor [weak self] in
                 guard let self, self.appearanceMode == .auto else { return }
-                let newAppearance = self.systemIsDark() ? ThemeAppearance.dark : ThemeAppearance.light
+                let newAppearance: ThemeAppearance = self.systemIsDark() ? .dark : .light
                 guard newAppearance != self.effectiveAppearance else { return }
                 self.effectiveAppearance = newAppearance
                 let themeId = newAppearance == .dark ? self.currentDarkThemeId : self.currentLightThemeId
                 self.activateTheme(id: themeId)
-                self.applyNSAppAppearance(mode: .auto)
             }
         }
     }
@@ -410,7 +398,14 @@ internal final class ThemeEngine {
     // MARK: - Helpers
 
     private func srgb(_ color: NSColor) -> NSColor {
-        color.usingColorSpace(.sRGB) ?? color
+        if let converted = color.usingColorSpace(.sRGB) {
+            return converted
+        }
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        if let deviceRgb = color.usingColorSpace(.deviceRGB) {
+            deviceRgb.getRed(&r, green: &g, blue: &b, alpha: &a)
+        }
+        return NSColor(srgbRed: r, green: g, blue: b, alpha: a)
     }
 }
 
@@ -427,13 +422,7 @@ extension DatabaseType {
 extension View {
     func cardStyle() -> some View {
         self
-            .background(ThemeEngine.shared.colors.ui.controlBackgroundSwiftUI)
-            .clipShape(RoundedRectangle(cornerRadius: ThemeEngine.shared.activeTheme.cornerRadius.medium))
-    }
-
-    func toolbarButtonStyle() -> some View {
-        self
-            .buttonStyle(.borderless)
-            .foregroundStyle(.secondary)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 }

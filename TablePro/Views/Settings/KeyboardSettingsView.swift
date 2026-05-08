@@ -18,25 +18,10 @@ struct KeyboardSettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Search bar
-            HStack {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField("Search shortcuts...", text: $searchText)
-                    .textFieldStyle(.plain)
-                if !searchText.isEmpty {
-                    Button {
-                        searchText = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(8)
-            .background(.quaternary)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            NativeSearchField(
+                text: $searchText,
+                placeholder: String(localized: "Search shortcuts...")
+            )
             .padding(.horizontal, 20)
             .padding(.top, 16)
             .padding(.bottom, 8)
@@ -103,7 +88,7 @@ struct KeyboardSettingsView: View {
                 systemReservedAlert = nil
             }
         } message: {
-            Text("This shortcut is reserved by macOS and cannot be assigned.")
+            Text(String(localized: "This shortcut is reserved by macOS and cannot be assigned."))
         }
     }
 

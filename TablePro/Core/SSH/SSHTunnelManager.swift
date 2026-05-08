@@ -8,12 +8,23 @@
 import Foundation
 import os
 
+/// Why an SSH authentication attempt failed. Drives the user-facing error string so the
+/// alert points at the actual cause (wrong OTP, missing key, agent rejection) instead of
+/// the catch-all "credentials or private key" message.
+enum AuthFailureReason: Sendable, Equatable {
+    case password
+    case verificationCode
+    case privateKey
+    case agentRejected
+    case generic
+}
+
 /// Error types for SSH tunnel operations
-enum SSHTunnelError: Error, LocalizedError {
+enum SSHTunnelError: Error, LocalizedError, Equatable {
     case tunnelCreationFailed(String)
     case tunnelAlreadyExists(UUID)
     case noAvailablePort
-    case authenticationFailed
+    case authenticationFailed(reason: AuthFailureReason)
     case connectionTimeout
     case hostKeyVerificationFailed
     case channelOpenFailed
@@ -21,13 +32,24 @@ enum SSHTunnelError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .tunnelCreationFailed(let message):
-            return String(localized: "SSH tunnel creation failed: \(message)")
+            return String(format: String(localized: "SSH tunnel creation failed: %@"), message)
         case .tunnelAlreadyExists(let id):
-            return String(localized: "SSH tunnel already exists for connection: \(id.uuidString)")
+            return String(format: String(localized: "SSH tunnel already exists for connection: %@"), id.uuidString)
         case .noAvailablePort:
             return String(localized: "No available local port for SSH tunnel")
-        case .authenticationFailed:
-            return String(localized: "SSH authentication failed. Check your credentials or private key.")
+        case .authenticationFailed(let reason):
+            switch reason {
+            case .password:
+                return String(localized: "SSH password rejected. Check the password and try again.")
+            case .verificationCode:
+                return String(localized: "Verification code rejected. Get a new code from your authenticator app and try again.")
+            case .privateKey:
+                return String(localized: "SSH private key rejected. Check the key file or passphrase.")
+            case .agentRejected:
+                return String(localized: "SSH agent did not authenticate. Run ssh-add -l to check loaded keys.")
+            case .generic:
+                return String(localized: "SSH authentication failed. Check your credentials or private key.")
+            }
         case .connectionTimeout:
             return String(localized: "SSH connection timed out")
         case .hostKeyVerificationFailed:
@@ -50,13 +72,17 @@ actor SSHTunnelManager {
     /// Static registry for synchronous termination during app shutdown
     private static let tunnelRegistry = OSAllocatedUnfairLock(initialState: [UUID: LibSSH2Tunnel]())
 
+    /// Prevents App Nap from throttling SSH keepalive timers while tunnels are active.
+    /// Held as long as at least one tunnel exists; released when the last tunnel closes.
+    private var appNapActivity: NSObjectProtocol?
+
     private init() {}
 
     /// Create an SSH tunnel for a database connection.
     func createTunnel(
         connectionId: UUID,
         sshHost: String,
-        sshPort: Int = 22,
+        sshPort: Int? = nil,
         sshUsername: String,
         authMethod: SSHAuthMethod,
         privateKeyPath: String? = nil,
@@ -103,7 +129,7 @@ actor SSHTunnelManager {
         for localPort in localPortCandidates() {
             do {
                 let tunnel = try await Task.detached {
-                    try LibSSH2TunnelFactory.createTunnel(
+                    try await LibSSH2TunnelFactory.createTunnel(
                         connectionId: connectionId,
                         config: config,
                         credentials: credentials,
@@ -125,6 +151,7 @@ actor SSHTunnelManager {
                 tunnel.startForwarding(remoteHost: remoteHost, remotePort: remotePort)
                 tunnel.startKeepAlive()
 
+                updateAppNapState()
                 Self.logger.info("Tunnel created for \(connectionId) on local port \(localPort)")
                 return localPort
             } catch let error as SSHTunnelError {
@@ -144,6 +171,7 @@ actor SSHTunnelManager {
     func closeTunnel(connectionId: UUID) async throws {
         guard let tunnel = tunnels.removeValue(forKey: connectionId) else { return }
         Self.tunnelRegistry.withLock { $0[connectionId] = nil }
+        updateAppNapState()
         tunnel.close()
     }
 
@@ -152,6 +180,7 @@ actor SSHTunnelManager {
         let currentTunnels = tunnels
         tunnels.removeAll()
         Self.tunnelRegistry.withLock { $0.removeAll(); return }
+        updateAppNapState()
 
         for (_, tunnel) in currentTunnels {
             tunnel.close()
@@ -177,7 +206,7 @@ actor SSHTunnelManager {
         credentials: SSHTunnelCredentials
     ) async throws {
         try await Task.detached {
-            try LibSSH2TunnelFactory.testConnection(
+            try await LibSSH2TunnelFactory.testConnection(
                 config: config,
                 credentials: credentials
             )
@@ -212,7 +241,25 @@ actor SSHTunnelManager {
     private func handleTunnelDeath(connectionId: UUID) async {
         guard tunnels.removeValue(forKey: connectionId) != nil else { return }
         Self.tunnelRegistry.withLock { $0[connectionId] = nil }
+        updateAppNapState()
         Self.logger.warning("Tunnel died for connection \(connectionId)")
         await DatabaseManager.shared.handleSSHTunnelDied(connectionId: connectionId)
+    }
+
+    // MARK: - App Nap Prevention
+
+    /// Acquires or releases an App Nap activity token based on whether tunnels exist.
+    private func updateAppNapState() {
+        if !tunnels.isEmpty && appNapActivity == nil {
+            appNapActivity = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiatedAllowingIdleSystemSleep,
+                reason: "SSH tunnel keepalive requires timely execution"
+            )
+            Self.logger.debug("App Nap prevention acquired")
+        } else if tunnels.isEmpty, let activity = appNapActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            appNapActivity = nil
+            Self.logger.debug("App Nap prevention released")
+        }
     }
 }

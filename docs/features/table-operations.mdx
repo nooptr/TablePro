@@ -1,20 +1,17 @@
 ---
 title: Table Operations
-description: Drop, truncate, duplicate tables, create views, and switch databases from the sidebar
+description: Drop, truncate, maintenance, create views, and switch databases from the sidebar
 ---
 
 # Table Operations
 
-Right-click tables in the sidebar to drop, truncate, or duplicate them. Create and manage views. Switch between databases on the same connection.
+Right-click tables in the sidebar to drop, truncate, run maintenance, or manage views. Switch between databases on the same connection.
 
 ## Drop Table
 
 Permanently deletes a table and all its data.
 
-1. Right-click the table (or select multiple tables)
-2. Select **Delete**
-3. Configure options in the confirmation dialog
-4. Click **OK** to execute
+Right-click the table (or select multiple) > **Delete**, confirm in the dialog, click **OK**. Irreversible - back up first.
 
 {/* Screenshot: Drop table confirmation dialog */}
 <Frame caption="Drop table confirmation with options">
@@ -62,6 +59,24 @@ Truncate is faster than `DELETE FROM table` because it skips per-row delete logs
     alt="Truncate table confirmation with options"
   />
 </Frame>
+
+## Maintenance
+
+Right-click a table > **Maintenance** to run database maintenance operations. A confirmation sheet shows operation options and a SQL preview before executing.
+
+| Database | Operations |
+|----------|-----------|
+| PostgreSQL | VACUUM, ANALYZE, REINDEX, CLUSTER |
+| MySQL/MariaDB | OPTIMIZE TABLE, ANALYZE TABLE, CHECK TABLE, REPAIR TABLE |
+| SQLite | VACUUM, ANALYZE, REINDEX, Integrity Check |
+
+PostgreSQL VACUUM has options for FULL (rewrites the table, blocks access), ANALYZE (updates statistics), and VERBOSE (prints progress).
+
+MySQL CHECK TABLE supports check modes: QUICK, FAST, MEDIUM, EXTENDED, CHANGED.
+
+<Note>
+Maintenance is disabled in Read-Only Safe Mode. Databases without maintenance support (Redis, MongoDB, etc.) do not show this submenu.
+</Note>
 
 ## Batch Operations
 
@@ -170,6 +185,20 @@ Click the database name in the toolbar to browse databases on the current connec
     alt="Database switcher with search and recent databases"
   />
 </Frame>
+
+### Drop Database
+
+Drop a database from the database switcher (shipped v0.33.0). Three entry points:
+
+- Right-click a database and select **Drop Database**
+- Select a database and click the trash icon in the switcher toolbar
+- Select a database and press `Delete`
+
+A confirmation dialog appears with a destructive (red) action button and the database name typed in the prompt. The current database cannot be dropped: switch to another one first.
+
+<Warning>
+Dropping a database is irreversible. Whether the action succeeds depends on the connected user's privileges (`DROP` on MySQL/MariaDB, `DROPDB` or owner on PostgreSQL). Permission errors surface inline.
+</Warning>
 
 ## MongoDB Collections
 

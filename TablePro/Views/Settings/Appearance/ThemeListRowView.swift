@@ -9,7 +9,7 @@ internal struct ThemeListRowView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(theme.name)
-                    .font(.system(size: 12))
+                    .font(.callout)
                     .lineLimit(1)
 
                 Text(theme.isBuiltIn
@@ -17,7 +17,7 @@ internal struct ThemeListRowView: View {
                     : theme.isRegistry
                         ? String(localized: "Registry")
                         : String(localized: "Custom"))
-                    .font(.system(size: 10))
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }

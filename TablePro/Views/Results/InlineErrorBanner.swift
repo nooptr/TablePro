@@ -15,32 +15,35 @@ struct InlineErrorBanner: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.red)
+                .foregroundStyle(Color(nsColor: .systemRed))
             Text(message)
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
+                .font(.subheadline)
                 .lineLimit(3)
                 .textSelection(.enabled)
             Spacer()
             Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(message, forType: .string)
+                ClipboardService.shared.writeText(message)
             } label: {
                 Image(systemName: "doc.on.doc")
+                    .frame(width: 24, height: 24)
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
             .help(String(localized: "Copy error message"))
+            .accessibilityLabel(String(localized: "Copy error message"))
             if let onDismiss {
                 Button { onDismiss() } label: {
                     Image(systemName: "xmark")
+                        .frame(width: 24, height: 24)
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(String(localized: "Dismiss error"))
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(Color.red.opacity(0.08))
+        .background(Color(nsColor: .systemRed).opacity(0.08))
     }
 }
 

@@ -5,7 +5,7 @@ description: Filter table data with 18 operators, raw SQL, and saved presets
 
 # Filtering
 
-Press `Cmd+F` to open the filter panel. Type a raw SQL WHERE clause and press `Enter` to filter. Raw SQL is the default mode.
+Press `Cmd+Shift+F` to open the filter panel. Type a raw SQL WHERE clause and press `Enter` to filter. Raw SQL is the default mode.
 
 Each row has a column picker, operator, value field, and **+**/**−** buttons. Multiple rows combine with **AND** or **OR** (toggle in the header). Click **Apply** or press `Enter` to activate. Click **Unset** to clear all.
 
@@ -13,7 +13,7 @@ Filters are per-tab. Tables with active filters open in a new tab when you click
 
 ## Operators
 
-18 operators: `=`, `!=`, contains, not contains, starts with, ends with, `>`, `>=`, `<`, `<=`, IS NULL, IS NOT NULL, IS EMPTY, IS NOT EMPTY, IN, NOT IN, BETWEEN, REGEX.
+18 operators with SQL symbols shown inline: `=`, `!=`, `LIKE %..%`, `NOT LIKE %..%`, `LIKE ..%`, `LIKE %..`, `>`, `>=`, `<`, `<=`, IS NULL, IS NOT NULL, IS EMPTY, IS NOT EMPTY, `IN (..)`, `NOT IN (..)`, `BETWEEN`, `~` (regex).
 
 BETWEEN shows two value fields. IN/NOT IN takes comma-separated values.
 

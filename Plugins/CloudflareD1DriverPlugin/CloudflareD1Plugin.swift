@@ -25,7 +25,7 @@ final class CloudflareD1Plugin: NSObject, TableProPlugin, DriverPlugin {
     static let supportsSSL = false
     static let isDownloadable = true
     static let supportsImport = false
-    static let supportsSchemaEditing = false
+    static let supportsSchemaEditing = true
     static let databaseGroupingStrategy: GroupingStrategy = .flat
     static let brandColorHex = "#F6821F"
     static let urlSchemes: [String] = ["d1"]
@@ -98,6 +98,8 @@ final class CloudflareD1Plugin: NSObject, TableProPlugin, DriverPlugin {
             section: .authentication
         )
     ]
+
+    static let supportsDropDatabase = true
 
     func createDriver(config: DriverConnectionConfig) -> any PluginDatabaseDriver {
         CloudflareD1PluginDriver(config: config)

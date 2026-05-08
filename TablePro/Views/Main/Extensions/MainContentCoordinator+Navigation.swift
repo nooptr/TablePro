@@ -20,18 +20,14 @@ extension MainContentCoordinator {
             forTypeId: connection.type.pluginTypeId
         )?.navigationModel ?? .standard
 
-        // Get current database name from active session (may differ from connection default after Cmd+K switch)
         let currentDatabase: String
         if navigationModel == .inPlace {
-            // In-place navigation: extract db index from table name "db3" → "3"
             guard tableName.hasPrefix("db"), Int(String(tableName.dropFirst(2))) != nil else {
                 return
             }
             currentDatabase = String(tableName.dropFirst(2))
-        } else if let session = DatabaseManager.shared.session(for: connectionId) {
-            currentDatabase = session.activeDatabase
         } else {
-            currentDatabase = connection.database
+            currentDatabase = activeDatabaseName
         }
 
         let currentSchema = DatabaseManager.shared.session(for: connectionId)?.currentSchema
@@ -39,70 +35,81 @@ extension MainContentCoordinator {
         // Fast path: if this table is already the active tab in the same database, skip all work
         if let current = tabManager.selectedTab,
            current.tabType == .table,
-           current.tableName == tableName,
-           current.databaseName == currentDatabase {
-            if showStructure, let idx = tabManager.selectedTabIndex {
-                tabManager.tabs[idx].showStructure = true
+           current.tableContext.tableName == tableName,
+           current.tableContext.databaseName == currentDatabase {
+            if showStructure, let (_, tabIndex) = tabManager.selectedTabAndIndex {
+                tabManager.tabs[tabIndex].display.resultsViewMode = .structure
             }
             return
         }
 
         // During database switch, update the existing tab in-place instead of
         // opening a new native window tab.
-        if isSwitchingDatabase {
+        if case .loading = SchemaService.shared.state(for: connectionId) {
             if tabManager.tabs.isEmpty {
-                tabManager.addTableTab(
-                    tableName: tableName,
-                    databaseType: connection.type,
-                    databaseName: currentDatabase
-                )
+                do {
+                    try tabManager.addTableTab(
+                        tableName: tableName,
+                        databaseType: connection.type,
+                        databaseName: currentDatabase
+                    )
+                } catch {
+                    navigationLogger.error("openTableTab addTableTab failed: \(error.localizedDescription, privacy: .public)")
+                }
             }
             return
         }
 
         // Check if another native window tab already has this table open — switch to it
-        if let keyWindow = NSApp.keyWindow {
-            let ownWindows = Set(WindowLifecycleMonitor.shared.windows(for: connectionId).map { ObjectIdentifier($0) })
-            let tabbedWindows = keyWindow.tabbedWindows ?? [keyWindow]
-            for window in tabbedWindows
-                where window.title == tableName && ownWindows.contains(ObjectIdentifier(window)) {
-                window.makeKeyAndOrderFront(nil)
-                return
+        for sibling in MainContentCoordinator.allActiveCoordinators()
+            where sibling !== self && sibling.connectionId == connectionId {
+            let hasMatch = sibling.tabManager.tabs.contains { tab in
+                tab.tabType == .table
+                    && tab.tableContext.tableName == tableName
+                    && tab.tableContext.databaseName == currentDatabase
             }
+            guard hasMatch,
+                  let windowId = sibling.windowId,
+                  let window = WindowLifecycleMonitor.shared.window(for: windowId) else { continue }
+            window.makeKeyAndOrderFront(nil)
+            return
         }
 
         // If no tabs exist (empty state), add a table tab directly.
         // In preview mode, mark it as preview so subsequent clicks replace it.
         if tabManager.tabs.isEmpty {
-            if AppSettingsManager.shared.tabs.enablePreviewTabs {
-                tabManager.addPreviewTableTab(
-                    tableName: tableName,
-                    databaseType: connection.type,
-                    databaseName: currentDatabase
-                )
-                if let wid = windowId {
-                    WindowLifecycleMonitor.shared.setPreview(true, for: wid)
-                    WindowLifecycleMonitor.shared.window(for: wid)?.subtitle = "\(connection.name) — Preview"
+            do {
+                if AppSettingsManager.shared.tabs.enablePreviewTabs {
+                    try tabManager.addPreviewTableTab(
+                        tableName: tableName,
+                        databaseType: connection.type,
+                        databaseName: currentDatabase
+                    )
+                    if let wid = windowId {
+                        WindowLifecycleMonitor.shared.setPreview(true, for: wid)
+                        WindowLifecycleMonitor.shared.window(for: wid)?.subtitle = "\(connection.name) — Preview"
+                    }
+                } else {
+                    try tabManager.addTableTab(
+                        tableName: tableName,
+                        databaseType: connection.type,
+                        databaseName: currentDatabase
+                    )
                 }
-            } else {
-                tabManager.addTableTab(
-                    tableName: tableName,
-                    databaseType: connection.type,
-                    databaseName: currentDatabase
-                )
+            } catch {
+                navigationLogger.error("openTableTab tab creation failed: \(error.localizedDescription, privacy: .public)")
+                return
             }
-            if let tabIndex = tabManager.selectedTabIndex {
-                tabManager.tabs[tabIndex].isView = isView
-                tabManager.tabs[tabIndex].isEditable = !isView
-                tabManager.tabs[tabIndex].schemaName = currentSchema
+            if let (_, tabIndex) = tabManager.selectedTabAndIndex {
+                tabManager.tabs[tabIndex].tableContext.isView = isView
+                tabManager.tabs[tabIndex].tableContext.isEditable = !isView
+                tabManager.tabs[tabIndex].tableContext.schemaName = currentSchema
                 tabManager.tabs[tabIndex].pagination.reset()
-                AppState.shared.isCurrentTabEditable = !isView && tableName.isEmpty == false
                 toolbarState.isTableTab = true
-                AppState.shared.isTableTab = true
             }
             // In-place navigation needs selectRedisDatabaseAndQuery to ensure the correct
             // database is SELECTed and session state is updated before querying.
-            restoreColumnLayoutForTable(tableName)
+            restoreLastHiddenColumnsForTable(tableName)
             restoreFiltersForTable(tableName)
             if navigationModel == .inPlace, let dbIndex = Int(currentDatabase) {
                 selectRedisDatabaseAndQuery(dbIndex)
@@ -115,33 +122,38 @@ extension MainContentCoordinator {
         // In-place navigation: replace current tab content rather than
         // opening new native window tabs (e.g. Redis database switching).
         if navigationModel == .inPlace {
-            if let oldTab = tabManager.selectedTab, let oldTableName = oldTab.tableName {
-                filterStateManager.saveLastFilters(for: oldTableName)
+            if let oldTab = tabManager.selectedTab, let oldTableName = oldTab.tableContext.tableName {
+                saveLastFilters(for: oldTableName)
             }
-            if tabManager.replaceTabContent(
-                tableName: tableName,
-                databaseType: connection.type,
-                databaseName: currentDatabase,
-                schemaName: currentSchema
-            ) {
-                filterStateManager.clearAll()
-                if let tabIndex = tabManager.selectedTabIndex {
-                    tabManager.tabs[tabIndex].pagination.reset()
-                    toolbarState.isTableTab = true
-                AppState.shared.isTableTab = true
+            do {
+                let replaced = try tabManager.replaceTabContent(
+                    tableName: tableName,
+                    databaseType: connection.type,
+                    databaseName: currentDatabase,
+                    schemaName: currentSchema
+                )
+                if replaced {
+                    clearFilterState()
+                    if let (tab, tabIndex) = tabManager.selectedTabAndIndex {
+                        setActiveTableRows(TableRows(), for: tab.id)
+                        tabManager.tabs[tabIndex].pagination.reset()
+                        toolbarState.isTableTab = true
+                    }
+                    restoreLastHiddenColumnsForTable(tableName)
+                    restoreFiltersForTable(tableName)
+                    if let dbIndex = Int(currentDatabase) {
+                        selectRedisDatabaseAndQuery(dbIndex)
+                    }
                 }
-                restoreColumnLayoutForTable(tableName)
-                restoreFiltersForTable(tableName)
-                if let dbIndex = Int(currentDatabase) {
-                    selectRedisDatabaseAndQuery(dbIndex)
-                }
+            } catch {
+                navigationLogger.error("openTableTab replaceTabContent failed: \(error.localizedDescription, privacy: .public)")
             }
             return
         }
 
         // If current tab has unsaved changes, active filters, or sorting, open in a new native tab
         let hasActiveWork = changeManager.hasChanges
-            || filterStateManager.hasAppliedFilters
+            || selectedTabFilterState.hasAppliedFilters
             || (tabManager.selectedTab?.sortState.isSorting ?? false)
         if hasActiveWork {
             let payload = EditorTabPayload(
@@ -153,7 +165,7 @@ extension MainContentCoordinator {
                 isView: isView,
                 showStructure: showStructure
             )
-            WindowOpener.shared.openNativeTab(payload)
+            WindowManager.shared.openTab(payload: payload)
             return
         }
 
@@ -173,7 +185,7 @@ extension MainContentCoordinator {
             isView: isView,
             showStructure: showStructure
         )
-        WindowOpener.shared.openNativeTab(payload)
+        WindowManager.shared.openTab(payload: payload)
     }
 
     // MARK: - Preview Tabs
@@ -188,33 +200,38 @@ extension MainContentCoordinator {
             if let previewCoordinator = Self.coordinator(for: preview.windowId) {
                 // Skip if preview tab already shows this table
                 if let current = previewCoordinator.tabManager.selectedTab,
-                   current.tableName == tableName,
-                   current.databaseName == databaseName {
+                   current.tableContext.tableName == tableName,
+                   current.tableContext.databaseName == databaseName {
                     preview.window.makeKeyAndOrderFront(nil)
                     return
                 }
                 if let oldTab = previewCoordinator.tabManager.selectedTab,
-                   let oldTableName = oldTab.tableName {
-                    previewCoordinator.filterStateManager.saveLastFilters(for: oldTableName)
+                   let oldTableName = oldTab.tableContext.tableName {
+                    previewCoordinator.saveLastFilters(for: oldTableName)
                 }
-                previewCoordinator.tabManager.replaceTabContent(
-                    tableName: tableName,
-                    databaseType: connection.type,
-                    isView: isView,
-                    databaseName: databaseName,
-                    schemaName: schemaName,
-                    isPreview: true
-                )
-                previewCoordinator.filterStateManager.clearAll()
+                do {
+                    try previewCoordinator.tabManager.replaceTabContent(
+                        tableName: tableName,
+                        databaseType: connection.type,
+                        isView: isView,
+                        databaseName: databaseName,
+                        schemaName: schemaName,
+                        isPreview: true
+                    )
+                } catch {
+                    navigationLogger.error("openPreviewTab replaceTabContent failed: \(error.localizedDescription, privacy: .public)")
+                    return
+                }
+                previewCoordinator.clearFilterState()
                 if let tabIndex = previewCoordinator.tabManager.selectedTabIndex {
-                    previewCoordinator.tabManager.tabs[tabIndex].showStructure = showStructure
+                    let tabId = previewCoordinator.tabManager.tabs[tabIndex].id
+                    previewCoordinator.setActiveTableRows(TableRows(), for: tabId)
+                    previewCoordinator.tabManager.tabs[tabIndex].display.resultsViewMode = showStructure ? .structure : .data
                     previewCoordinator.tabManager.tabs[tabIndex].pagination.reset()
-                    AppState.shared.isCurrentTabEditable = !isView && !tableName.isEmpty
                     previewCoordinator.toolbarState.isTableTab = true
-                    AppState.shared.isTableTab = true
                 }
                 preview.window.makeKeyAndOrderFront(nil)
-                previewCoordinator.restoreColumnLayoutForTable(tableName)
+                previewCoordinator.restoreLastHiddenColumnsForTable(tableName)
                 previewCoordinator.restoreFiltersForTable(tableName)
                 previewCoordinator.runQuery()
                 return
@@ -229,25 +246,29 @@ extension MainContentCoordinator {
             if tab.isPreview { return true }
             // Table tab with no active work
             if tab.tabType == .table && !changeManager.hasChanges
-                && !filterStateManager.hasAppliedFilters && !tab.sortState.isSorting {
+                && !selectedTabFilterState.hasAppliedFilters && !tab.sortState.isSorting {
                 return true
             }
             // Empty/default query tab (no user content, no results, never executed)
-            if tab.tabType == .query && tab.lastExecutedAt == nil
-                && tab.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if tab.tabType == .query && tab.execution.lastExecutedAt == nil
+                && tab.content.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return true
             }
             return false
         }()
         if let selectedTab = tabManager.selectedTab, isReusableTab {
             // Skip if already showing this table
-            if selectedTab.tableName == tableName, selectedTab.databaseName == databaseName {
+            if selectedTab.tableContext.tableName == tableName, selectedTab.tableContext.databaseName == databaseName {
                 return
             }
             // If preview tab has active work, promote it and open new tab instead
+            let hasUnsavedQuery = tabManager.selectedTab.map { tab in
+                tab.tabType == .query && !tab.content.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            } ?? false
             let previewHasWork = changeManager.hasChanges
-                || filterStateManager.hasAppliedFilters
+                || selectedTabFilterState.hasAppliedFilters
                 || selectedTab.sortState.isSorting
+                || hasUnsavedQuery
             if previewHasWork {
                 promotePreviewTab()
                 let payload = EditorTabPayload(
@@ -259,29 +280,33 @@ extension MainContentCoordinator {
                     isView: isView,
                     showStructure: showStructure
                 )
-                WindowOpener.shared.openNativeTab(payload)
+                WindowManager.shared.openTab(payload: payload)
                 return
             }
-            if let oldTableName = selectedTab.tableName {
-                filterStateManager.saveLastFilters(for: oldTableName)
+            if let oldTableName = selectedTab.tableContext.tableName {
+                saveLastFilters(for: oldTableName)
             }
-            tabManager.replaceTabContent(
-                tableName: tableName,
-                databaseType: connection.type,
-                isView: isView,
-                databaseName: databaseName,
-                schemaName: schemaName,
-                isPreview: true
-            )
-            filterStateManager.clearAll()
-            if let tabIndex = tabManager.selectedTabIndex {
-                tabManager.tabs[tabIndex].showStructure = showStructure
+            do {
+                try tabManager.replaceTabContent(
+                    tableName: tableName,
+                    databaseType: connection.type,
+                    isView: isView,
+                    databaseName: databaseName,
+                    schemaName: schemaName,
+                    isPreview: true
+                )
+            } catch {
+                navigationLogger.error("openPreviewTab replaceTabContent failed: \(error.localizedDescription, privacy: .public)")
+                return
+            }
+            clearFilterState()
+            if let (tab, tabIndex) = tabManager.selectedTabAndIndex {
+                setActiveTableRows(TableRows(), for: tab.id)
+                tabManager.tabs[tabIndex].display.resultsViewMode = showStructure ? .structure : .data
                 tabManager.tabs[tabIndex].pagination.reset()
-                AppState.shared.isCurrentTabEditable = !isView && !tableName.isEmpty
                 toolbarState.isTableTab = true
-                AppState.shared.isTableTab = true
             }
-            restoreColumnLayoutForTable(tableName)
+            restoreLastHiddenColumnsForTable(tableName)
             restoreFiltersForTable(tableName)
             runQuery()
             return
@@ -298,12 +323,12 @@ extension MainContentCoordinator {
             showStructure: showStructure,
             isPreview: true
         )
-        WindowOpener.shared.openNativeTab(payload)
+        WindowManager.shared.openTab(payload: payload)
     }
 
     func promotePreviewTab() {
-        guard let tabIndex = tabManager.selectedTabIndex,
-              tabManager.tabs[tabIndex].isPreview else { return }
+        guard let (tab, tabIndex) = tabManager.selectedTabAndIndex,
+              tab.isPreview else { return }
         tabManager.tabs[tabIndex].isPreview = false
 
         if let wid = windowId {
@@ -320,7 +345,7 @@ extension MainContentCoordinator {
             tabType: .query,
             initialQuery: sql
         )
-        WindowOpener.shared.openNativeTab(payload)
+        WindowManager.shared.openTab(payload: payload)
     }
 
     private func currentSchemaName(fallback: String) -> String {
@@ -337,14 +362,14 @@ extension MainContentCoordinator {
         if editorLang == .javascript {
             tabManager.addTab(
                 initialQuery: "db.runCommand({\"listCollections\": 1, \"nameOnly\": false})",
-                databaseName: connection.database
+                databaseName: activeDatabaseName
             )
             runQuery()
             return nil
         } else if editorLang == .bash {
             tabManager.addTab(
                 initialQuery: "SCAN 0 MATCH * COUNT 100",
-                databaseName: connection.database
+                databaseName: activeDatabaseName
             )
             runQuery()
             return nil
@@ -376,74 +401,23 @@ extension MainContentCoordinator {
 
     /// Switch to a different database (called from database switcher)
     func switchDatabase(to database: String) async {
-        isSwitchingDatabase = true
-        defer {
-            isSwitchingDatabase = false
-        }
-
-        // Clear stale filter state from previous database/schema
-        filterStateManager.clearAll()
-
-        guard let driver = DatabaseManager.shared.driver(for: connectionId) else {
-            return
-        }
-
-        // Snapshot current state for rollback on failure
+        clearFilterState()
         let previousDatabase = toolbarState.databaseName
-
-        // Immediately clear UI state so the sidebar shows a loading spinner
-        // instead of stale tables from the previous database/schema.
         toolbarState.databaseName = database
-        closeSiblingNativeWindows()
-        tabManager.tabs = []
-        tabManager.selectedTabId = nil
-        DatabaseManager.shared.updateSession(connectionId) { session in
-            session.tables = []
-        }
-        // Yield so SwiftUI renders the empty/loading state before async work begins
-        await Task.yield()
 
         do {
-            let pm = PluginManager.shared
-            if pm.requiresReconnectForDatabaseSwitch(for: connection.type) {
-                // PostgreSQL: full reconnection required for database switch
-                DatabaseManager.shared.updateSession(connectionId) { session in
-                    session.connection.database = database
-                    session.currentDatabase = database
-                    session.currentSchema = nil
-                }
-                AppSettingsStorage.shared.saveLastSchema(nil, for: connectionId)
-                await DatabaseManager.shared.reconnectSession(connectionId)
-            } else if pm.supportsSchemaSwitching(for: connection.type) {
-                // Redshift, Oracle: schema switching
-                guard let schemaDriver = driver as? SchemaSwitchable else { return }
-                try await schemaDriver.switchSchema(to: database)
-                DatabaseManager.shared.updateSession(connectionId) { session in
-                    session.currentSchema = database
-                }
-            } else {
-                // All others (MySQL, MariaDB, ClickHouse, MSSQL, MongoDB, Redis, etc.)
-                if let adapter = driver as? PluginDriverAdapter {
-                    try await adapter.switchDatabase(to: database)
-                }
-                let grouping = pm.databaseGroupingStrategy(for: connection.type)
-                DatabaseManager.shared.updateSession(connectionId) { session in
-                    session.currentDatabase = database
-                    // Schema-grouped databases (e.g. MSSQL) need currentSchema
-                    // reset to the plugin default (e.g. "dbo") on database switch.
-                    if grouping == .bySchema {
-                        session.currentSchema = pm.defaultSchemaName(for: connection.type)
-                    }
-                }
-            }
-            AppSettingsStorage.shared.saveLastDatabase(database, for: connectionId)
-            await loadSchema()
-            reloadSidebar()
+            try await DatabaseManager.shared.switchDatabase(to: database, for: connectionId)
+
+            closeSiblingNativeWindows()
+            persistence.saveNowSync(tabs: tabManager.tabs, selectedTabId: tabManager.selectedTabId)
+            tabSessionRegistry.removeAll()
+            tabManager.tabs = []
+            tabManager.selectedTabId = nil
+            await SchemaService.shared.invalidate(connectionId: connectionId)
+
+            await refreshTables()
         } catch {
-            // Restore toolbar to previous database on failure
             toolbarState.databaseName = previousDatabase
-            // Reload previous tables so sidebar isn't left empty
-            reloadSidebar()
 
             navigationLogger.error("Failed to switch database: \(error.localizedDescription, privacy: .public)")
             AlertHelper.showErrorSheet(
@@ -454,43 +428,40 @@ extension MainContentCoordinator {
         }
     }
 
-    /// Switch to a different PostgreSQL schema (used for URL-based schema selection)
     func switchSchema(to schema: String) async {
-        guard PluginManager.shared.supportsSchemaSwitching(for: connection.type) else { return }
-        guard let driver = DatabaseManager.shared.driver(for: connectionId) else { return }
-
-        // Clear stale filter state from previous schema
-        filterStateManager.clearAll()
-
-        // Snapshot current state for rollback on failure
-        let previousSchema = toolbarState.databaseName
-
-        // Immediately clear UI state so sidebar shows loading state
-        toolbarState.databaseName = schema
-        closeSiblingNativeWindows()
-        tabManager.tabs = []
-        tabManager.selectedTabId = nil
-        DatabaseManager.shared.updateSession(connectionId) { session in
-            session.tables = []
+        guard PluginManager.shared.supportsSchemaSwitching(for: connection.type) else {
+            navigationLogger.warning(
+                "switchSchema(to: \(schema, privacy: .public)) ignored: \(self.connection.type.rawValue, privacy: .public) does not support schema switching"
+            )
+            AlertHelper.showErrorSheet(
+                title: String(localized: "Schema Switching Not Supported"),
+                message: String(
+                    format: String(localized: "%@ does not support switching schemas in TablePro."),
+                    connection.type.rawValue
+                ),
+                window: contentWindow
+            )
+            return
         }
-        await Task.yield()
+
+        clearFilterState()
+        let previousSchema = toolbarState.databaseName
+        toolbarState.databaseName = schema
 
         do {
-            guard let schemaDriver = driver as? SchemaSwitchable else { return }
-            try await schemaDriver.switchSchema(to: schema)
+            try await DatabaseManager.shared.switchSchema(to: schema, for: connectionId)
 
-            DatabaseManager.shared.updateSession(connectionId) { session in
-                session.currentSchema = schema
-            }
-            AppSettingsStorage.shared.saveLastSchema(schema, for: connectionId)
+            closeSiblingNativeWindows()
+            persistence.saveNowSync(tabs: tabManager.tabs, selectedTabId: tabManager.selectedTabId)
+            tabSessionRegistry.removeAll()
+            tabManager.tabs = []
+            tabManager.selectedTabId = nil
+            await SchemaService.shared.invalidate(connectionId: connectionId)
 
-            await loadSchema()
-
-            reloadSidebar()
+            await refreshTables()
         } catch {
-            // Restore toolbar to previous schema on failure
             toolbarState.databaseName = previousSchema
-            reloadSidebar()
+            await refreshTables()
 
             navigationLogger.error("Failed to switch schema: \(error.localizedDescription, privacy: .public)")
             AlertHelper.showErrorSheet(
@@ -513,7 +484,7 @@ extension MainContentCoordinator {
 
         let connId = connectionId
         let database = String(dbIndex)
-        redisDatabaseSwitchTask = Task { @MainActor [weak self] in
+        redisDatabaseSwitchTask = Task { [weak self] in
             guard let self else { return }
             do {
                 if let adapter = DatabaseManager.shared.driver(for: connId) as? PluginDriverAdapter {

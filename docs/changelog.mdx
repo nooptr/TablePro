@@ -4,6 +4,487 @@ description: "Product updates and announcements for TablePro"
 rss: true
 ---
 
+<Update label="May 8, 2026" description="v0.39.1">
+  ### Bug Fixes
+
+  - **Launch Failure on 0.39.0**: App failed to open with "The application can't be opened" / errno 163. Production entitlements shipped a literal `$(AppIdentifierPrefix)` placeholder for the keychain access group because `codesign --entitlements` does not expand Xcode build variables. Reverted to the hardcoded team prefix (#1104)
+</Update>
+
+<Update label="May 8, 2026" description="v0.39.0">
+  ### New Features
+
+  - **AI Chat Tool Calling**: The assistant can look up your database on demand. Read-only tools (`list_tables`, `describe_table`, `get_table_ddl`, etc.) auto-run; write and destructive ops show inline approval pills (Run / Always for this connection / Cancel). Works with Anthropic, OpenAI, OpenRouter, Gemini, Ollama, GitHub Copilot, and custom OpenAI-compatible endpoints. Ask / Edit / Agent mode picker controls which tools the model sees. Safe mode still gates execution
+  - **AI Chat `@` Mentions**: Attach Schema, a Table, the Current Query, recent Query Results, or a saved SQL query as chips. Type `@` in the composer or pick from the menu
+  - **AI Chat Slash Commands**: Built-in `/explain`, `/optimize`, `/fix`, `/help`, plus user-defined commands in Settings -> AI -> Custom Slash Commands with `{{query}}`, `{{schema}}`, `{{database}}`, `{{body}}` placeholders
+  - **AI Chat Per-Connection Rules**: Add custom guidance about table conventions, PII columns, and naming in the connection's AI Rules tab; the assistant sees it on every chat turn
+  - **AI Chat Panel Redesign**: Composer-focused chat tab with inline model picker and per-turn model attribution
+  - **Linked SQL Folders**: Point TablePro at a folder of `.sql` files for two-way sync with Favorites. Edit in TablePro or your editor; changes flow both ways. Frontmatter sets `@name`, `@keyword`, and `@description`; save-time conflicts show a side-by-side diff. Free
+  - **Database Type Chooser**: New Connection opens a categorised, searchable sheet listing every supported driver (Relational, Document, Key-Value, Analytical, Wide-Column, Cloud Native, Coordination & Config)
+  - **Free XLSX Export**: Excel export no longer requires Pro
+  - **Free Safe Mode**: Touch ID, Full, and Read Only Safe Mode levels no longer require Pro
+
+  ### Improvements
+
+  - **iOS Streaming Data Layer**: Large tables and queries stream rows instead of buffering the full result set. Memory pressure shrinks the row window automatically; CSV / JSON / SQL export stream too
+  - **Distinguishable Toolbar**: Multiple windows on the same database (e.g. `prod-safe`, `prod-unsafe`, `staging`) show a tinted engine icon plus connection name instead of duplicate "PostgreSQL 16.x" text (#1044)
+  - **Connection-Scoped Favorites**: Opening a second tab on the same connection no longer reloads the favorites tree or flashes a spinner. Selection persists across windows
+  - **Connection Form Redesign**: Rebuilt around macOS HIG sidebar navigation (General, SSH Tunnel, SSL/TLS, Customization, Advanced). Cancel, Save, and Save & Connect live in the native window toolbar; Test Connection inline
+  - **Connection URL Import**: Moved into the database type chooser; paste a URL there instead of inside the form
+  - **AI Chat Opt-In Context**: New installs no longer auto-include schema, current query, and query results in every prompt; attach via `@` when you want them. Existing users keep their current settings
+  - **HIG Polish**: Hero icons scale with system text size, search fields use native `NSSearchField`, validation banners use the standard warning convention, form sheets switch to grouped Form layouts
+  - **Native Windows**: Welcome, Connection Form, and Integrations Activity now use SwiftUI scenes, fixing an assertion crash and restoring Integrations Activity at next launch
+  - **ER Diagram Accessibility**: Diagram nodes scale with system text size
+  - **Terminology**: "Read-Only" / "Read-Write" renamed to "Read Only" / "Read & Write" to match macOS HIG
+
+  ### Bug Fixes
+
+  - **Schema Switching on SQL Server / Oracle**: Cmd+K Quick Switcher schema selection no longer silently ignored
+  - **iOS MySQL Crash**: Fixed `EXC_BREAKPOINT` when opening some MySQL tables
+  - **iOS Local Network**: Connections to `.local` hostnames and local-network addresses (10.x, 192.168.x, link-local, IPv6 ULA) no longer time out silently
+  - **iOS Row List Crash**: Data browser and query result lists no longer crash with "Index out of range" when rows shrink mid-update (#1094)
+  - **iOS Port Validation**: Out-of-range port for MySQL, PostgreSQL, or Redis reports a readable error instead of crashing (#1094)
+  - **MariaDB Install Prompt**: New connection chooser no longer falsely prompts to install built-in lazy drivers
+  - **IME Editor Jump**: SQL editor no longer jumps to the end after committing Chinese, Japanese, or Korean words like "测试" (#1012)
+  - **MongoDB SRV Port**: Connection strings strip the port from the host per the URI spec (#1101)
+  - **Cmd+T Focus Flash**: New tabs no longer flash focus back to the previous tab
+  - **Cmd+X No Selection**: Cuts the current line, matching VS Code, Sublime, and Xcode (#1075)
+  - **Cmd+A Trailing Newline**: Selecting all on a query ending with a newline highlights every line (#1075)
+  - **Editor Window State**: Windows remember size, position, and zoom across launches
+  - **Personal Team Builds**: External-contributor builds on personal Apple Developer teams now work without an iCloud entitlement (#1020)
+  - **SSH Auth Errors**: Auth-failure alerts now point at the actual cause (wrong password, wrong verification code, rejected key) (#1005)
+  - **TOTP Rotation**: Codes that crossed a 30-second rotation boundary are no longer rejected
+  - **SSH Password vs Keyboard-Interactive**: Auth Method = Password now works against servers that only advertise keyboard-interactive (typical `pam_google_authenticator` setups) (#1005)
+  - **SSH + Google Authenticator**: Connections with Password + TOTP no longer fail (#1005)
+  - **Editor Caret Edge Cases**: Up arrow on the first line, Down on the last line, and Cmd+Left/Right at end-of-line with no trailing newline now work correctly (#1007)
+  - **Caret Gutter Color**: Caret at end of query keeps its line-number color in the gutter
+  - **Multi-Window Tab Persistence**: All windows now persist on relaunch instead of all-but-one being dropped
+  - **Filter Autocomplete Focus**: Popover no longer steals keyboard focus from the text field on Full Keyboard Access
+  - **Toolbar Database Name**: No longer empty after relaunch when the last-used database is restored
+  - **Cmd+K Database Switch**: Switching databases no longer reverts in Cmd+T, query history, AI prompts, or several tab-creation paths (#1043)
+  - **AI Provider Test**: No longer shows `unsupported URL` while editing a draft endpoint
+  - **Connection Form Coordinator**: No longer rebuilds on every parent re-render (#1102)
+  - **AI Chat Composer**: IME safety, visible scroll bar, and Shift+Return for newline (#1100)
+  - **AI Chat Tool Limit**: Roundtrip limit raised from 5 to 10 (#1096)
+  - **AI Chat Rules Persistence**: Per-connection rules persist through `StoredConnection` and CloudKit sync (#1098)
+  - **AI Chat Retry Button**: Hidden for non-recoverable errors (auth failure, deprecated model, invalid endpoint)
+  - **AI Chat Code Blocks**: Render with syntax highlighting and Insert even when the language tag is missing
+  - **AI Chat Insert**: Stays enabled when the chat panel has focus instead of the editor
+  - **MCP Errors**: Surface a readable message via `LocalizedError` (#1095)
+  - **Data Grid Header Inset**: Column headers align with result-cell horizontal inset
+  - **Toolbar Status Inset**: Connection status keeps its left inset when no connection tag is shown
+</Update>
+
+<Update label="May 4, 2026" description="v0.38.0">
+  ### New Features
+
+  - **Check for Updates in Welcome Window**: New link next to the version number triggers Sparkle without leaving the screen
+  - **Integrations Activity Window**: Dedicated, resizable window for the MCP activity log and connected clients (Window menu). Sidebar split between Activity Log and Connected Clients, with native search, filter, refresh, and export. Position and size remembered across launches
+  - **Sample Database**: Chinook SQLite database bundled with the app. Open from the welcome screen with one click; reset via File menu
+  - **Connection String Detection**: Paste a `postgres://`, `mysql://`, `redis://`, or `mongodb://` URL into the connection form to auto-fill host, port, user, password, and database
+  - **SSH Config Aliases**: SSH tunnel resolves host aliases from `~/.ssh/config`. Type an alias like `aia-bastion` in the SSH host field and it works the same as `ssh aia-bastion` in a terminal. Supports glob patterns, `Match` directives, `ProxyJump`, hostname canonicalization, and `Include`. Live: edit `~/.ssh/config` and the next connection picks it up
+  - **Oracle 10G Authentication**: Accounts whose `password_versions` includes a 10G hash now connect successfully, matching DBeaver/JDBC/sqlplus
+  - **Oracle Test Connection Diagnostics**: Failed auth opens a focused diagnostic sheet with copy-able info, suggested actions, and a link to file an issue
+  - **MCP Protocol 2025-11-25**: Server now supports protocol versions `2025-06-18` and `2025-11-25`. Clients on the latest spec no longer downgrade. Includes structured tool output (`structuredContent`), tool annotations, completions capability, and streaming progress notifications
+
+  ### Improvements
+
+  - **Welcome Window Polished to macOS HIG**: Subtle drop shadow on the app icon, dynamic text styles, "Sponsor" button removed, "Create connection" uses the bordered control style, toolbar icons (+ / new group) gain a hover background and proper hit targets, window background uses native vibrancy
+  - **Settings > Integrations Flattened**: Now a flat preferences pane per macOS HIG. Configuration only (server toggle, status, port, row limits, query timeout, tokens, network options); activity moved to the new Integrations Activity window, setup snippets to a "Connect a Client…" sheet
+  - **MCP Idle Timeout Raised**: From 5 to 15 minutes, fewer reconnects during slow workflows
+  - **Sync Passwords Toggle**: Now shows a caption explaining the toggle only affects new saves. Existing passwords keep their current sync state until you re-save them
+  - **Keychain Hardening**: Non-syncing keychain items use `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, keeping local-only secrets out of unencrypted device backups
+
+  ### Bug Fixes
+
+  - **Welcome / Connection / Feedback Window Position**: Windows now remember position and size across launches. Previously they always reopened centered because frame autosave was never set on the underlying NSWindow
+  - **Saved Passwords Disappearing**: Saved connection passwords no longer disappear after quitting and relaunching the app. Removed the destructive legacy-keychain migration that was deleting credentials on sandboxed macOS configurations
+  - **Cmd+Z Cell Background**: Undo after editing a cell no longer leaves the yellow "modified" highlight in place
+  - **Tab Switching Burst Lag**: Rapid Cmd+Number presses no longer queue tail animations after key release. AppKit tab switches are now applied synchronously
+  - **Oracle Type Coverage**: TIMESTAMP variants, INTERVAL DAY TO SECOND, INTERVAL YEAR TO MONTH, DATE, RAW, and BLOB columns render through typed decoders instead of garbled text. INTERVAL YEAR TO MONTH and BFILE columns no longer crash on row fetch. Unknown types display `<unsupported: type>` instead of crashing
+  - **Oracle 23ai Handshake**: Connections to 23ai cloud and containerized deployments no longer fail with `uncleanShutdown` mid-handshake
+  - **Plugin Re-install Prompt**: Connecting to a downloadable database type after the plugin is disabled or uninstalled now reopens the install prompt instead of failing
+  - **Redshift Schemas for Non-Admin Users**: Schema switcher no longer shows an empty list. Now reads from `pg_namespace` filtered by `has_schema_privilege`, matching what the user can actually use
+  - **MCP SSE Stream**: GET `/mcp` now opens a real Server-Sent Events stream. Previously the connection was closed immediately and `notifications/progress` events were dropped
+  - **MCP Concurrent Tool Calls**: No longer serialize at the dispatcher loop, each exchange dispatches in its own child task
+  - **MCP Session Recovery**: Stale `Mcp-Session-Id` after idle timeout returns a proper JSON-RPC `Session not found` envelope with HTTP 404, letting clients re-initialize cleanly instead of hanging until a 4-minute timeout
+
+  ### Removed
+
+  - **`useSSHConfig` toggle**: Per-connection toggle removed. `~/.ssh/config` is always consulted at connection time; explicit form values still take precedence over ssh config defaults
+</Update>
+
+<Update label="May 1, 2026" description="v0.37.0">
+  ### New Features
+
+  - **External API**: Connect Raycast, Cursor, Claude Desktop, and other MCP clients. Token-based pairing, per-connection access control, 90-day activity log
+  - **New MCP Tools**: `list_recent_tabs`, `search_query_history`, `open_connection_window`, `open_table_tab`, `focus_query_tab`
+  - **PostgreSQL ICU Collation**: Provider picker in Create Database for PG 15+
+  - **Single-Click Cell Editing**: Click a focused cell to start editing, no double-click needed
+  - **Multi-Cell Paste**: Paste TSV data from the clipboard, grouped as one undo
+  - **Rich Copy**: Copy rows in TSV, HTML, and plain text for spreadsheet apps
+
+  ### Improvements
+
+  - Result safety cap is enforced after the query runs, not by rewriting your SQL. Status bar shows "Showing N rows (truncated)" with a Fetch All button when the cap kicks in
+  - Settings tab renamed from "MCP" to "Integrations" with sections for clients, activity log, and pairing
+  - MCP server lazy-starts on first request, no more manual enable
+  - Connection URL parsing supports SSH user:password@host, multi-host, MongoDB auth, Redis database index
+  - SSH Private Key auth auto-resolves keys from ~/.ssh/config and default locations
+  - Shift+Tab navigates to the previous cell; Cmd+Z is unified across editor and grid
+  - VoiceOver: column headers announce sort direction; cells expose row and column index ranges
+  - Activity log: Export to CSV, search across all fields
+  - AI provider settings allow manually entering a model name
+  - OpenSSL shared as dylib across app and plugins, ~15MB smaller bundle
+
+  ### Bug Fixes
+
+  - SELECT queries with `LIMIT N` now return N rows. The engine no longer strips your LIMIT and uses its own cap. Affected SQLite, DuckDB, LibSQL, ClickHouse, Redshift, Cloudflare D1, and the MCP query path. MSSQL and Oracle no longer silently inject ORDER BY either (#956)
+  - Crash on macOS 26 when opening SQL Preview
+  - File associations for .sql, .sqlite, .duckdb now appear in Finder's Open With menu
+  - New tab from the empty state replaces the placeholder instead of opening a separate window-tab
+  - PostgreSQL Create Database collation errors on glibc-initialized servers (#927)
+  - SSH agent paths now expand ~ for 1Password and similar agents
+  - Pairing approval: 5-minute countdown, searchable connection list, requires explicit Approve click
+  - Group and connection deletions persist before sync, fixing a race that could re-upload deleted records to iCloud
+
+  ### Breaking Changes
+
+  - Old name-based deep links (`tablepro://connect/{name}/...`) removed. Use UUID-keyed paths from "Copy Connection Deep Link"
+  - MCP server data directory moved to `~/Library/Application Support/TablePro/`. Re-pair external clients after upgrading
+  - Separately distributed plugins (Oracle, DuckDB, MSSQL, MongoDB, BigQuery, LibSQL, Cassandra, Etcd, Cloudflare D1, DynamoDB) require update. PluginKit ABI bumped to 9
+  - Settings renamed: `enforceQueryResultLimit` to `truncateQueryResults`, `queryResultLimit` to `queryResultRowCap`. Custom values revert to default on first launch
+</Update>
+
+<Update label="April 27, 2026" description="v0.36.0">
+  ### New Features
+
+  - **GitHub Copilot**: Inline code suggestions, chat, OAuth sign-in, and schema-aware context
+  - **Query Parameters**: Use `:name` placeholders in SQL, fill values in an inline panel, execute with native prepared statements
+  - **Plugin Auto-Update**: Outdated plugins update silently at launch; one-click update in Settings
+  - **Connection Sharing**: Copy Connection String, Copy TablePro Link, and Copy as JSON via Share menu
+  - **MCP Server Security**: Token auth with three permission tiers, TLS, remote access, rate limiting, and one-click setup for Claude Code, Desktop, and Cursor
+
+  ### Improvements
+
+  - AI settings rewritten as a single tab with one active provider and per-provider config sheets
+  - Native search fields in keyboard shortcuts, database switcher, and quick switcher
+  - Filter value field uses native SwiftUI suggestion dropdown
+  - MCP bridge pins TLS certificate fingerprint
+
+  ### Bug Fixes
+
+  - Plugin ABI mismatch no longer crashes on launch
+  - IME input (Chinese, Japanese, Korean) works correctly in filter value field
+  - SQL parameter escaping handles control characters and edge-case formats
+  - Foreign app import SSL/SSH parsing for TablePlus, DBeaver, and Sequel Ace
+  - Export race conditions, missing confirmation dialogs, and empty states
+  - Window position restore, connection error display, localization gaps
+</Update>
+
+<Update label="April 25, 2026" description="v0.35.0">
+  ### New Features
+
+  - **MongoDB Replica Sets**: Multi-host connections for replica set clusters
+  - **JSON Results View**: Data/Structure/JSON toggle in the status bar
+  - **JSON Window**: Pop out JSON viewer into a resizable, fullscreen-capable window
+  - **Feedback Form**: Bug reports and feature requests via Help > Report an Issue
+  - **Local Only Connections**: Exclude individual connections from iCloud sync
+  - **MCP Query Safety**: Server-side confirmation for write and destructive queries
+
+  ### Improvements
+
+  - Import URL supports libSQL, D1, Oracle, ClickHouse, etcd with dynamic placeholders and clipboard auto-paste
+  - Filter operator picker shows SQL symbols alongside names
+  - SQL autocomplete suggests columns before FROM using cached schema
+  - Native macOS UI across cell editors, alerts, search, and toolbar
+
+  ### Bug Fixes
+
+  - Connection form overflow with SSH jump hosts and TOTP fields
+  - Missing confirmation on group deletion
+  - Crash when scrolling AI Chat during streaming on macOS 15.x
+  - Connection failure on PostgreSQL-compatible databases without `SET statement_timeout`
+  - Schema-qualified table names resolve correctly in autocomplete
+  - Alert dialogs use sheet attachment instead of bare modal
+</Update>
+
+<Update label="April 22, 2026" description="v0.34.0">
+  ### New Features
+
+  - **libSQL / Turso**: New database plugin for libSQL and Turso via Hrana HTTP protocol
+  - **JSON Viewer**: Text/tree toggle for viewing and editing JSON data in cells
+  - **MCP Server**: Built-in Model Context Protocol server with client management and status menu
+  - **Connection Import**: Import connections from TablePlus, Sequel Ace, and DBeaver
+  - **Database CLI Terminal**: Embedded terminal for mysql, psql, redis-cli, etc. (`Ctrl+Cmd+\``)
+  - **Structure Editing**: Alter existing table columns, indexes, foreign keys, and primary keys
+
+  ### Improvements
+
+  - Sidebar toggle uses Xcode-style navigator buttons next to traffic lights
+  - Sidebar and inspector panels use native macOS split view controls
+  - Theme colors adapt to system appearance and accent color automatically
+
+  ### Bug Fixes
+
+  - SQL formatter now preserves original case, UNION and parentheses spacing
+</Update>
+
+<Update label="April 19, 2026" description="v0.33.0">
+  ### New Features
+
+  - **Cancel Query**: Stop a running query from the toolbar or with `Cmd+.`
+  - **Execute All**: Run all statements in the editor with `Cmd+Shift+Enter`
+  - **Drop Database**: Drop databases from the switcher via context menu, toolbar, or Delete key
+  - **Query Result Limit**: Configurable row limit in Data Grid preferences
+  - **Structure Tab**: Search, sort, count badges, PK column, DDL view with highlighting, Copy As (CSV/JSON/SQL), dropdown pickers, destructive change confirmation
+  - **Structure Tab**: Charset/collation (MySQL), index prefix length, partial indexes (PostgreSQL), cross-schema FK, schema changes in query history
+  - **ClickHouse Parts**: Optimize table, drop/detach partition actions
+  - **Streaming Export**: Export query results directly from database with no memory limit
+  - **Import Error Handling**: Stop and Rollback, Stop and Commit, or Skip and Continue
+  - **Handoff**: Resume work across devices via NSUserActivity
+
+  ### Improvements
+
+  - Query tabs now load rows progressively (default 10,000) with Load More and Fetch All
+  - Main editor window rewritten on AppKit for faster tab opens and correct lifecycle
+  - Toolbar layout follows Apple HIG (sidebar left, connection center, view actions right)
+  - Export engine rewritten with streaming row fetch, macOS system progress, and atomic file writes
+  - SQL import parser rewritten with DELIMITER support, MySQL conditional/hash comments, and async decompression
+
+  ### Bug Fixes
+
+  - Fix selection highlight not covering the last line on Cmd+A
+  - Fix Cmd+W closing the connection window instead of clearing to empty state
+  - Fix ER Diagram and Server Dashboard replacing the current tab instead of opening a new one
+  - Fix welcome window stealing focus on connect
+  - Fix toolbar empty on second tab, menu shortcuts disabled after toolbar click
+  - Fix AI chat freeze with large queries or results in the system prompt
+  - Fix AI chat panel not updating when switching connections
+  - Fix schema not restored on reconnect for PostgreSQL, Redshift, and BigQuery
+  - Fix database lost after auto-reconnect
+  - Fix database switch closing windows before confirming success
+  - Fix Redis database selection not persisted across sessions
+  - Fix SSH jumphost lost after disconnect or app restart
+  - Fix password appearing missing when Keychain is locked after reboot
+  - Fix import rollback reporting and FK checks not restored after failure
+  - Fix JSON export coercing leading-zero strings to integers
+  - Fix XLSX export not splitting tables exceeding 1,048,576 rows
+  - Fix CSV formula injection guard to OWASP-standard prefixes
+  - Fix MQL export not validating JSON values
+  - Fix SQL export gzip compression blocking and not cancellable
+  - Fix export progress bar not reaching 100%
+</Update>
+
+<Update label="April 17, 2026" description="v0.32.1">
+  ### Changed
+
+  - Revert in-app tab bar refactor to restore native macOS window tabs (stability)
+</Update>
+
+<Update label="April 16, 2026" description="v0.32.0">
+  ### Improvements
+
+  - OpenSSL updated to 3.4.3 (CVE-2025-9230, CVE-2025-9231)
+  - Memory pressure monitoring now reactive via DispatchSource
+
+  ### Bug Fixes
+
+  - Fix raw SQL injection via external URL scheme deeplinks: now requires user confirmation
+  - Fix MySQL prepared statements silently truncating columns larger than 64KB
+  - Fix MSSQL error messages misattributed when multiple connections open simultaneously
+  - Fix BigQuery filter injection via unescaped column names and unvalidated operators
+  - Fix app quitting without warning when tabs have unsaved edits
+  - Fix connection list corruption risk from non-atomic UserDefaults writes
+  - Fix stale user-installed plugins silently rejected with no UI feedback
+  - Fix SSL mode picker showing misleading "Required" instead of "Required (skip verify)"
+  - Fix plugin load blocking main thread on first connection after launch
+
+  ### Security
+
+  - SHA-256 checksum verification added to FreeTDS, Cassandra, and DuckDB build scripts
+</Update>
+
+<Update label="April 14, 2026" description="v0.31.5">
+  ### Improvements
+
+  - **Keyboard Shortcuts**: Follow macOS HIG. Quick Switcher remapped to ⌘⇧O, Format Query to ⌘⇧L, AI Explain (⌘L), Optimize (⌘⌥L), and Toggle Sidebar (⌘0) now wired to menu bar
+
+  ### Bug Fixes
+
+  - **AI Chat**: Fix app hanging during AI streaming, schema fetch, and conversation loading
+  - **SSH Tunnel**: Agent auth falls back to key file from `~/.ssh/config` when agent has no loaded identities
+  - **SSH Tunnel**: Fix connections failing to reconnect after idle or sleep
+  - **Data Grid**: Fix composite primary key tables editing/deleting wrong rows
+  - **Structure View**: Prevent saves from bypassing Safe Mode on read-only connections
+</Update>
+
+<Update label="April 14, 2026" description="v0.31.4">
+  ### New Features
+
+  - **iOS Database Icons**: Brand icons for MySQL, PostgreSQL, MongoDB, Redis, etc. instead of generic SF Symbols
+
+  ### Bug Fixes
+
+  - Fixed native tab bar "+" button always creating "Query 1" (#727)
+  - Fixed sidebar gap shifting when switching tabs (#728)
+  - Fixed SSH Agent auth failing on apps launched from Finder (#729)
+  - Fixed iOS SSH private key import not working during test connection (#730)
+  - Fixed iOS SQLite file picker not updating after file selection (#732)
+  - Fixed toggle inspector shortcut mismatch (#726)
+</Update>
+
+<Update label="April 13, 2026" description="v0.31.3">
+  ### New Features
+
+  - **Restore Sessions**: All open connections and tabs are restored after quitting the app (#703)
+  - **SQLite Auto-Refresh**: Schema changes from external tools (migrations, CLI) are detected automatically (#704)
+  - **Query Menu**: New dedicated menu for Execute, Explain, Format, and Preview SQL actions
+
+  ### Improvements
+
+  - **SQL Formatter**: Complete rewrite with token-based architecture, with proper handling of JOINs, subqueries, CASE expressions, CTEs, window functions, and 15+ SQL constructs (#705)
+  - **Keyboard Shortcuts**: Updated to follow macOS HIG: `⌘F` is Find, `⌘⇧F` for filters, `⌘⌥I` for inspector, `⌘0` for sidebar. Format Query and Pagination now customizable.
+  - **Menu Bar**: Restructured per macOS HIG: `⌘N` opens connection list (#722), Help search restored, duplicates removed
+  - **UI Colors**: Standardized to macOS semantic colors across all error/success/warning indicators
+
+  ### Bug Fixes
+
+  - Fixed auto-selection of first item failing with fast input in Database Switcher (#714)
+  - Fixed Ollama model selection and error messages in AI settings (#712)
+  - Fixed filter logic: `= NULL` auto-converts to `IS NULL`, BETWEEN works on all drivers, IN/NOT IN handles NULL values (#706)
+  - Fixed UI layout breaks when toggling menus, panels, and inspectors (#702)
+  - Fixed `⌘W` accidentally closing connection window instead of tab
+  - Fixed tabs not saved before database switch, rollback failures now logged, filter validation improved (#707)
+  - Fixed Ollama AI chat streaming: responses were silently discarded
+</Update>
+
+<Update label="April 13, 2026" description="v0.31.2">
+  ### Bug Fixes
+
+  - Fixed query tabs always named "Query 1" instead of incrementing (#695)
+  - Fixed sidebar empty in new or restored window tabs (#694)
+  - Fixed tab titles, order, and persistence lost on quit/restore
+  - Fixed PostgreSQL version display for v10+ (#698)
+  - Fixed license activation metadata and deactivation error handling
+</Update>
+
+<Update label="April 12, 2026" description="v0.31.1">
+  ### Bug Fixes
+
+  - Fixed iCloud Sync not working between Mac and iPhone/iPad TestFlight builds
+</Update>
+
+<Update label="April 12, 2026" description="v0.31.0">
+  ### New Features
+
+  - **Server Dashboard**: Monitor active sessions, server metrics, and slow queries with configurable auto-refresh (PostgreSQL, MySQL, MSSQL, ClickHouse, DuckDB, SQLite)
+  - **Handoff**: Continue database work across Mac and iPhone/iPad
+  - **Create Database Options**: Database-specific charset/encoding options (encoding + LC_COLLATE for PostgreSQL, charset + collation for MySQL, name-only for others)
+
+  ### Improvements
+
+  - Sidebar table loading refactored for faster, race-free database switching
+  - iOS: full-text search in data browser, state restoration across app lifecycle, iPad keyboard shortcuts
+
+  ### Bug Fixes
+
+  - Fixed SSH tunnel failing with `~/.ssh/config` profiles: added `Include` directive support, token expansion, multi-word `Host` filtering (#672)
+  - Fixed Create Database dialog showing MySQL options for all database types
+</Update>
+
+<Update label="April 10, 2026" description="v0.30.1">
+  ### New Features
+
+  - **Auto-Uppercase Keywords**: SQL keywords are automatically uppercased as you type (#660)
+  - **Unified Cell Editors**: Boolean, enum, date, JSON, and blob columns now show a chevron button for quick editing (#665)
+
+  ### Bug Fixes
+
+  - Fixed MSSQL connection failing on Docker and fresh SQL Server instances (#661)
+  - Fixed context menu Format SQL not working (#659)
+</Update>
+
+<Update label="April 10, 2026" description="v0.30.0">
+  ### New Features
+
+  - **ER Diagram**: Interactive entity-relationship diagrams with crow's foot notation, drag-to-rearrange layout, and PNG export (#186)
+  - **FK Preview Toggle**: Press Space key to toggle foreign key preview popover (#648)
+  - **iOS Connection Reorder**: Drag-to-reorder connections in the iOS app with iCloud sync (#652)
+
+  ### Bug Fixes
+
+  - Fixed export dialog doing nothing on macOS Tahoe due to incorrect window reference for save panel (#654)
+  - Fixed column visibility popover and hex editor alignment per macOS HIG (#653)
+  - Accept SQLAlchemy-style connection URLs with driver hints (#642)
+</Update>
+
+<Update label="April 9, 2026" description="v0.29.0">
+  ### New Features
+
+  - **Maintenance Tools**: VACUUM, ANALYZE, OPTIMIZE, REINDEX, CHECK TABLE, and more via table context menu
+  - **EXPLAIN Visualization**: Diagram, tree, and raw views for query execution plans (PostgreSQL, MySQL)
+
+  ### Bug Fixes
+
+  - Fixed cross-schema foreign key preview, edit, and navigation for PostgreSQL and MySQL (#644)
+  - Fixed macOS HIG compliance: system colors, accessibility labels, theme tokens, localization
+  - Fixed idle ping spin loop caused by exhausted AsyncStream iterator (#618)
+  - Skip exact row count for large tables: use database statistics estimate (#519)
+
+  ### Improvements
+
+  - Theme font pickers now list all installed monospaced fonts dynamically
+</Update>
+
+<Update label="April 7, 2026" description="v0.28.0">
+  ### New Features
+
+  - **Smart Value Detection**: Auto-render UUIDs in BINARY(16) columns and timestamps in integer columns
+  - **Display As Override**: Per-column format override via column header context menu
+  - **iOS Safe Mode**: Off, Confirm Writes, or Read-Only per connection
+  - **iOS FK Navigation**: Tap to preview referenced row from foreign key columns
+  - **iOS Syntax Highlighting**: SQL keywords, strings, numbers, comments colored in query editor
+
+  ### Bug Fixes
+
+  - Fixed excessive idle ping traffic from orphaned monitor tasks
+  - Fixed Cmd+W save not persisting data grid changes
+  - Fixed window sizing, selection highlight, and connection switcher errors
+  - Moved file loading off main thread, replaced timing hacks with signals
+</Update>
+
+<Update label="April 6, 2026" description="v0.27.5">
+  ### New Features
+
+  - **iOS App**: Groups, tags, filter, sort, pagination, query history, export to clipboard, Spotlight search, Siri Shortcuts, Home Screen widget
+
+  ### Bug Fixes
+
+  - Fixed crashes in SSH tunnel, export dialog, and jump host removal
+  - Fixed data races in storage layers with MainActor isolation
+  - Native sheet presentation for all dialogs and file pickers
+  - Replaced event monitors and timing hacks with native SwiftUI APIs
+
+  ### Improvements
+
+  - Migrated undo system to NSUndoManager
+</Update>
+
+<Update label="April 5, 2026" description="v0.27.4">
+  ### New Features
+
+  - **Cloudflare D1 Batch Queries**: Execute multi-statement SQL via REST API
+  - **Cloudflare D1 Schema Editing**: CREATE TABLE, ADD/DROP COLUMN, CREATE/DROP INDEX
+
+  ### Bug Fixes
+
+  - Fixed multi-statement SQL execution failing on Cloudflare D1, ClickHouse, and other drivers without transaction support
+
+  ### Improvements
+
+  - Switched to Apple-standard `xcodebuild archive` + `exportArchive` build pipeline with dSYM collection
+</Update>
+
 <Update label="April 3, 2026" description="v0.27.3">
   ### New Features
 
@@ -182,7 +663,7 @@ rss: true
 <Update label="March 22, 2026" description="v0.22.1">
   ### New Features
 
-  - **Row Numbers Column**: Show or hide row numbers in the data grid via Settings > Data Grid
+  - **Row Numbers Column**: Show or hide row numbers in the data grid via Settings > Editor
   - **Persistent Column Layout**: Column widths and order are saved per table across tab switches, view toggles, and app restarts
 
   ### Bug Fixes
@@ -249,8 +730,8 @@ rss: true
 <Update label="March 18, 2026" description="v0.20.2">
   ### Bug Fixes
 
-  - Fixed safe mode badge not displaying for silent level
-  - Fixed safe mode level not reflecting live toolbar changes
+  - Fixed Safe Mode badge not displaying for silent level
+  - Fixed Safe Mode level not reflecting live toolbar changes
   - Fixed `~/.pgpass` password lookup using SSH tunnel host instead of the original host
 </Update>
 
@@ -296,7 +777,7 @@ rss: true
 <Update label="March 15, 2026" description="v0.19.0">
   ### New Features
 
-  - **iCloud Sync (Pro)**: Sync connections, groups, tags, settings, and query history across Macs with per-category toggles, conflict resolution, and real-time status indicator
+  - **iCloud Sync**: Sync connections, groups, tags, settings, and query history across Macs with per-category toggles, conflict resolution, and real-time status indicator (requires Pro license)
   - **SQL Favorites**: Save frequently used queries with optional keyword bindings for autocomplete expansion
   - **Copy as JSON**: Copy selected rows as JSON from context menu and Edit menu
   - **Help Menu**: Quick links to website, documentation, GitHub, and sponsor page
@@ -317,7 +798,7 @@ rss: true
 <Update label="March 14, 2026" description="v0.18.0">
   ### New Features
 
-  - **Theme Engine**: 4 built-in themes (Default Light/Dark, Dracula, Nord) with full color, font, and layout customization. Import/export themes as JSON
+  - **Theme Engine**: 4 built-in themes (Default Light/Dark, Dracula, Nord) with full color and font customization. Import/export themes as JSON
   - **Theme Registry**: Browse, install, and update community themes from the plugin registry
   - **Cassandra & ScyllaDB Support**: Connect to Cassandra and ScyllaDB databases via a downloadable plugin
   - **SSH Two-Factor Authentication**: TOTP support with auto-generate and prompt modes for SSH connections
@@ -479,7 +960,7 @@ rss: true
   - **Amazon Redshift Support**: Connect to Amazon Redshift data warehouses
   - **Deep Links**: Open connections, tables, queries, and import connections via `tablepro://` URLs
   - **Copy as URL**: Right-click a connection to copy its details as a connection string (e.g., `mysql://user:pass@host/db`)
-  - **Auto-show Inspector**: Automatically open the right sidebar when selecting a row (Settings > Data Grid)
+  - **Auto-show Inspector**: Automatically open the right sidebar when selecting a row (Settings > Editor)
   - **Homebrew Cask**: Install via `brew install --cask tablepro`
 
   ### Improvements

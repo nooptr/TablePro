@@ -75,7 +75,8 @@ enum UndoAction {
             columnIndex: Int,
             columnName: String,
             previousValue: String?,
-            newValue: String?
+            newValue: String?,
+            originalRow: [String?]?
          )
     case rowInsertion(rowIndex: Int)
     case rowDeletion(rowIndex: Int, originalRow: [String?])
@@ -85,7 +86,7 @@ enum UndoAction {
     case batchRowInsertion(rowIndices: [Int], rowValues: [[String?]])
 }
 
-// Note: TabPendingChanges is defined in QueryTab.swift
+// Note: TabChangeSnapshot is defined in QueryTab.swift
 
 // MARK: - Array Extension
 

@@ -19,7 +19,12 @@ final class SchemaProviderRegistry {
     private var refCounts: [UUID: Int] = [:]
     private var removalTasks: [UUID: Task<Void, Never>] = [:]
 
-    init() {}
+    #if DEBUG
+    /// Test-only init for `@testable` tests in DEBUG builds; release builds must use `.shared`.
+    internal init() {}
+    #else
+    private init() {}
+    #endif
 
     func provider(for connectionId: UUID) -> SQLSchemaProvider? {
         providers[connectionId]
@@ -49,9 +54,9 @@ final class SchemaProviderRegistry {
         count -= 1
         if count <= 0 {
             refCounts.removeValue(forKey: connectionId)
-            removalTasks[connectionId] = Task { @MainActor in
+            removalTasks[connectionId] = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
-                guard !Task.isCancelled else { return }
+                guard let self, !Task.isCancelled else { return }
                 self.providers.removeValue(forKey: connectionId)
                 self.removalTasks.removeValue(forKey: connectionId)
             }

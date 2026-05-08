@@ -1,6 +1,6 @@
 ---
 title: Connection Sharing
-description: Export and import database connections as .tablepro files
+description: Share connections with your team or import from other apps
 ---
 
 # Connection Sharing
@@ -11,7 +11,7 @@ Export connections to a `.tablepro` file and share with your team. Passwords sta
 
 Right-click a connection > **Export Connection...**. Select multiple first to export together. Or use **File** > **Export Connections...** for all.
 
-Exported: host, port, username, type, SSH/SSL config, color, tag, group, safe mode. Not exported: passwords, key passphrases, TOTP secrets.
+Exported: host, port, username, type, SSH/SSL config, color, tag, group, Safe Mode. Not exported: passwords, key passphrases, TOTP secrets.
 
 <Frame caption="Export connections">
   <img
@@ -56,13 +56,56 @@ Duplicates are unchecked. Check to import, then pick **As Copy**, **Replace**, o
   />
 </Frame>
 
+## Import from Other Apps
+
+Bring your connections over from TablePlus, Sequel Ace, or DBeaver. Passwords can be imported too. The source app doesn't need to be running.
+
+1. **File** > **Import from Other App...**
+2. Pick the source app and click **Continue**.
+3. Review the list, uncheck anything you don't want, then click **Import**.
+
+<Frame caption="Pick the source app">
+  <img
+    className="block dark:hidden"
+    src="/images/import-from-app-picker.png"
+    alt="Import from other app - source picker"
+  />
+  <img
+    className="hidden dark:block"
+    src="/images/import-from-app-picker-dark.png"
+    alt="Import from other app - source picker"
+  />
+</Frame>
+
+Groups and folders carry over.
+
+| App | Databases | Passwords |
+|-----|-----------|-----------|
+| TablePlus | MySQL, PostgreSQL, MongoDB, SQLite, Redis, and more | From Keychain |
+| Sequel Ace | MySQL | From Keychain |
+| DBeaver | MySQL, PostgreSQL, SQLite, SQL Server, Oracle, and more | Decrypted from config file |
+
 ## Share via Link
 
-Right-click > **Copy as Import Link**. Paste in Slack, a wiki, or a README.
+Two link forms ship with TablePro. Pick the one that matches what you want to share.
+
+### Copy as Import Link
+
+Right-click > **Copy as Import Link**. Produces a `tablepro://import?...` URL with host, port, type, and username (no password). Paste in Slack, a wiki, or a README. The recipient opens the link, reviews the prefilled form, adds their own password, and saves.
 
 ```
 tablepro://import?name=Staging&host=db.example.com&port=5432&type=PostgreSQL&username=admin
 ```
+
+### Copy Connection Deep Link
+
+Right-click > **Copy Connection Deep Link**. Produces a `tablepro://connect/<uuid>` URL that opens the connection you already have saved. The link refers to your local connection record by UUID, so it only works on a Mac that already has the same connection saved (for example, your other Mac with iCloud Sync, or a teammate who imported the connection). Use this form for bookmarks, Raycast Quicklinks, or shell aliases.
+
+```
+tablepro://connect/9f1f0c3e-2e3d-4b14-9c3a-1d2f4ad1f6f1
+```
+
+See [URL Scheme](/external-api/url-scheme#open-a-connection) for the full path syntax (table targets, query parameters, percent-encoding).
 
 ## Encrypted Export <sup>Pro</sup>
 
@@ -92,7 +135,7 @@ When importing, TablePro prompts for the passphrase.
 
 Watch a shared directory for `.tablepro` files. Connections appear read-only in the sidebar. Each person enters their own password.
 
-**Settings** (`Cmd+,`) > **Sync** > **Linked Folders** > **Add Folder...**
+**Settings** (`Cmd+,`) > **Account** > **Linked Folders** > **Add Folder...**
 
 Works with Git repos, Dropbox, network drives.
 

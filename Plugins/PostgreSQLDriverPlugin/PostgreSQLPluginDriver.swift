@@ -16,8 +16,6 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     private var _currentSchema: String = "public"
 
     private static let logger = Logger(subsystem: "com.TablePro.PostgreSQLDriver", category: "PostgreSQLPluginDriver")
-    private static let limitRegex = try? NSRegularExpression(pattern: "(?i)\\s+LIMIT\\s+\\d+")
-    private static let offsetRegex = try? NSRegularExpression(pattern: "(?i)\\s+OFFSET\\s+\\d+")
 
     var currentSchema: String? { _currentSchema }
     var supportsSchemas: Bool { true }
@@ -118,18 +116,13 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         )
     }
 
-    func fetchRowCount(query: String) async throws -> Int {
-        let baseQuery = stripLimitOffset(from: query)
-        let countQuery = "SELECT COUNT(*) FROM (\(baseQuery)) AS __count_subquery__"
-        let result = try await execute(query: countQuery)
-        guard let firstRow = result.rows.first, let countStr = firstRow.first else { return 0 }
-        return Int(countStr ?? "0") ?? 0
-    }
+    // MARK: - Streaming
 
-    func fetchRows(query: String, offset: Int, limit: Int) async throws -> PluginQueryResult {
-        let baseQuery = stripLimitOffset(from: query)
-        let paginatedQuery = "\(baseQuery) LIMIT \(limit) OFFSET \(offset)"
-        return try await execute(query: paginatedQuery)
+    func streamRows(query: String) -> AsyncThrowingStream<PluginStreamElement, Error> {
+        guard let pqConn = libpqConnection else {
+            return AsyncThrowingStream { $0.finish(throwing: LibPQPluginError.notConnected) }
+        }
+        return pqConn.streamQuery(query)
     }
 
     // MARK: - Reconnect
@@ -164,6 +157,33 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
 
     func buildExplainQuery(_ sql: String) -> String? {
         "EXPLAIN \(sql)"
+    }
+
+    // MARK: - Maintenance
+
+    func supportedMaintenanceOperations() -> [String]? {
+        ["VACUUM", "ANALYZE", "REINDEX", "CLUSTER"]
+    }
+
+    func maintenanceStatements(operation: String, table: String?, schema: String?, options: [String: String]) -> [String]? {
+        let target = table.map { quoteIdentifier($0) }
+        switch operation {
+        case "VACUUM":
+            var opts: [String] = []
+            if options["full"] == "true" { opts.append("FULL") }
+            if options["analyze"] == "true" { opts.append("ANALYZE") }
+            if options["verbose"] == "true" { opts.append("VERBOSE") }
+            let optClause = opts.isEmpty ? "" : "(\(opts.joined(separator: ", "))) "
+            return [target.map { "VACUUM \(optClause)\($0)" } ?? "VACUUM"]
+        case "ANALYZE":
+            return [target.map { "ANALYZE \($0)" } ?? "ANALYZE"]
+        case "REINDEX":
+            return [target.map { "REINDEX TABLE \($0)" } ?? "REINDEX DATABASE CONCURRENTLY"]
+        case "CLUSTER":
+            return target.map { ["CLUSTER \($0)"] }
+        default:
+            return nil
+        }
     }
 
     // MARK: - View Templates
@@ -356,14 +376,15 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 ARRAY_AGG(a.attname ORDER BY array_position(ix.indkey, a.attnum)) AS columns,
                 ix.indisunique AS is_unique,
                 ix.indisprimary AS is_primary,
-                am.amname AS index_type
+                am.amname AS index_type,
+                pg_get_expr(ix.indpred, ix.indrelid) AS predicate
             FROM pg_index ix
             JOIN pg_class i ON i.oid = ix.indexrelid
             JOIN pg_class t ON t.oid = ix.indrelid
             JOIN pg_am am ON am.oid = i.relam
             JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
             WHERE t.relname = '\(escapeLiteral(table))'
-            GROUP BY i.relname, ix.indisunique, ix.indisprimary, am.amname
+            GROUP BY i.relname, ix.indisunique, ix.indisprimary, am.amname, ix.indpred, ix.indrelid
             ORDER BY ix.indisprimary DESC, i.relname
             """
         let result = try await execute(query: query)
@@ -372,12 +393,14 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             let columns = columnsStr
                 .trimmingCharacters(in: CharacterSet(charactersIn: "{}"))
                 .components(separatedBy: ",")
+            let whereClause = row.count > 5 ? row[5] : nil
             return PluginIndexInfo(
                 name: name,
                 columns: columns,
                 isUnique: row[2] == "t",
                 isPrimary: row[3] == "t",
-                type: row[4]?.uppercased() ?? "BTREE"
+                type: row[4]?.uppercased() ?? "BTREE",
+                whereClause: whereClause
             )
         }
     }
@@ -389,22 +412,27 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 kcu.column_name,
                 ccu.table_name AS referenced_table,
                 ccu.column_name AS referenced_column,
+                ccu.table_schema AS referenced_schema,
                 rc.delete_rule,
                 rc.update_rule
             FROM information_schema.table_constraints tc
             JOIN information_schema.key_column_usage kcu
                 ON tc.constraint_name = kcu.constraint_name
+                AND tc.table_schema = kcu.table_schema
             JOIN information_schema.referential_constraints rc
                 ON tc.constraint_name = rc.constraint_name
+                AND tc.constraint_schema = rc.constraint_schema
             JOIN information_schema.constraint_column_usage ccu
                 ON rc.unique_constraint_name = ccu.constraint_name
+                AND rc.unique_constraint_schema = ccu.constraint_schema
             WHERE tc.table_name = '\(escapeLiteral(table))'
+                AND tc.table_schema = '\(escapedSchema)'
                 AND tc.constraint_type = 'FOREIGN KEY'
             ORDER BY tc.constraint_name
             """
         let result = try await execute(query: query)
         return result.rows.compactMap { row in
-            guard row.count >= 6,
+            guard row.count >= 7,
                   let name = row[0],
                   let column = row[1],
                   let refTable = row[2],
@@ -415,8 +443,9 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 column: column,
                 referencedTable: refTable,
                 referencedColumn: refColumn,
-                onDelete: row[4] ?? "NO ACTION",
-                onUpdate: row[5] ?? "NO ACTION"
+                referencedSchema: row[4],
+                onDelete: row[5] ?? "NO ACTION",
+                onUpdate: row[6] ?? "NO ACTION"
             )
         }
     }
@@ -429,6 +458,7 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 kcu.column_name,
                 ccu.table_name AS referenced_table,
                 ccu.column_name AS referenced_column,
+                ccu.table_schema AS referenced_schema,
                 rc.delete_rule,
                 rc.update_rule
             FROM information_schema.table_constraints tc
@@ -448,7 +478,7 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         let result = try await execute(query: query)
         var grouped: [String: [PluginForeignKeyInfo]] = [:]
         for row in result.rows {
-            guard row.count >= 7,
+            guard row.count >= 8,
                   let tableName = row[0],
                   let name = row[1],
                   let column = row[2],
@@ -460,8 +490,9 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 column: column,
                 referencedTable: refTable,
                 referencedColumn: refColumn,
-                onDelete: row[5] ?? "NO ACTION",
-                onUpdate: row[6] ?? "NO ACTION"
+                referencedSchema: row[5],
+                onDelete: row[6] ?? "NO ACTION",
+                onUpdate: row[7] ?? "NO ACTION"
             )
             grouped[tableName, default: []].append(fk)
         }
@@ -728,25 +759,271 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         }
     }
 
-    func createDatabase(name: String, charset: String, collation: String?) async throws {
-        let escapedName = name.replacingOccurrences(of: "\"", with: "\"\"")
-        let validCharsets = ["UTF8", "LATIN1", "SQL_ASCII"]
-        let normalizedCharset = charset.uppercased()
-        guard validCharsets.contains(normalizedCharset) else {
-            throw LibPQPluginError(message: "Invalid encoding: \(charset)", sqlState: nil, detail: nil)
+    private static let supportedEncodings: [String] = [
+        "UTF8", "LATIN1", "SQL_ASCII", "WIN1252", "EUC_JP",
+        "EUC_KR", "ISO_8859_5", "KOI8R", "SJIS", "BIG5", "GBK"
+    ]
+
+    func createDatabaseFormSpec() async throws -> PluginCreateDatabaseFormSpec? {
+        let majorVersion = parsedServerMajorVersion()
+        let supportsProvider = (majorVersion ?? 0) >= 15
+
+        async let templateDefaultsTask = fetchTemplate1Defaults()
+        async let collationsTask = fetchCollations()
+        let templateDefaults = await templateDefaultsTask
+        let collations = await collationsTask
+        let serverCollate = templateDefaults?.collate
+        let serverIcuLocale = templateDefaults?.iculocale
+        let libcCollations = collations.libc
+        let icuCollations = collations.icu
+
+        let encodingOptions = Self.supportedEncodings.map {
+            PluginCreateDatabaseFormSpec.Option(value: $0, label: $0)
         }
 
-        var query = "CREATE DATABASE \"\(escapedName)\" ENCODING '\(normalizedCharset)'"
-        if let collation = collation {
-            let allowedCollationChars = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
-            let isValidCollation = collation.unicodeScalars.allSatisfy { allowedCollationChars.contains($0) }
-            guard isValidCollation else {
-                throw LibPQPluginError(message: "Invalid collation", sqlState: nil, detail: nil)
-            }
-            let escapedCollation = collation.replacingOccurrences(of: "'", with: "''")
-            query += " LC_COLLATE '\(escapedCollation)'"
+        var fields: [PluginCreateDatabaseFormSpec.Field] = [
+            PluginCreateDatabaseFormSpec.Field(
+                id: "encoding",
+                label: String(localized: "Encoding"),
+                kind: .picker(options: encodingOptions, defaultValue: "UTF8")
+            )
+        ]
+
+        if supportsProvider {
+            let providerOptions: [PluginCreateDatabaseFormSpec.Option] = [
+                PluginCreateDatabaseFormSpec.Option(value: "libc", label: "libc"),
+                PluginCreateDatabaseFormSpec.Option(value: "icu", label: "icu")
+            ]
+            let defaultProvider = templateDefaults?.provider == "i" ? "icu" : "libc"
+            fields.append(PluginCreateDatabaseFormSpec.Field(
+                id: "provider",
+                label: String(localized: "Locale Provider"),
+                kind: .picker(options: providerOptions, defaultValue: defaultProvider)
+            ))
         }
-        _ = try await execute(query: query)
+
+        let serverDefaultSubtitle = String(localized: "(server default)")
+        let libcOptions: [PluginCreateDatabaseFormSpec.Option] = libcCollations.map { name in
+            PluginCreateDatabaseFormSpec.Option(
+                value: name,
+                label: name,
+                subtitle: name == serverCollate ? serverDefaultSubtitle : nil
+            )
+        }
+
+        fields.append(PluginCreateDatabaseFormSpec.Field(
+            id: "collation",
+            label: String(localized: "Collation"),
+            kind: .searchable(options: libcOptions, defaultValue: serverCollate),
+            visibleWhen: supportsProvider
+                ? PluginCreateDatabaseFormSpec.Visibility(fieldId: "provider", equals: "libc")
+                : nil
+        ))
+
+        if supportsProvider {
+            let icuOptions: [PluginCreateDatabaseFormSpec.Option] = icuCollations.map { name in
+                PluginCreateDatabaseFormSpec.Option(
+                    value: name,
+                    label: name,
+                    subtitle: name == serverIcuLocale ? serverDefaultSubtitle : nil
+                )
+            }
+            fields.append(PluginCreateDatabaseFormSpec.Field(
+                id: "icu_locale",
+                label: String(localized: "ICU Locale"),
+                kind: .searchable(options: icuOptions, defaultValue: serverIcuLocale),
+                visibleWhen: PluginCreateDatabaseFormSpec.Visibility(fieldId: "provider", equals: "icu")
+            ))
+        }
+
+        return PluginCreateDatabaseFormSpec(fields: fields)
+    }
+
+    func createDatabase(_ request: PluginCreateDatabaseRequest) async throws {
+        let quotedName = request.name.replacingOccurrences(of: "\"", with: "\"\"")
+
+        guard let encoding = request.values["encoding"] else {
+            throw LibPQPluginError(
+                message: String(localized: "Encoding is required"),
+                sqlState: nil,
+                detail: nil
+            )
+        }
+        guard Self.supportedEncodings.contains(encoding) else {
+            throw LibPQPluginError(
+                message: String(format: String(localized: "Invalid encoding: %@"), encoding),
+                sqlState: nil,
+                detail: nil
+            )
+        }
+
+        var sql = "CREATE DATABASE \"\(quotedName)\" ENCODING '\(encoding)'"
+
+        let majorVersion = parsedServerMajorVersion()
+        let supportsProvider = (majorVersion ?? 0) >= 15
+        let provider = supportsProvider ? (request.values["provider"] ?? "libc") : "libc"
+
+        switch provider {
+        case "libc":
+            guard let collation = request.values["collation"], !collation.isEmpty else {
+                throw LibPQPluginError(
+                    message: String(localized: "Collation is required"),
+                    sqlState: nil,
+                    detail: nil
+                )
+            }
+            async let allowedCollationsTask = fetchCollations().libc
+            async let templateDefaultsTask = fetchTemplate1Defaults()
+            let allowedCollations = await allowedCollationsTask
+            guard allowedCollations.contains(collation) else {
+                throw LibPQPluginError(
+                    message: String(format: String(localized: "Invalid collation: %@"), collation),
+                    sqlState: nil,
+                    detail: nil
+                )
+            }
+            let escapedCollation = escapeLiteral(collation)
+            sql += " LC_COLLATE '\(escapedCollation)' LC_CTYPE '\(escapedCollation)'"
+
+            guard let templateDefaults = await templateDefaultsTask else {
+                throw LibPQPluginError(
+                    message: String(localized: "Failed to read template1 collation defaults"),
+                    sqlState: nil,
+                    detail: nil
+                )
+            }
+            if templateDefaults.collate != collation {
+                sql += " TEMPLATE template0"
+            }
+
+        case "icu":
+            guard supportsProvider else {
+                throw LibPQPluginError(
+                    message: String(localized: "ICU provider requires PostgreSQL 15 or newer"),
+                    sqlState: nil,
+                    detail: nil
+                )
+            }
+            guard let icuLocale = request.values["icu_locale"], !icuLocale.isEmpty else {
+                throw LibPQPluginError(
+                    message: String(localized: "ICU locale is required"),
+                    sqlState: nil,
+                    detail: nil
+                )
+            }
+            let allowedIcu = await fetchCollations().icu
+            guard allowedIcu.contains(icuLocale) else {
+                throw LibPQPluginError(
+                    message: String(format: String(localized: "Invalid ICU locale: %@"), icuLocale),
+                    sqlState: nil,
+                    detail: nil
+                )
+            }
+            let escapedIcu = escapeLiteral(icuLocale)
+            if let major = majorVersion, major >= 16 {
+                sql += " LOCALE_PROVIDER 'icu' LOCALE '\(escapedIcu)' TEMPLATE template0"
+            } else {
+                sql += " LOCALE_PROVIDER 'icu' ICU_LOCALE '\(escapedIcu)' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0"
+            }
+
+        default:
+            throw LibPQPluginError(
+                message: String(format: String(localized: "Invalid locale provider: %@"), provider),
+                sqlState: nil,
+                detail: nil
+            )
+        }
+
+        _ = try await execute(query: sql)
+    }
+
+    func dropDatabase(name: String) async throws {
+        let escapedName = name.replacingOccurrences(of: "\"", with: "\"\"")
+        _ = try await execute(query: "DROP DATABASE \"\(escapedName)\"")
+    }
+
+    private func parsedServerMajorVersion() -> Int? {
+        guard let raw = serverVersion else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let scanner = Scanner(string: trimmed)
+        scanner.charactersToBeSkipped = nil
+        _ = scanner.scanCharacters(from: CharacterSet.decimalDigits.inverted)
+        guard let digitRun = scanner.scanCharacters(from: .decimalDigits),
+              let value = Int(digitRun) else {
+            return nil
+        }
+        if value > 999 {
+            return value / 10000
+        }
+        return value
+    }
+
+    private struct Template1Defaults {
+        let collate: String
+        let ctype: String
+        let provider: String?
+        let iculocale: String?
+    }
+
+    private func fetchTemplate1Defaults() async -> Template1Defaults? {
+        let majorVersion = parsedServerMajorVersion() ?? 0
+        let selectColumns: String
+        if majorVersion >= 17 {
+            selectColumns = "datcollate, datctype, datlocprovider, datlocale"
+        } else if majorVersion >= 15 {
+            selectColumns = "datcollate, datctype, datlocprovider, daticulocale"
+        } else {
+            selectColumns = "datcollate, datctype, NULL, NULL"
+        }
+        do {
+            let result = try await execute(
+                query: "SELECT \(selectColumns) FROM pg_database WHERE datname = 'template1'"
+            )
+            guard let row = result.rows.first,
+                  row.count >= 4,
+                  let collate = row[0],
+                  let ctype = row[1] else {
+                return nil
+            }
+            return Template1Defaults(
+                collate: collate,
+                ctype: ctype,
+                provider: row[2],
+                iculocale: row[3]
+            )
+        } catch {
+            Self.logger.error(
+                "Failed to read template1 defaults: \(error.localizedDescription, privacy: .public)"
+            )
+            return nil
+        }
+    }
+
+    private func fetchCollations() async -> (libc: [String], icu: [String]) {
+        do {
+            let result = try await execute(
+                query: "SELECT collname, collprovider FROM pg_collation WHERE collprovider IN ('b', 'c', 'i') ORDER BY collname"
+            )
+            var libc: [String] = []
+            var icu: [String] = []
+            for row in result.rows {
+                guard row.count >= 2, let name = row[0], let provider = row[1] else { continue }
+                switch provider {
+                case "b", "c":
+                    libc.append(name)
+                case "i":
+                    icu.append(name)
+                default:
+                    continue
+                }
+            }
+            return (libc: libc, icu: icu)
+        } catch {
+            Self.logger.error(
+                "Failed to read pg_collation: \(error.localizedDescription, privacy: .public)"
+            )
+            return (libc: [], icu: [])
+        }
     }
 
     // MARK: - All Tables Metadata
@@ -852,13 +1129,22 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             def += " USING \(type.lowercased())"
         }
         def += " (\(cols))"
+        if let whereClause = index.whereClause, !whereClause.isEmpty {
+            def += " WHERE \(whereClause)"
+        }
         return def
     }
 
     private func pgForeignKeyDefinition(_ fk: PluginForeignKeyDefinition) -> String {
         let cols = fk.columns.map { quoteIdentifier($0) }.joined(separator: ", ")
         let refCols = fk.referencedColumns.map { quoteIdentifier($0) }.joined(separator: ", ")
-        var def = "CONSTRAINT \(quoteIdentifier(fk.name)) FOREIGN KEY (\(cols)) REFERENCES \(quoteIdentifier(fk.referencedTable)) (\(refCols))"
+        let refTable: String
+        if let schema = fk.referencedSchema, !schema.isEmpty {
+            refTable = "\(quoteIdentifier(schema)).\(quoteIdentifier(fk.referencedTable))"
+        } else {
+            refTable = quoteIdentifier(fk.referencedTable)
+        }
+        var def = "CONSTRAINT \(quoteIdentifier(fk.name)) FOREIGN KEY (\(cols)) REFERENCES \(refTable) (\(refCols))"
         if fk.onDelete != "NO ACTION" {
             def += " ON DELETE \(fk.onDelete)"
         }
@@ -883,18 +1169,86 @@ final class PostgreSQLPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         pgForeignKeyDefinition(fk)
     }
 
-    // MARK: - Helpers
+    // MARK: - ALTER TABLE DDL
 
-    private func stripLimitOffset(from query: String) -> String {
-        var result = query
-        if let regex = Self.limitRegex {
-            result = regex.stringByReplacingMatches(
-                in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
-        }
-        if let regex = Self.offsetRegex {
-            result = regex.stringByReplacingMatches(
-                in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
-        }
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func qualifiedTableName(_ table: String) -> String {
+        "\(quoteIdentifier(_currentSchema)).\(quoteIdentifier(table))"
     }
+
+    func generateAddColumnSQL(table: String, column: PluginColumnDefinition) -> String? {
+        let qt = qualifiedTableName(table)
+        let colDef = pgColumnDefinition(column, inlinePK: false)
+        return "ALTER TABLE \(qt) ADD COLUMN \(colDef)"
+    }
+
+    func generateModifyColumnSQL(table: String, oldColumn: PluginColumnDefinition, newColumn: PluginColumnDefinition) -> String? {
+        let qt = qualifiedTableName(table)
+        var stmts: [String] = []
+
+        if oldColumn.name != newColumn.name {
+            stmts.append("ALTER TABLE \(qt) RENAME COLUMN \(quoteIdentifier(oldColumn.name)) TO \(quoteIdentifier(newColumn.name))")
+        }
+
+        let colName = quoteIdentifier(newColumn.name)
+
+        if oldColumn.dataType.uppercased() != newColumn.dataType.uppercased() {
+            stmts.append("ALTER TABLE \(qt) ALTER COLUMN \(colName) TYPE \(newColumn.dataType)")
+        }
+
+        if oldColumn.isNullable != newColumn.isNullable {
+            let clause = newColumn.isNullable ? "DROP NOT NULL" : "SET NOT NULL"
+            stmts.append("ALTER TABLE \(qt) ALTER COLUMN \(colName) \(clause)")
+        }
+
+        if oldColumn.defaultValue != newColumn.defaultValue {
+            if let defaultValue = newColumn.defaultValue {
+                stmts.append("ALTER TABLE \(qt) ALTER COLUMN \(colName) SET DEFAULT \(pgDefaultValue(defaultValue))")
+            } else {
+                stmts.append("ALTER TABLE \(qt) ALTER COLUMN \(colName) DROP DEFAULT")
+            }
+        }
+
+        if let newComment = newColumn.comment, !newComment.isEmpty, newColumn.comment != oldColumn.comment {
+            stmts.append("COMMENT ON COLUMN \(qt).\(colName) IS '\(escapeLiteral(newComment))'")
+        } else if oldColumn.comment != nil && (newColumn.comment == nil || newColumn.comment?.isEmpty == true) {
+            stmts.append("COMMENT ON COLUMN \(qt).\(colName) IS NULL")
+        }
+
+        return stmts.isEmpty ? nil : stmts.joined(separator: ";\n")
+    }
+
+    func generateDropColumnSQL(table: String, columnName: String) -> String? {
+        "ALTER TABLE \(qualifiedTableName(table)) DROP COLUMN \(quoteIdentifier(columnName))"
+    }
+
+    func generateAddIndexSQL(table: String, index: PluginIndexDefinition) -> String? {
+        pgIndexDefinition(index, qualifiedTable: qualifiedTableName(table))
+    }
+
+    func generateDropIndexSQL(table: String, indexName: String) -> String? {
+        "DROP INDEX \(quoteIdentifier(_currentSchema)).\(quoteIdentifier(indexName))"
+    }
+
+    func generateAddForeignKeySQL(table: String, fk: PluginForeignKeyDefinition) -> String? {
+        "ALTER TABLE \(qualifiedTableName(table)) ADD \(pgForeignKeyDefinition(fk))"
+    }
+
+    func generateDropForeignKeySQL(table: String, constraintName: String) -> String? {
+        "ALTER TABLE \(qualifiedTableName(table)) DROP CONSTRAINT \(quoteIdentifier(constraintName))"
+    }
+
+    func generateModifyPrimaryKeySQL(table: String, oldColumns: [String], newColumns: [String], constraintName: String?) -> [String]? {
+        let qt = qualifiedTableName(table)
+        var stmts: [String] = []
+        if !oldColumns.isEmpty {
+            let name = constraintName.map { quoteIdentifier($0) } ?? "/* unknown constraint */"
+            stmts.append("ALTER TABLE \(qt) DROP CONSTRAINT \(name)")
+        }
+        if !newColumns.isEmpty {
+            let cols = newColumns.map { quoteIdentifier($0) }.joined(separator: ", ")
+            stmts.append("ALTER TABLE \(qt) ADD PRIMARY KEY (\(cols))")
+        }
+        return stmts.isEmpty ? nil : stmts
+    }
+
 }

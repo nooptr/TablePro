@@ -7,9 +7,6 @@ import Foundation
 import os
 import TableProPluginKit
 
-/// In-memory `PluginExportDataSource` backed by a RowBuffer snapshot.
-/// Allows export plugins (CSV, JSON, SQL, XLSX, MQL) to export query results
-/// without modification to the plugins themselves.
 final class QueryResultExportDataSource: PluginExportDataSource, @unchecked Sendable {
     let databaseTypeId: String
 
@@ -20,28 +17,29 @@ final class QueryResultExportDataSource: PluginExportDataSource, @unchecked Send
 
     private static let logger = Logger(subsystem: "com.TablePro", category: "QueryResultExportDataSource")
 
-    init(rowBuffer: RowBuffer, databaseType: DatabaseType, driver: DatabaseDriver?) {
+    init(tableRows: TableRows, databaseType: DatabaseType, driver: DatabaseDriver?) {
         self.databaseTypeId = databaseType.rawValue
         self.driver = driver
-
-        // Snapshot data at init time for thread safety
-        self.columns = rowBuffer.columns
-        self.columnTypeNames = rowBuffer.columnTypes.map { $0.rawType ?? "" }
-        self.rows = rowBuffer.rows
+        self.columns = tableRows.columns
+        self.columnTypeNames = tableRows.columnTypes.map { $0.rawType ?? "" }
+        self.rows = tableRows.rows.map(\.values)
     }
 
-    func fetchRows(table: String, databaseName: String, offset: Int, limit: Int) async throws -> PluginQueryResult {
-        let start = min(offset, rows.count)
-        let end = min(start + limit, rows.count)
-        let slice = Array(rows[start ..< end])
-
-        return PluginQueryResult(
-            columns: columns,
-            columnTypeNames: columnTypeNames,
-            rows: slice,
-            rowsAffected: 0,
-            executionTime: 0
-        )
+    func streamRows(table: String, databaseName: String) -> AsyncThrowingStream<PluginStreamElement, Error> {
+        let columns = self.columns
+        let columnTypeNames = self.columnTypeNames
+        let snapshot = self.rows
+        return AsyncThrowingStream { continuation in
+            continuation.yield(.header(PluginStreamHeader(
+                columns: columns,
+                columnTypeNames: columnTypeNames,
+                estimatedRowCount: snapshot.count
+            )))
+            if !snapshot.isEmpty {
+                continuation.yield(.rows(snapshot))
+            }
+            continuation.finish()
+        }
     }
 
     func fetchApproximateRowCount(table: String, databaseName: String) async throws -> Int? {

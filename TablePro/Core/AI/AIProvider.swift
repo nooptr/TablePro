@@ -2,28 +2,9 @@
 //  AIProvider.swift
 //  TablePro
 //
-//  Protocol defining AI provider interface for streaming chat and model discovery.
-//
 
 import Foundation
 
-/// Protocol for AI provider implementations
-protocol AIProvider: AnyObject {
-    /// Stream chat completions as an async sequence of events (text tokens and usage)
-    func streamChat(
-        messages: [AIChatMessage],
-        model: String,
-        systemPrompt: String?
-    ) -> AsyncThrowingStream<AIStreamEvent, Error>
-
-    /// Fetch available models from the provider
-    func fetchAvailableModels() async throws -> [String]
-
-    /// Test connection to verify API key and endpoint
-    func testConnection() async throws -> Bool
-}
-
-/// Errors that can occur during AI provider operations
 enum AIProviderError: Error, LocalizedError {
     case invalidEndpoint(String)
     case authenticationFailed(String)
@@ -36,27 +17,39 @@ enum AIProviderError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidEndpoint(let endpoint):
-            return String(localized: "Invalid endpoint: \(endpoint)")
+            return String(format: String(localized: "Invalid endpoint: %@"), endpoint)
         case .authenticationFailed(let detail):
             if detail.isEmpty {
                 return String(localized: "Authentication failed. Check your API key.")
             }
-            return String(localized: "Authentication failed: \(detail)")
+            return String(format: String(localized: "Authentication failed: %@"), detail)
         case .rateLimited:
             return String(localized: "Rate limited. Please try again later.")
         case .modelNotFound(let model):
-            return String(localized: "Model not found: \(model)")
+            return String(format: String(localized: "Model not found: %@"), model)
         case .serverError(let code, let message):
-            return String(localized: "Server error (\(code)): \(message)")
+            return String(format: String(localized: "Server error (%d): %@"), code, message)
         case .networkError(let message):
-            return String(localized: "Network error: \(message)")
+            return String(format: String(localized: "Network error: %@"), message)
         case .streamingFailed(let message):
-            return String(localized: "Streaming failed: \(message)")
+            return String(format: String(localized: "Streaming failed: %@"), message)
         }
     }
 
-    /// Extract human-readable message from provider JSON error responses.
-    /// Supports Anthropic (`{"error":{"message":"..."}}`), OpenAI, and Gemini formats.
+    static func mapHTTPError(statusCode: Int, body: String) -> AIProviderError {
+        let message = parseErrorMessage(from: body) ?? body
+        switch statusCode {
+        case 401:
+            return .authenticationFailed(message)
+        case 429:
+            return .rateLimited
+        case 404:
+            return .modelNotFound(message)
+        default:
+            return .serverError(statusCode, message)
+        }
+    }
+
     static func parseErrorMessage(from body: String) -> String? {
         guard let data = body.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -66,5 +59,25 @@ enum AIProviderError: Error, LocalizedError {
             return nil
         }
         return message
+    }
+
+    var isRetryable: Bool {
+        switch self {
+        case .invalidEndpoint, .authenticationFailed, .modelNotFound:
+            return false
+        case .rateLimited, .serverError, .networkError, .streamingFailed:
+            return true
+        }
+    }
+}
+
+extension ChatTransport {
+    func collectErrorBody(from bytes: URLSession.AsyncBytes) async throws -> String {
+        var body = ""
+        for try await line in bytes.lines {
+            body += line
+            if (body as NSString).length > 2_000 { break }
+        }
+        return body
     }
 }

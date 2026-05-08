@@ -6,20 +6,14 @@
 //
 
 import Foundation
-import os
 import TableProPluginKit
 
 /// Builds schema context for AI system prompts
 struct AISchemaContext {
-    private static let logger = Logger(
-        subsystem: "com.TablePro",
-        category: "AISchemaContext"
-    )
-
     // MARK: - Public
 
     /// Build a system prompt including database context
-    @MainActor static func buildSystemPrompt(
+    static func buildSystemPrompt(
         databaseType: DatabaseType,
         databaseName: String,
         tables: [TableInfo],
@@ -28,7 +22,10 @@ struct AISchemaContext {
         currentQuery: String?,
         queryResults: String?,
         settings: AISettings,
-        identifierQuote: String = "\""
+        identifierQuote: String = "\"",
+        editorLanguage: EditorLanguage,
+        queryLanguageName: String,
+        connectionRules: String? = nil
     ) -> String {
         var parts: [String] = []
 
@@ -56,8 +53,13 @@ struct AISchemaContext {
         if settings.includeCurrentQuery,
            let query = currentQuery,
            !query.isEmpty {
-            let lang = PluginManager.shared.editorLanguage(for: databaseType).codeBlockTag
-            parts.append("\n## Current Query\n```\(lang)\n\(query)\n```")
+            let lang = editorLanguage.codeBlockTag
+            let maxQueryLength = 2_000
+            let nsQuery = query as NSString
+            let truncated = nsQuery.length > maxQueryLength
+                ? nsQuery.substring(to: maxQueryLength) + "\n-- ... truncated"
+                : query
+            parts.append("\n## Current Query\n```\(lang)\n\(truncated)\n```")
         }
 
         if settings.includeQueryResults,
@@ -66,11 +68,14 @@ struct AISchemaContext {
             parts.append("\n## Recent Query Results\n\(results)")
         }
 
-        let editorLang = PluginManager.shared.editorLanguage(for: databaseType)
-        let langName = PluginManager.shared.queryLanguageName(for: databaseType)
-        let langTag = editorLang.codeBlockTag
+        if let rules = connectionRules?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !rules.isEmpty {
+            parts.append("\n## Connection-Specific Rules\n\(rules)")
+        }
 
-        switch editorLang {
+        let langTag = editorLanguage.codeBlockTag
+
+        switch editorLanguage {
         case .sql:
             parts.append(
                 "\nProvide SQL queries appropriate for"
@@ -82,10 +87,10 @@ struct AISchemaContext {
             )
         default:
             parts.append(
-                "\nProvide \(langName) queries using `\(langTag)` fenced code blocks."
+                "\nProvide \(queryLanguageName) queries using `\(langTag)` fenced code blocks."
             )
             parts.append(
-                "Use \(langName) syntax, not SQL."
+                "Use \(queryLanguageName) syntax, not SQL."
             )
         }
 
@@ -94,7 +99,7 @@ struct AISchemaContext {
 
     // MARK: - Private
 
-    private static func buildSchemaSection(
+    static func buildSchemaSection(
         tables: [TableInfo],
         columnsByTable: [String: [ColumnInfo]],
         foreignKeys: [String: [ForeignKeyInfo]],

@@ -4,7 +4,8 @@ set -euo pipefail
 # Build DuckDB static library for TablePro
 # Usage: ./scripts/build-duckdb.sh [arm64|x86_64|both]
 
-DUCKDB_VERSION="v1.5.0"
+DUCKDB_VERSION="v1.5.2"
+DUCKDB_SHA256="36388f54d4e73c7148895f9b075c063189d47df8687db237f765f74a7ff5d8f6"
 BUILD_DIR="/tmp/duckdb-build"
 LIBS_DIR="$(cd "$(dirname "$0")/.." && pwd)/Libs"
 ARCH="${1:-both}"
@@ -17,7 +18,8 @@ cd "$BUILD_DIR"
 # Download source amalgamation if not present
 if [ ! -f "duckdb.cpp" ]; then
     echo "Downloading DuckDB source amalgamation..."
-    curl -sL "https://github.com/duckdb/duckdb/releases/download/$DUCKDB_VERSION/libduckdb-src.zip" -o libduckdb-src.zip
+    curl -fSL "https://github.com/duckdb/duckdb/releases/download/$DUCKDB_VERSION/libduckdb-src.zip" -o libduckdb-src.zip
+    echo "$DUCKDB_SHA256  libduckdb-src.zip" | shasum -a 256 -c -
     unzip -o libduckdb-src.zip
 fi
 

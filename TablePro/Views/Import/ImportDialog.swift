@@ -6,7 +6,6 @@
 //
 
 import AppKit
-import Observation
 import os
 import SwiftUI
 import TableProPluginKit
@@ -36,10 +35,12 @@ struct ImportDialog: View {
     @State private var hasPreviewError = false
     @State private var tempPreviewURL: URL?
     @State private var loadFileTask: Task<Void, Never>?
+    @State private var countStatementsTask: Task<Void, Never>?
+    @State private var importTask: Task<Void, Never>?
 
     // MARK: - Import Service
 
-    @State private var importServiceState = ImportServiceState()
+    @State private var importService: ImportService?
 
     // MARK: - Body
 
@@ -76,7 +77,7 @@ struct ImportDialog: View {
             }
         }
         .onExitCommand {
-            if !importServiceState.isImporting {
+            if !(importService?.state.isImporting ?? false) {
                 isPresented = false
             }
         }
@@ -87,17 +88,17 @@ struct ImportDialog: View {
         }
         .onDisappear {
             loadFileTask?.cancel()
+            countStatementsTask?.cancel()
+            importTask?.cancel()
             cleanupTempFiles()
         }
         .sheet(isPresented: $showProgressDialog) {
-            ImportProgressView(
-                processedStatements: importServiceState.processedStatements,
-                estimatedTotalStatements: importServiceState.estimatedTotalStatements,
-                statusMessage: importServiceState.statusMessage
-            ) {
-                importServiceState.service?.cancelImport()
+            if let service = importService {
+                ImportProgressView(service: service) {
+                    service.cancelImport()
+                }
+                .interactiveDismissDisabled()
             }
-            .interactiveDismissDisabled()
         }
         .sheet(isPresented: $showSuccessDialog) {
             ImportSuccessView(
@@ -121,7 +122,7 @@ struct ImportDialog: View {
 
     private var availableFormats: [any ImportFormatPlugin] {
         let dbTypeId = connection.type.rawValue
-        return PluginManager.shared.importPlugins.values
+        return PluginManager.shared.allImportPlugins()
             .filter { plugin in
                 let supported = type(of: plugin).supportedDatabaseTypeIds
                 let excluded = type(of: plugin).excludedDatabaseTypeIds
@@ -137,7 +138,7 @@ struct ImportDialog: View {
     }
 
     private var currentPlugin: (any ImportFormatPlugin)? {
-        PluginManager.shared.importPlugins[selectedFormatId]
+        PluginManager.shared.importPlugin(forFormat: selectedFormatId)
     }
 
     // MARK: - View Components
@@ -145,21 +146,23 @@ struct ImportDialog: View {
     private var fileInfoView: some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: currentPlugin.map { type(of: $0).iconName } ?? "doc.text.fill")
-                .font(.system(size: 32))
-                .foregroundStyle(.blue)
+                .font(.title)
+                .foregroundStyle(Color(nsColor: .systemBlue))
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text(fileURL?.lastPathComponent ?? "")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.body.weight(.semibold))
 
                     Spacer()
 
                     Button("Change File...") {
-                        selectFile()
+                        Task {
+                            await selectFile()
+                        }
                     }
                     .buttonStyle(.link)
-                    .font(.system(size: 12))
+                    .font(.callout)
                 }
 
                 HStack(spacing: 16) {
@@ -167,7 +170,7 @@ struct ImportDialog: View {
                         ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file),
                         systemImage: "chart.bar.doc.horizontal"
                     )
-                    .font(.system(size: 12))
+                    .font(.callout)
                     .foregroundStyle(.secondary)
 
                     if isCountingStatements {
@@ -175,12 +178,12 @@ struct ImportDialog: View {
                             ProgressView()
                                 .controlSize(.small)
                             Text("Counting...")
-                                .font(.system(size: 12))
+                                .font(.callout)
                                 .foregroundStyle(.secondary)
                         }
                     } else if statementCount > 0 {
                         Label("\(statementCount) statements", systemImage: "list.bullet")
-                            .font(.system(size: 12))
+                            .font(.callout)
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -192,7 +195,7 @@ struct ImportDialog: View {
     private var formatPickerView: some View {
         HStack(spacing: 8) {
             Text("Format:")
-                .font(.system(size: 13))
+                .font(.body)
                 .frame(width: 80, alignment: .leading)
 
             Picker("", selection: $selectedFormatId) {
@@ -210,12 +213,12 @@ struct ImportDialog: View {
     private var filePreviewView: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Preview")
-                .font(.system(size: 12, weight: .semibold))
+                .font(.callout.weight(.semibold))
                 .foregroundStyle(.primary)
 
             SQLCodePreview(text: $filePreview)
                 .frame(height: availableFormats.count > 1 ? 220 : 280)
-                .cornerRadius(6)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(
                     RoundedRectangle(cornerRadius: 6)
                         .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
@@ -224,16 +227,16 @@ struct ImportDialog: View {
     }
 
     private var optionsView: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             Text("Options")
-                .font(.system(size: 12, weight: .semibold))
+                .font(.callout.weight(.semibold))
                 .foregroundStyle(.primary)
 
             VStack(alignment: .leading, spacing: 12) {
                 // Encoding picker (always shown, independent of plugin)
                 HStack(spacing: 8) {
                     Text("Encoding:")
-                        .font(.system(size: 13))
+                        .font(.body)
                         .frame(width: 80, alignment: .leading)
 
                     Picker("", selection: $selectedEncoding) {
@@ -277,7 +280,7 @@ struct ImportDialog: View {
                 performImport()
             }
             .buttonStyle(.borderedProminent)
-            .disabled(fileURL == nil || importServiceState.isImporting || availableFormats.isEmpty || hasPreviewError)
+            .disabled(fileURL == nil || (importService?.state.isImporting ?? false) || availableFormats.isEmpty || hasPreviewError)
             .keyboardShortcut(.return, modifiers: [])
         }
         .padding(16)
@@ -285,7 +288,10 @@ struct ImportDialog: View {
 
     // MARK: - Actions
 
-    private func selectFile() {
+    @MainActor
+    private func selectFile() async {
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
+
         let panel = NSOpenPanel()
 
         let extensions = currentPlugin.map { type(of: $0).acceptedFileExtensions } ?? ["sql", "gz"]
@@ -294,12 +300,11 @@ struct ImportDialog: View {
         panel.allowsMultipleSelection = false
         panel.message = "Select file to import"
 
-        panel.begin { response in
-            guard response == .OK, let url = panel.url else { return }
+        let response = await panel.presentAsSheet(for: window)
+        guard response == .OK, let url = panel.url else { return }
 
-            loadFileTask = Task {
-                await loadFile(url)
-            }
+        self.loadFileTask = Task {
+            await self.loadFile(url)
         }
     }
 
@@ -334,7 +339,7 @@ struct ImportDialog: View {
                 tempPreviewURL = urlToRead
             }
         } catch {
-            filePreview = "Failed to decompress file: \(error.localizedDescription)"
+            filePreview = String(format: String(localized: "Failed to decompress file: %@"), error.localizedDescription)
             hasPreviewError = true
             return
         }
@@ -356,15 +361,16 @@ struct ImportDialog: View {
                 filePreview = preview
                 hasPreviewError = false
             } else {
-                filePreview = "Failed to load preview using encoding: \(selectedEncoding.rawValue). Try selecting a different text encoding."
+                filePreview = String(format: String(localized: "Failed to load preview using encoding: %@. Try selecting a different text encoding."), selectedEncoding.rawValue)
                 hasPreviewError = true
             }
         } catch {
-            filePreview = "Failed to load preview: \(error.localizedDescription)"
+            filePreview = String(format: String(localized: "Failed to load preview: %@"), error.localizedDescription)
             hasPreviewError = true
         }
 
-        Task {
+        countStatementsTask?.cancel()
+        countStatementsTask = Task {
             await countStatements(url: urlToRead)
         }
     }
@@ -382,7 +388,8 @@ struct ImportDialog: View {
             }.value
             statementCount = count
         } catch {
-            statementCount = -1
+            Self.logger.warning("Failed to count statements: \(error.localizedDescription, privacy: .public)")
+            statementCount = 0
         }
 
         isCountingStatements = false
@@ -392,22 +399,33 @@ struct ImportDialog: View {
         guard let url = fileURL else { return }
 
         let service = ImportService(connection: connection)
-        importServiceState.setService(service)
+        importService = service
+
+        let decompressedURL = tempPreviewURL
+        let ownsDecompressedFile = decompressedURL != nil
+        tempPreviewURL = nil
 
         showProgressDialog = true
 
-        Task {
+        importTask = Task {
             do {
                 let result = try await service.importFile(
                     from: url,
                     formatId: selectedFormatId,
-                    encoding: selectedEncoding.encoding
+                    encoding: selectedEncoding.encoding,
+                    decompressedURL: decompressedURL,
+                    ownsDecompressedFile: ownsDecompressedFile,
+                    knownStatementCount: statementCount > 0 ? statementCount : nil
                 )
 
                 await MainActor.run {
                     showProgressDialog = false
                     importResult = result
                     showSuccessDialog = true
+                }
+            } catch is PluginImportCancellationError {
+                await MainActor.run {
+                    showProgressDialog = false
                 }
             } catch {
                 await MainActor.run {
@@ -439,21 +457,4 @@ struct ImportDialog: View {
     private func decompressIfNeeded(_ url: URL) async throws -> URL {
         try await FileDecompressor.decompressIfNeeded(url, fileSystemPath: fileSystemPath)
     }
-}
-
-// MARK: - Import Service State
-
-@Observable
-@MainActor
-final class ImportServiceState {
-    private(set) var service: ImportService?
-
-    func setService(_ service: ImportService) {
-        self.service = service
-    }
-
-    var isImporting: Bool { service?.state.isImporting ?? false }
-    var processedStatements: Int { service?.state.processedStatements ?? 0 }
-    var estimatedTotalStatements: Int { service?.state.estimatedTotalStatements ?? 0 }
-    var statusMessage: String { service?.state.statusMessage ?? "" }
 }

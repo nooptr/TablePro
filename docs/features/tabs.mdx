@@ -5,7 +5,9 @@ description: Each tab keeps its own SQL, results, pagination, sorting, and filte
 
 # Query Tabs
 
-Every tab is an independent workspace with its own SQL content, results, pagination, sorting, and filter state. Open as many as you need. They persist across app restarts.
+Every tab is a native macOS window tab. Each tab is a separate NSWindow in a tab group, managed by the system window tabbing API. This means you get standard macOS tab behavior: drag tabs between windows, merge windows via **Window > Merge All Windows**, and use **Window > Move Tab to New Window** to split them out.
+
+Each tab is an independent workspace with its own SQL content, results, pagination, sorting, and filter state. Open as many as you need. They persist across app restarts.
 
 {/* Screenshot: Tab bar showing multiple open tabs */}
 <Frame caption="Tab bar with multiple query and table tabs">
@@ -28,13 +30,7 @@ Every tab is an independent workspace with its own SQL content, results, paginat
 | **Query Tab** | Document icon | Write and execute custom SQL |
 | **Table Tab** | Table icon (blue) | Browse table data with pagination and filtering |
 
-**Query tabs** start with an empty editor. Type SQL and press `Cmd+Enter` to execute.
-
-**Table tabs** open when you click a table in the sidebar. They provide server-side pagination, inline editing with change tracking, structure view, and filter support.
-
-<Tip>
-Table tabs are editable by default. Query tabs are read-only unless the query is a simple `SELECT * FROM table` statement.
-</Tip>
+Change tracking is available in table tabs by default. Query tabs support change tracking only for simple `SELECT * FROM table` results.
 
 ### Smart Tab Reuse
 
@@ -150,13 +146,9 @@ Right-click a tab > **Duplicate Tab**. The copy opens immediately after the orig
 
 ## Per-Tab Change Tracking
 
-Each tab maintains its own pending changes. You can have edits in multiple tabs simultaneously without interference. Switching tabs saves and restores each tab's change state.
+Each tab maintains its own pending changes. Switching tabs saves and restores each tab's change state.
 
 ## Tab Persistence
-
-### Last Query Memory
-
-TablePro remembers the last query text for each connection. Even if you close all tabs, the last query restores when you create a new tab.
 
 ### What Is Persisted
 
@@ -173,11 +165,7 @@ Tab state auto-saves 500ms after any change. On reconnect, TablePro restores you
 
 ### Table Tabs (Server-Side)
 
-Table tabs use SQL `LIMIT` and `OFFSET`. Only the current page loads from the database. Page navigation triggers a new query. Configure page size in **Settings** > **Data Grid**.
-
-<Tip>
-Server-side pagination is memory efficient. Only the visible page is kept in memory, even for tables with millions of rows.
-</Tip>
+Table tabs use SQL `LIMIT` and `OFFSET`. Only the current page loads from the database. Page navigation triggers a new query. Configure page size in **Settings** > **Editor**.
 
 {/* Screenshot: Server-side pagination in a table tab */}
 <Frame caption="Server-side pagination in a table tab">
@@ -197,7 +185,7 @@ Server-side pagination is memory efficient. Only the visible page is kept in mem
 
 Query tabs execute the full query and receive all results. For large result sets, TablePro paginates client-side without re-querying. Sorting is done locally on cached results.
 
-Configure page size in **Settings** > **Data Grid**: Small (100), Medium (500), Large (1,000), or Custom (10-100,000).
+Configure page size in **Settings** > **Editor**: Small (100), Medium (500), Large (1,000), or Custom (10-100,000).
 
 ## Tab Context Menu
 
@@ -223,3 +211,14 @@ Right-click any tab:
     alt="Tab context menu"
   />
 </Frame>
+
+## From External Clients
+
+Raycast, Cursor, Claude Desktop, and other MCP clients can list and focus tabs across windows. Four MCP tools cover the surface:
+
+- `list_recent_tabs` enumerates open tabs across every window.
+- `focus_query_tab` brings an existing tab to the front by id.
+- `open_connection_window` opens a saved connection.
+- `open_table_tab` opens a specific table.
+
+The Raycast extension's [Recent Tabs command](/external-api/raycast#commands) wraps these tools. See [MCP Tools](/external-api/mcp-tools) for input and output schemas.

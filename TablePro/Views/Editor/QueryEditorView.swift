@@ -14,14 +14,17 @@ import TableProPluginKit
 struct QueryEditorView: View {
     private static let logger = Logger(subsystem: "com.TablePro", category: "QueryEditorView")
 
-    @Environment(AppState.self) private var appState
 
     @Binding var queryText: String
     @Binding var cursorPositions: [CursorPosition]
+    @Binding var parameters: [QueryParameter]
+    @Binding var isParameterPanelVisible: Bool
     var onExecute: () -> Void
     var schemaProvider: SQLSchemaProvider?
     var databaseType: DatabaseType?
     var connectionId: UUID?
+    var connectionAIPolicy: AIConnectionPolicy?
+    var tabID: UUID?
     var onCloseTab: (() -> Void)?
     var onExecuteQuery: (() -> Void)?
     var onExplain: ((ClickHouseExplainVariant?) -> Void)?
@@ -33,7 +36,7 @@ struct QueryEditorView: View {
     @State private var vimMode: VimMode = .normal
 
     var body: some View {
-        let hasQuery = appState.hasQueryText
+        let hasQuery = !queryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
         VStack(alignment: .leading, spacing: 0) {
             // Editor header with toolbar (above editor, higher z-index)
@@ -42,13 +45,22 @@ struct QueryEditorView: View {
 
             Divider()
 
-            // SQL Editor (CodeEditSourceEditor-based with tree-sitter highlighting)
+            if isParameterPanelVisible && !parameters.isEmpty {
+                QueryParameterPanelView(
+                    parameters: $parameters,
+                    onDismiss: { isParameterPanelVisible = false }
+                )
+                Divider()
+            }
+
             SQLEditorView(
                 text: $queryText,
                 cursorPositions: $cursorPositions,
                 schemaProvider: schemaProvider,
                 databaseType: databaseType,
                 connectionId: connectionId,
+                connectionAIPolicy: connectionAIPolicy,
+                tabID: tabID,
                 vimMode: $vimMode,
                 onCloseTab: onCloseTab,
                 onExecuteQuery: onExecuteQuery,
@@ -80,17 +92,19 @@ struct QueryEditorView: View {
             // Clear button
             Button(action: { queryText = "" }) {
                 Image(systemName: "trash")
+                    .frame(width: 24, height: 24)
             }
             .buttonStyle(.borderless)
-            .help("Clear Query")
+            .help(String(localized: "Clear Query"))
 
             // Format button
             Button(action: formatQuery) {
                 Image(systemName: "text.alignleft")
+                    .frame(width: 24, height: 24)
             }
             .buttonStyle(.borderless)
-            .help("Format Query (⌥⌘F)")
-            .keyboardShortcut("f", modifiers: [.option, .command])
+            .help(String(localized: "Format Query (⇧⌘L)"))
+            .optionalKeyboardShortcut(AppSettingsManager.shared.keyboard.keyboardShortcut(for: .formatQuery))
 
             Divider()
                 .frame(height: 16)
@@ -121,9 +135,17 @@ struct QueryEditorView: View {
             PluginMetadataRegistry.shared.snapshot(forTypeId: $0.pluginTypeId)?.explainVariants
         } ?? []
 
-        if variants.isEmpty {
+        if variants.count <= 1 {
             Button {
-                onExplain?(nil)
+                if let variant = variants.first {
+                    if let handler = onExplainVariant {
+                        handler(variant)
+                    } else {
+                        onExplain?(nil)
+                    }
+                } else {
+                    onExplain?(nil)
+                }
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "chart.bar.doc.horizontal")
@@ -190,6 +212,8 @@ struct QueryEditorView: View {
     QueryEditorView(
         queryText: .constant("SELECT * FROM users\nWHERE active = true\nORDER BY created_at DESC;"),
         cursorPositions: .constant([]),
+        parameters: .constant([]),
+        isParameterPanelVisible: .constant(false),
         onExecute: {},
         databaseType: .mysql
     )

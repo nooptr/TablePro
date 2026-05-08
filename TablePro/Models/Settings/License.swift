@@ -108,10 +108,16 @@ struct LicenseActivationRequest: Codable {
 struct LicenseValidationRequest: Codable {
     let licenseKey: String
     let machineId: String
+    let machineName: String
+    let appVersion: String
+    let osVersion: String
 
     private enum CodingKeys: String, CodingKey {
         case licenseKey = "license_key"
         case machineId = "machine_id"
+        case machineName = "machine_name"
+        case appVersion = "app_version"
+        case osVersion = "os_version"
     }
 }
 
@@ -124,6 +130,11 @@ struct LicenseDeactivationRequest: Codable {
         case licenseKey = "license_key"
         case machineId = "machine_id"
     }
+}
+
+/// Response from the deactivation endpoint
+struct DeactivateResponse: Codable {
+    let message: String
 }
 
 /// Wrapper for API error responses
@@ -262,11 +273,11 @@ enum LicenseError: LocalizedError {
         case .notActivated:
             return String(localized: "This machine is not activated.")
         case .networkError(let error):
-            return String(localized: "Network error: \(error.localizedDescription)")
+            return String(format: String(localized: "Network error: %@"), error.localizedDescription)
         case .serverError(let code, let message):
-            return String(localized: "Server error (\(code)): \(message)")
+            return String(format: String(localized: "Server error (%d): %@"), code, message)
         case .decodingError(let error):
-            return String(localized: "Failed to parse server response: \(error.localizedDescription)")
+            return String(format: String(localized: "Failed to parse server response: %@"), error.localizedDescription)
         }
     }
 
@@ -287,7 +298,7 @@ enum LicenseError: LocalizedError {
             if code == 422 {
                 return String(localized: "Invalid license key format. Check for typos and try again.")
             }
-            return String(localized: "Something went wrong (error \(code)). Try again in a moment.")
+            return String(format: String(localized: "Something went wrong (error %d). Try again in a moment."), code)
         case .signatureInvalid, .publicKeyNotFound, .publicKeyInvalid:
             return String(localized: "License verification failed. Try updating the app to the latest version.")
         case .notActivated:

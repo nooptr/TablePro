@@ -36,7 +36,7 @@ enum ShortcutCategory: String, Codable, CaseIterable, Identifiable {
 /// All customizable keyboard shortcut actions
 enum ShortcutAction: String, Codable, CaseIterable, Identifiable {
     // File
-    case newConnection
+    case manageConnections
     case newTab
     case openDatabase
     case openFile
@@ -46,10 +46,18 @@ enum ShortcutAction: String, Codable, CaseIterable, Identifiable {
     case previewSQL
     case closeTab
     case refresh
+    case executeQuery
     case explainQuery
+    case formatQuery
     case export
     case importData
     case quickSwitcher
+
+    case openTerminal
+
+    // Navigation
+    case previousPage
+    case nextPage
 
     // Edit
     case undo
@@ -65,6 +73,8 @@ enum ShortcutAction: String, Codable, CaseIterable, Identifiable {
     case addRow
     case duplicateRow
     case truncateTable
+    case previewFKReference
+    case saveAsFavorite
 
     // View
     case toggleTableBrowser
@@ -77,10 +87,8 @@ enum ShortcutAction: String, Codable, CaseIterable, Identifiable {
     case closeResultTab
 
     // Tabs
-    case showPreviousTabBrackets
-    case showNextTabBrackets
-    case previousTabArrows
-    case nextTabArrows
+    case showPreviousTab
+    case showNextTab
 
     // AI
     case aiExplainQuery
@@ -90,19 +98,19 @@ enum ShortcutAction: String, Codable, CaseIterable, Identifiable {
 
     var category: ShortcutCategory {
         switch self {
-        case .newConnection, .newTab, .openDatabase, .openFile, .switchConnection,
+        case .manageConnections, .newTab, .openDatabase, .openFile, .switchConnection,
              .saveChanges, .saveAs, .previewSQL, .closeTab, .refresh,
-             .explainQuery, .export, .importData, .quickSwitcher:
+             .executeQuery, .explainQuery, .formatQuery, .export, .importData, .quickSwitcher,
+             .previousPage, .nextPage, .saveAsFavorite, .openTerminal:
             return .file
         case .undo, .redo, .cut, .copy, .copyWithHeaders, .copyAsJson, .paste,
              .delete, .selectAll, .clearSelection, .addRow,
-             .duplicateRow, .truncateTable:
+             .duplicateRow, .truncateTable, .previewFKReference:
             return .edit
         case .toggleTableBrowser, .toggleInspector, .toggleFilters, .toggleHistory,
              .toggleResults, .previousResultTab, .nextResultTab, .closeResultTab:
             return .view
-        case .showPreviousTabBrackets, .showNextTabBrackets,
-             .previousTabArrows, .nextTabArrows:
+        case .showPreviousTab, .showNextTab:
             return .tabs
         case .aiExplainQuery, .aiOptimizeQuery:
             return .ai
@@ -111,7 +119,8 @@ enum ShortcutAction: String, Codable, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
-        case .newConnection: return String(localized: "New Connection")
+        case .manageConnections: return String(localized: "Manage Connections")
+        case .executeQuery: return String(localized: "Execute Query")
         case .newTab: return String(localized: "New Tab")
         case .openDatabase: return String(localized: "Open Database")
         case .openFile: return String(localized: "Open File")
@@ -122,9 +131,13 @@ enum ShortcutAction: String, Codable, CaseIterable, Identifiable {
         case .closeTab: return String(localized: "Close Tab")
         case .refresh: return String(localized: "Refresh")
         case .explainQuery: return String(localized: "Explain Query")
+        case .formatQuery: return String(localized: "Format Query")
         case .export: return String(localized: "Export")
         case .importData: return String(localized: "Import")
         case .quickSwitcher: return String(localized: "Quick Switcher")
+        case .openTerminal: return String(localized: "Open Terminal")
+        case .previousPage: return String(localized: "Previous Page")
+        case .nextPage: return String(localized: "Next Page")
         case .undo: return String(localized: "Undo")
         case .redo: return String(localized: "Redo")
         case .cut: return String(localized: "Cut")
@@ -138,6 +151,8 @@ enum ShortcutAction: String, Codable, CaseIterable, Identifiable {
         case .addRow: return String(localized: "Add Row")
         case .duplicateRow: return String(localized: "Duplicate Row")
         case .truncateTable: return String(localized: "Truncate Table")
+        case .previewFKReference: return String(localized: "Preview FK Reference")
+        case .saveAsFavorite: return String(localized: "Save as Favorite")
         case .toggleTableBrowser: return String(localized: "Toggle Table Browser")
         case .toggleInspector: return String(localized: "Toggle Inspector")
         case .toggleFilters: return String(localized: "Toggle Filters")
@@ -146,10 +161,8 @@ enum ShortcutAction: String, Codable, CaseIterable, Identifiable {
         case .previousResultTab: return String(localized: "Previous Result")
         case .nextResultTab: return String(localized: "Next Result")
         case .closeResultTab: return String(localized: "Close Result Tab")
-        case .showPreviousTabBrackets: return String(localized: "Show Previous Tab")
-        case .showNextTabBrackets: return String(localized: "Show Next Tab")
-        case .previousTabArrows: return String(localized: "Previous Tab (Alt)")
-        case .nextTabArrows: return String(localized: "Next Tab (Alt)")
+        case .showPreviousTab: return String(localized: "Show Previous Tab")
+        case .showNextTab: return String(localized: "Show Next Tab")
         case .aiExplainQuery: return String(localized: "Explain with AI")
         case .aiOptimizeQuery: return String(localized: "Optimize with AI")
         }
@@ -202,11 +215,12 @@ struct KeyCombo: Codable, Equatable, Hashable {
         let hasOption = flags.contains(.option)
         let hasControl = flags.contains(.control)
 
-        // Require at least Cmd or Control (or escape/delete which work without modifiers)
+        // Require at least Cmd or Control (or special bare keys: escape, delete, space)
         let specialKeyCode = Self.specialKeyName(for: event.keyCode)
-        let isEscapeOrDelete = event.keyCode == 53 || event.keyCode == 51 || event.keyCode == 117
+        let isAllowedBareKey = event.keyCode == 53 || event.keyCode == 51
+            || event.keyCode == 117 || event.keyCode == 49
 
-        if !hasCommand && !hasControl && !isEscapeOrDelete {
+        if !hasCommand && !hasControl && !isAllowedBareKey {
             return nil
         }
 
@@ -248,7 +262,9 @@ struct KeyCombo: Codable, Equatable, Hashable {
             // NSDeleteFunctionKey (0xF728) is always a valid Unicode scalar
             // swiftlint:disable:next force_unwrapping
             case "forwardDelete": return KeyEquivalent(Character(UnicodeScalar(NSDeleteFunctionKey)!))
-            default: return KeyEquivalent(Character(key))
+            default:
+                guard key.count == 1 else { return .escape }
+                return KeyEquivalent(Character(key))
             }
         }
         return KeyEquivalent(Character(key))
@@ -293,7 +309,7 @@ struct KeyCombo: Codable, Equatable, Hashable {
             case "end": return "↘"
             case "pageUp": return "⇞"
             case "pageDown": return "⇟"
-            default: return key.uppercased()
+            default: return key.count == 1 ? key.uppercased() : "?"
             }
         }
         return key.uppercased()
@@ -322,14 +338,41 @@ struct KeyCombo: Codable, Equatable, Hashable {
         }
     }
 
+    // MARK: - Event Matching
+
+    /// Check if this combo matches a given NSEvent (for runtime key dispatch)
+    func matches(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard command == flags.contains(.command),
+              shift == flags.contains(.shift),
+              option == flags.contains(.option),
+              control == flags.contains(.control)
+        else { return false }
+        if isSpecialKey {
+            return Self.specialKeyName(for: event.keyCode) == key
+        }
+        return event.charactersIgnoringModifiers?.lowercased() == key
+    }
+
     // MARK: - System Reserved Check
 
     /// Shortcuts that are reserved by macOS and should not be overridden
     static let systemReserved: [KeyCombo] = [
-        KeyCombo(key: "q", command: true),       // Quit
-        KeyCombo(key: "h", command: true),        // Hide
-        KeyCombo(key: "m", command: true),        // Minimize
-        KeyCombo(key: ",", command: true),         // Settings
+        KeyCombo(key: "q", command: true),           // Quit
+        KeyCombo(key: "h", command: true),            // Hide
+        KeyCombo(key: "m", command: true),            // Minimize
+        KeyCombo(key: ",", command: true),             // Settings
+        KeyCombo(key: "tab", command: true, isSpecialKey: true),  // App switcher
+        KeyCombo(key: "space", command: true, isSpecialKey: true), // Spotlight
+        KeyCombo(key: "`", command: true),             // Window cycling
+        KeyCombo(key: "escape", command: true, option: true, isSpecialKey: true), // Force Quit
+        KeyCombo(key: "q", command: true, shift: true), // Logout
+        KeyCombo(key: "3", command: true, shift: true), // Screenshot full
+        KeyCombo(key: "4", command: true, shift: true), // Screenshot area
+        KeyCombo(key: "5", command: true, shift: true), // Screenshot options
+        KeyCombo(key: "q", command: true, control: true), // Lock Screen
+        KeyCombo(key: "f", command: true, control: true), // Full Screen
+        KeyCombo(key: "d", command: true, option: true), // Toggle Dock
     ]
 
     /// Check if this combo is reserved by the system
@@ -411,23 +454,28 @@ struct KeyboardSettings: Codable, Equatable {
 
     // MARK: - Default Shortcuts
 
-    /// All default shortcuts matching the hardcoded values in TableProApp.swift
+    /// Default shortcuts — applied when user has no overrides
     static let defaultShortcuts: [ShortcutAction: KeyCombo] = [
         // File
-        .newConnection: KeyCombo(key: "n", command: true),
+        .manageConnections: KeyCombo(key: "n", command: true),
+        .executeQuery: KeyCombo(key: "return", command: true, isSpecialKey: true),
         .newTab: KeyCombo(key: "t", command: true),
         .openDatabase: KeyCombo(key: "k", command: true),
         .openFile: KeyCombo(key: "o", command: true),
-        .switchConnection: KeyCombo(key: "c", command: true, option: true),
+        .switchConnection: KeyCombo(key: "c", command: true, control: true),
         .saveChanges: KeyCombo(key: "s", command: true),
         .saveAs: KeyCombo(key: "s", command: true, shift: true),
         .previewSQL: KeyCombo(key: "p", command: true, shift: true),
         .closeTab: KeyCombo(key: "w", command: true),
         .refresh: KeyCombo(key: "r", command: true),
         .explainQuery: KeyCombo(key: "e", command: true, option: true),
+        .formatQuery: KeyCombo(key: "l", command: true, shift: true),
         .export: KeyCombo(key: "e", command: true, shift: true),
         .importData: KeyCombo(key: "i", command: true, shift: true),
-        .quickSwitcher: KeyCombo(key: "p", command: true),
+        .quickSwitcher: KeyCombo(key: "o", command: true, shift: true),
+        .openTerminal: KeyCombo(key: "`", command: true, control: true),
+        .previousPage: KeyCombo(key: "[", command: true),
+        .nextPage: KeyCombo(key: "]", command: true),
 
         // Edit
         .undo: KeyCombo(key: "z", command: true),
@@ -440,14 +488,16 @@ struct KeyboardSettings: Codable, Equatable {
         .delete: KeyCombo(key: "delete", command: true, isSpecialKey: true),
         .selectAll: KeyCombo(key: "a", command: true),
         .clearSelection: KeyCombo(key: "escape", isSpecialKey: true),
-        .addRow: KeyCombo(key: "i", command: true),
-        .duplicateRow: KeyCombo(key: "d", command: true),
+        .addRow: KeyCombo(key: "n", command: true, shift: true),
+        .duplicateRow: KeyCombo(key: "d", command: true, shift: true),
         .truncateTable: KeyCombo(key: "delete", option: true, isSpecialKey: true),
+        .previewFKReference: KeyCombo(key: "space", isSpecialKey: true),
+        .saveAsFavorite: KeyCombo(key: "d", command: true),
 
         // View
-        .toggleTableBrowser: KeyCombo(key: "b", command: true),
-        .toggleInspector: KeyCombo(key: "b", command: true, shift: true),
-        .toggleFilters: KeyCombo(key: "f", command: true),
+        .toggleTableBrowser: KeyCombo(key: "0", command: true),
+        .toggleInspector: KeyCombo(key: "i", command: true, option: true),
+        .toggleFilters: KeyCombo(key: "f", command: true, shift: true),
         .toggleHistory: KeyCombo(key: "y", command: true),
         .toggleResults: KeyCombo(key: "r", command: true, option: true),
         .previousResultTab: KeyCombo(key: "[", command: true, option: true),
@@ -455,10 +505,8 @@ struct KeyboardSettings: Codable, Equatable {
         .closeResultTab: KeyCombo(key: "w", command: true, shift: true),
 
         // Tabs
-        .showPreviousTabBrackets: KeyCombo(key: "[", command: true, shift: true),
-        .showNextTabBrackets: KeyCombo(key: "]", command: true, shift: true),
-        .previousTabArrows: KeyCombo(key: "leftArrow", command: true, option: true, isSpecialKey: true),
-        .nextTabArrows: KeyCombo(key: "rightArrow", command: true, option: true, isSpecialKey: true),
+        .showPreviousTab: KeyCombo(key: "[", command: true, shift: true),
+        .showNextTab: KeyCombo(key: "]", command: true, shift: true),
 
         // AI
         .aiExplainQuery: KeyCombo(key: "l", command: true),

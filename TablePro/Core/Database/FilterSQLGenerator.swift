@@ -38,12 +38,11 @@ struct FilterSQLGenerator {
         return conditions.joined(separator: separator)
     }
 
-    /// Generate a single filter condition
     func generateCondition(from filter: TableFilter) -> String? {
         guard filter.isValid else { return nil }
 
-        // Raw SQL mode - return as-is
         if filter.isRawSQL, let rawSQL = filter.rawSQL {
+            guard isRawSQLSafe(rawSQL) else { return nil }
             return "(\(rawSQL))"
         }
 
@@ -51,10 +50,14 @@ struct FilterSQLGenerator {
 
         switch filter.filterOperator {
         case .equal:
-            return "\(quotedColumn) = \(escapeValue(filter.value))"
+            let escaped = escapeValue(filter.value)
+            if escaped == "NULL" { return "\(quotedColumn) IS NULL" }
+            return "\(quotedColumn) = \(escaped)"
 
         case .notEqual:
-            return "\(quotedColumn) != \(escapeValue(filter.value))"
+            let escaped = escapeValue(filter.value)
+            if escaped == "NULL" { return "\(quotedColumn) IS NOT NULL" }
+            return "\(quotedColumn) != \(escaped)"
 
         case .contains:
             return generateLikeCondition(column: quotedColumn, pattern: "%\(escapeLikeWildcards(filter.value))%")
@@ -93,18 +96,10 @@ struct FilterSQLGenerator {
             return "(\(quotedColumn) IS NOT NULL AND \(quotedColumn) != '')"
 
         case .inList:
-            let values = parseListValues(filter.value)
-                .map { escapeValue($0) }
-                .joined(separator: ", ")
-            guard !values.isEmpty else { return nil }
-            return "\(quotedColumn) IN (\(values))"
+            return generateInCondition(column: quotedColumn, values: filter.value, negated: false)
 
         case .notInList:
-            let values = parseListValues(filter.value)
-                .map { escapeValue($0) }
-                .joined(separator: ", ")
-            guard !values.isEmpty else { return nil }
-            return "\(quotedColumn) NOT IN (\(values))"
+            return generateInCondition(column: quotedColumn, values: filter.value, negated: true)
 
         case .between:
             guard let secondValue = filter.secondValue, !secondValue.isEmpty else { return nil }
@@ -121,6 +116,48 @@ struct FilterSQLGenerator {
                 return "match(\(quotedColumn), '\(escapedPattern)')"
             }
             return generateRegexCondition(column: quotedColumn, pattern: filter.value)
+        }
+    }
+
+    // MARK: - IN Conditions
+
+    /// Generate IN/NOT IN with proper NULL handling.
+    /// SQL `IN (NULL)` never matches — extract NULLs into a separate IS NULL / IS NOT NULL clause.
+    private func generateInCondition(column: String, values: String, negated: Bool) -> String? {
+        let parsed = parseListValues(values)
+        guard !parsed.isEmpty else { return nil }
+
+        var nonNullValues: [String] = []
+        var hasNull = false
+        for item in parsed {
+            if item.caseInsensitiveCompare("NULL") == .orderedSame {
+                hasNull = true
+            } else {
+                nonNullValues.append(escapeValue(item))
+            }
+        }
+
+        let inClause: String? = nonNullValues.isEmpty ? nil : {
+            let list = nonNullValues.joined(separator: ", ")
+            return negated
+                ? "\(column) NOT IN (\(list))"
+                : "\(column) IN (\(list))"
+        }()
+
+        let nullClause: String? = hasNull ? {
+            negated ? "\(column) IS NOT NULL" : "\(column) IS NULL"
+        }() : nil
+
+        switch (inClause, nullClause) {
+        case let (inC?, nullC?):
+            let joiner = negated ? " AND " : " OR "
+            return "(\(inC)\(joiner)\(nullC))"
+        case let (inC?, nil):
+            return inC
+        case let (nil, nullC?):
+            return nullC
+        case (nil, nil):
+            return nil
         }
     }
 
@@ -235,9 +272,36 @@ struct FilterSQLGenerator {
             .replacingOccurrences(of: "_", with: "\\_")
     }
 
+    // MARK: - Raw SQL Validation
+
+    private static let destructiveStatementPattern: NSRegularExpression? = {
+        let keywords = "DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|EXEC|EXECUTE"
+        let pattern = ";\\s*(\(keywords))\\b"
+        return try? NSRegularExpression(pattern: pattern, options: .caseInsensitive)
+    }()
+
+    private static let commentInjectionPattern: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: "(?:^|\\s)--|\\/\\*", options: [])
+    }()
+
+    private func isRawSQLSafe(_ sql: String) -> Bool {
+        let range = NSRange(sql.startIndex..., in: sql)
+
+        if let pattern = Self.destructiveStatementPattern,
+           pattern.firstMatch(in: sql, range: range) != nil {
+            return false
+        }
+
+        if let pattern = Self.commentInjectionPattern,
+           pattern.firstMatch(in: sql, range: range) != nil {
+            return false
+        }
+
+        return true
+    }
+
     // MARK: - List Parsing
 
-    /// Parse comma-separated list values
     private func parseListValues(_ input: String) -> [String] {
         input.split(separator: ",", omittingEmptySubsequences: true)
             .compactMap {
@@ -262,7 +326,15 @@ extension FilterSQLGenerator {
         if let pluginDriver {
             let filterTuples = filters
                 .filter { $0.isEnabled && !$0.columnName.isEmpty }
-                .map { ($0.columnName, $0.filterOperator.rawValue, $0.value) }
+                .map { filter in
+                    let value: String
+                    if filter.filterOperator == .between, let second = filter.secondValue {
+                        value = "\(filter.value),\(second)"
+                    } else {
+                        value = filter.value
+                    }
+                    return (filter.columnName, filter.filterOperator.rawValue, value)
+                }
             if let result = pluginDriver.buildFilteredQuery(
                 table: tableName, filters: filterTuples,
                 logicMode: logicMode == .and ? "and" : "or",

@@ -23,7 +23,13 @@ Query results and table contents render in a spreadsheet-style grid. Edit cells 
 
 ## Viewing Data
 
-Click a table in the sidebar or run a `SELECT` query to load data into the grid. The header shows row count, execution time, and affected rows for UPDATE/DELETE queries.
+The header shows row count, execution time, and affected rows for UPDATE/DELETE queries.
+
+### View Modes
+
+Toggle between **Data**, **Structure**, and **JSON** in the status bar. Query tabs show Data and JSON only.
+
+JSON mode renders all rows as a JSON array. Toggle between Text and Tree views in the toolbar. To export only specific rows, select them in Data mode first, then switch to JSON. The Copy JSON button writes to the clipboard. View mode is remembered per tab.
 
 ## Column Features
 
@@ -41,9 +47,7 @@ Click a column header to sort:
 - **Second click**: Sort descending (Z-A, 9-0)
 - **Third click**: Remove sort
 
-<Tip>
-Sorting is done locally on the loaded data. For server-side sorting, use `ORDER BY` in your query.
-</Tip>
+Sort applies to the full result. TablePro re-runs the query with `ORDER BY` appended; if your query already has an `ORDER BY`, it is replaced.
 
 {/* Screenshot: Column header with sort indicator */}
 <Frame caption="Column header with sort indicator">
@@ -191,27 +195,31 @@ If ENUM/SET metadata is unavailable (e.g., from a complex query), the cell falls
   />
 </Frame>
 
-### JSON Editor
+### JSON Viewer
 
-JSON/JSONB cells open a dedicated editor popover with real-time validation. Invalid JSON triggers a confirmation before saving. Values are minified on save.
+Double-click a JSON cell to open the viewer. Switch between **Text** and **Tree** modes with the toggle at the top.
+
+Text mode shows syntax-highlighted JSON with brace matching. Tree mode shows a collapsible outline you can search, expand/collapse all, and right-click to copy values or key paths like `$.users[0].email`.
+
+JSON is minified on save. Invalid JSON falls back to text mode.
 
 {/* Screenshot: JSON editor with validation */}
-<Frame caption="JSON editor with validation">
+<Frame caption="JSON viewer with Text/Tree toggle">
   <img
     className="block dark:hidden"
     src="/images/json-editor-popover.png"
-    alt="JSON editor with validation"
+    alt="JSON viewer"
   />
   <img
     className="hidden dark:block"
     src="/images/json-editor-popover-dark.png"
-    alt="JSON editor with validation"
+    alt="JSON viewer"
   />
 </Frame>
 
 ### Hex Editor (BLOB/Binary)
 
-BLOB, BINARY, and VARBINARY cells open a hex editor popover. Edit as space-separated hex bytes (e.g., `48 65 6C 6C 6F`). Live validation flags invalid input in red. The Cell Inspector sidebar also provides hex editing.
+BLOB, BINARY, and VARBINARY cells open a hex editor popover. Edit as space-separated hex bytes (e.g., `48 65 6C 6C 6F`). Invalid input is highlighted in red as you type. The Cell Inspector sidebar also offers hex editing.
 
 <Note>
 BLOBs larger than 10 KB are read-only. Use an external hex editor for large binary data.
@@ -263,8 +271,6 @@ Pending changes get visual feedback:
 - **Deleted rows** display a deletion indicator
 - The **toolbar** shows the count of pending changes
 
-Review all modifications before committing them to the database. See [Change Tracking](/features/change-tracking) for details.
-
 ## Cell Inspector
 
 The Cell Inspector is a right sidebar panel showing detailed information about the selected row or current table. Toggle with `Cmd+Shift+B` or via **View** > **Toggle Cell Inspector**.
@@ -285,7 +291,12 @@ The Cell Inspector is a right sidebar panel showing detailed information about t
 
 ### Row Details Mode
 
-When a row is selected, the inspector shows all column values with full (untruncated) content. Search columns by name. TEXT/VARCHAR columns get a multi-line editor. JSON/JSONB columns display syntax-highlighted JSON (colored keys, strings, numbers, and booleans) with brace matching. Edit values here; changes are queued like inline edits.
+When a row is selected, the inspector shows all column values with full content:
+
+- Search columns by name
+- TEXT/VARCHAR columns get a multi-line editor
+- JSON/JSONB columns show a compact preview with an expand button for the full JSON viewer
+- Edits here are queued like inline edits
 
 ### Table Info Mode
 
@@ -302,7 +313,7 @@ Use arrow keys to move between cells. Press `Enter` to edit, `Escape` to cancel.
 
 ## Selecting & Copying
 
-Click a cell to select it. Drag to select a range, or Shift+click to select a range. Click row numbers to select entire rows, or Cmd+click for multiple non-contiguous rows.
+Click a cell to select it. Drag or Shift+click to select a range. Click row numbers for entire rows; Cmd+click for non-contiguous rows.
 
 Select cells and press `Cmd+C` for TSV, `Cmd+Shift+C` for CSV, or `Cmd+Option+J` for JSON.
 
@@ -322,7 +333,7 @@ Select cells and press `Cmd+C` for TSV, `Cmd+Shift+C` for CSV, or `Cmd+Option+J`
 
 ## Pagination
 
-Large result sets are paginated. Configure page size in **Settings** > **Data Grid** (Small: 100, Medium: 500, Large: 1,000, Custom: 10–100,000). Smaller pages load faster.
+Table tabs paginate large result sets. Set page size in **Settings** > **Editor** (Small: 100, Medium: 500, Large: 1,000, Custom: any value from 10 to 100,000). Smaller pages load faster.
 
 {/* Screenshot: Pagination controls with page navigation */}
 <Frame caption="Pagination controls with page navigation">
@@ -338,10 +349,55 @@ Large result sets are paginated. Configure page size in **Settings** > **Data Gr
   />
 </Frame>
 
+## Smart Value Detection
+
+Auto-renders UUIDs and Unix timestamps in the grid when column type and name match:
+
+| Column Type | Name Contains | Display |
+|------------|--------------|---------|
+| `BINARY(16)` | `uuid`, `guid`, `_id` | `550e8400-e29b-41d4-a716-446655440000` |
+| `CHAR(32)`, `VARCHAR(36)` | `uuid`, `guid` | UUID with hyphens |
+| `INT`, `BIGINT` | `_at`, `_time`, `_timestamp`, `created`, `updated` | `2025-01-15 10:30:00` |
+
+Right-click a column header > **Display As** to override per column. Overrides persist per connection and table. Toggle auto-detection in **Settings** > **Editor** > **Smart value detection**.
+
 ## NULL Values and Display
 
-NULL values show as styled "NULL" text (customizable in **Settings** > **Data Grid**). Configure date format, row height, and alternate row colors in the same settings panel.
+NULL values show as styled "NULL" text (customizable in **Settings** > **Editor**). Configure date format, row height, and alternate row colors in the same settings panel.
 
+
+## Result Truncation
+
+Query tabs cap results at 10,000 rows by default to keep the UI responsive on large queries. When the cap kicks in, the status bar shows a truncation marker and a Fetch All button:
+
+<Frame caption="Truncation banner with Fetch All">
+  <img
+    className="block dark:hidden"
+    src="/images/progressive-loading.png"
+    alt="Truncation banner with Fetch All button"
+  />
+  <img
+    className="hidden dark:block"
+    src="/images/progressive-loading-dark.png"
+    alt="Truncation banner with Fetch All button"
+  />
+</Frame>
+
+- **Showing N rows (truncated)** means the query returned more than the cap and the grid is showing the first N rows
+- **Fetch All** re-runs the query without a cap. A confirmation appears first because large result sets use significant memory.
+
+Your `LIMIT` and `OFFSET` are passed to the database unchanged. `SELECT ... LIMIT 10` returns 10 rows whether the cap is set or not. The cap only kicks in when the database returns more rows than your cap allows, which happens on queries with no `LIMIT` or with a `LIMIT` larger than the cap.
+
+Configure the cap in **Settings** > **Editor**:
+
+- **Truncate query results**: turns the cap on or off
+- **Row cap**: 100 to 500,000, or 0 for unlimited
+
+Table tabs are not affected by this setting. They use [Pagination](#pagination) instead.
+
+### Cancelling
+
+Press `Cmd+.` or click the stop button in the toolbar to cancel a running query or a Fetch All operation.
 
 ## MongoDB Collections
 

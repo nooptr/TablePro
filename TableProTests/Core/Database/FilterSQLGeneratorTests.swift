@@ -614,6 +614,49 @@ struct FilterSQLGeneratorTests {
         #expect(result == "(age > 18)")
     }
 
+    @Test("Raw SQL rejects destructive statement injection", arguments: [
+        "1=1; DROP TABLE users",
+        "1=1; DELETE FROM users",
+        "1=1; INSERT INTO users VALUES (1)",
+        "1=1; UPDATE users SET admin=1",
+        "1=1; ALTER TABLE users ADD COLUMN pwned TEXT",
+        "1=1; CREATE TABLE evil (id INT)",
+        "1=1; TRUNCATE TABLE users",
+        "1=1; GRANT ALL ON *.* TO attacker",
+        "1=1; REVOKE ALL ON *.* FROM user",
+        "1=1; EXEC xp_cmdshell 'whoami'",
+        "1=1; EXECUTE sp_executesql 'SELECT 1'",
+        "1=1; drop table users"
+    ])
+    func testRawSQLRejectsDestructiveStatements(input: String) {
+        let generator = FilterSQLGenerator(dialect: Self.mysqlDialect)
+        let filter = TableFilter(columnName: "__RAW__", rawSQL: input)
+        #expect(generator.generateCondition(from: filter) == nil)
+    }
+
+    @Test("Raw SQL rejects comment injection", arguments: [
+        "1=1 -- always true",
+        "1=1 /* comment */"
+    ])
+    func testRawSQLRejectsCommentInjection(input: String) {
+        let generator = FilterSQLGenerator(dialect: Self.mysqlDialect)
+        let filter = TableFilter(columnName: "__RAW__", rawSQL: input)
+        #expect(generator.generateCondition(from: filter) == nil)
+    }
+
+    @Test("Raw SQL allows legitimate WHERE conditions", arguments: [
+        ("age > 18 AND status = 'active'", "(age > 18 AND status = 'active')"),
+        ("id IN (SELECT id FROM other)", "(id IN (SELECT id FROM other))"),
+        ("YEAR(created_at) = 2024", "(YEAR(created_at) = 2024)"),
+        ("status = 'semi;colon'", "(status = 'semi;colon')"),
+        ("data->>'key' = 'value'", "(data->>'key' = 'value')")
+    ])
+    func testRawSQLAllowsLegitimateConditions(input: String, expected: String) {
+        let generator = FilterSQLGenerator(dialect: Self.mysqlDialect)
+        let filter = TableFilter(columnName: "__RAW__", rawSQL: input)
+        #expect(generator.generateCondition(from: filter) == expected)
+    }
+
     // MARK: - Identifier Quoting Per DB Type
 
     @Test("MySQL uses backtick quoting")
@@ -1038,5 +1081,97 @@ struct FilterSQLGeneratorTests {
         ]
         let result = generator.generateWhereClause(from: filters, logicMode: .or)
         #expect(result == "WHERE \"age\" > 18 OR \"status\" = 'active'")
+    }
+
+    // MARK: - NULL Value Auto-Conversion (Fix A)
+
+    @Test("Equal with NULL value generates IS NULL")
+    func testEqualNullGeneratesIsNull() {
+        let generator = FilterSQLGenerator(dialect: Self.mysqlDialect)
+        let filter = TableFilter(
+            id: UUID(), columnName: "name", filterOperator: .equal,
+            value: "NULL", secondValue: nil, isSelected: true, isEnabled: true, rawSQL: nil
+        )
+        let result = generator.generateCondition(from: filter)
+        #expect(result == "`name` IS NULL")
+    }
+
+    @Test("Equal with null (lowercase) generates IS NULL")
+    func testEqualNullLowercaseGeneratesIsNull() {
+        let generator = FilterSQLGenerator(dialect: Self.mysqlDialect)
+        let filter = TableFilter(
+            id: UUID(), columnName: "name", filterOperator: .equal,
+            value: "null", secondValue: nil, isSelected: true, isEnabled: true, rawSQL: nil
+        )
+        let result = generator.generateCondition(from: filter)
+        #expect(result == "`name` IS NULL")
+    }
+
+    @Test("Not equal with NULL value generates IS NOT NULL")
+    func testNotEqualNullGeneratesIsNotNull() {
+        let generator = FilterSQLGenerator(dialect: Self.mysqlDialect)
+        let filter = TableFilter(
+            id: UUID(), columnName: "name", filterOperator: .notEqual,
+            value: "NULL", secondValue: nil, isSelected: true, isEnabled: true, rawSQL: nil
+        )
+        let result = generator.generateCondition(from: filter)
+        #expect(result == "`name` IS NOT NULL")
+    }
+
+    @Test("Equal with regular string value unchanged")
+    func testEqualRegularStringUnchanged() {
+        let generator = FilterSQLGenerator(dialect: Self.mysqlDialect)
+        let filter = TableFilter(
+            id: UUID(), columnName: "name", filterOperator: .equal,
+            value: "hello", secondValue: nil, isSelected: true, isEnabled: true, rawSQL: nil
+        )
+        let result = generator.generateCondition(from: filter)
+        #expect(result == "`name` = 'hello'")
+    }
+
+    // MARK: - IN/NOT IN with NULL Values (Fix D)
+
+    @Test("IN list containing NULL generates OR IS NULL")
+    func testInListWithNull() {
+        let generator = FilterSQLGenerator(dialect: Self.mysqlDialect)
+        let filter = TableFilter(
+            id: UUID(), columnName: "status", filterOperator: .inList,
+            value: "1, NULL, 3", secondValue: nil, isSelected: true, isEnabled: true, rawSQL: nil
+        )
+        let result = generator.generateCondition(from: filter)
+        #expect(result == "(`status` IN (1, 3) OR `status` IS NULL)")
+    }
+
+    @Test("NOT IN list containing NULL generates AND IS NOT NULL")
+    func testNotInListWithNull() {
+        let generator = FilterSQLGenerator(dialect: Self.mysqlDialect)
+        let filter = TableFilter(
+            id: UUID(), columnName: "status", filterOperator: .notInList,
+            value: "1, NULL, 3", secondValue: nil, isSelected: true, isEnabled: true, rawSQL: nil
+        )
+        let result = generator.generateCondition(from: filter)
+        #expect(result == "(`status` NOT IN (1, 3) AND `status` IS NOT NULL)")
+    }
+
+    @Test("IN list without NULL unchanged")
+    func testInListWithoutNullUnchanged() {
+        let generator = FilterSQLGenerator(dialect: Self.mysqlDialect)
+        let filter = TableFilter(
+            id: UUID(), columnName: "id", filterOperator: .inList,
+            value: "1, 2, 3", secondValue: nil, isSelected: true, isEnabled: true, rawSQL: nil
+        )
+        let result = generator.generateCondition(from: filter)
+        #expect(result == "`id` IN (1, 2, 3)")
+    }
+
+    @Test("IN list with only NULL generates IS NULL")
+    func testInListOnlyNull() {
+        let generator = FilterSQLGenerator(dialect: Self.mysqlDialect)
+        let filter = TableFilter(
+            id: UUID(), columnName: "status", filterOperator: .inList,
+            value: "NULL", secondValue: nil, isSelected: true, isEnabled: true, rawSQL: nil
+        )
+        let result = generator.generateCondition(from: filter)
+        #expect(result == "`status` IS NULL")
     }
 }

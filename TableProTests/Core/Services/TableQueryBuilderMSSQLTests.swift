@@ -9,9 +9,22 @@ import Foundation
 @testable import TablePro
 import Testing
 
+@MainActor
 @Suite("Table Query Builder MSSQL")
 struct TableQueryBuilderMSSQLTests {
-    private let builder = TableQueryBuilder(databaseType: .mssql)
+    private let builder: TableQueryBuilder
+
+    init() {
+        FakeMSSQLPluginRegistration.registerIfNeeded()
+        let dialect = PluginManager.shared.sqlDialect(for: .mssql)
+        let dialectQuote = dialect.map(quoteIdentifierFromDialect)
+        self.builder = TableQueryBuilder(
+            databaseType: .mssql,
+            pluginDriver: PluginManager.shared.queryBuildingDriver(for: .mssql),
+            dialect: dialect,
+            dialectQuote: dialectQuote
+        )
+    }
 
     // MARK: - Base Query Tests
 
@@ -44,8 +57,6 @@ struct TableQueryBuilderMSSQLTests {
     func baseQueryNoMySQLLimitSyntax() {
         let query = builder.buildBaseQuery(tableName: "users")
         let normalized = query.uppercased()
-        // LIMIT keyword should not appear as standalone MySQL pagination
-        // (FETCH NEXT is the MSSQL style)
         #expect(!normalized.contains(" LIMIT "))
     }
 

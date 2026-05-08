@@ -14,45 +14,54 @@ struct ExecutionIndicatorView: View {
     let lastDuration: TimeInterval?
     let clickHouseProgress: ClickHouseQueryProgress?
     let lastClickHouseProgress: ClickHouseQueryProgress?
+    var onCancel: (() -> Void)?
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 4) {
             if isExecuting {
                 ProgressView()
                     .controlSize(.small)
                     .accessibilityLabel(String(localized: "Query executing"))
                 if let progress = clickHouseProgress {
                     Text(progress.formattedLive)
-                        .font(.system(size: ThemeEngine.shared.activeTheme.typography.small, weight: .regular, design: .monospaced))
+                        .font(.system(.subheadline, design: .monospaced).weight(.regular))
                         .foregroundStyle(ThemeEngine.shared.colors.toolbar.tertiaryTextSwiftUI)
                 } else {
                     Text("Executing...")
-                        .font(.system(size: ThemeEngine.shared.activeTheme.typography.small, weight: .regular, design: .monospaced))
+                        .font(.system(.subheadline, design: .monospaced).weight(.regular))
                         .foregroundStyle(ThemeEngine.shared.colors.toolbar.tertiaryTextSwiftUI)
                 }
+                Button {
+                    onCancel?()
+                } label: {
+                    Image(systemName: "stop.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .controlSize(.small)
+                .help(String(localized: "Cancel Query (⌘.)"))
             } else if let chProgress = lastClickHouseProgress {
                 Text(chProgress.formattedSummary)
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.small, weight: .regular, design: .monospaced))
+                    .font(.system(.subheadline, design: .monospaced).weight(.regular))
                     .foregroundStyle(ThemeEngine.shared.colors.toolbar.tertiaryTextSwiftUI)
-                    .accessibilityLabel(String(localized: "Last query: \(chProgress.formattedSummary)"))
-                    .help("Last query execution summary")
+                    .accessibilityLabel(String(format: String(localized: "Last query: %@"), chProgress.formattedSummary))
+                    .help(String(localized: "Last query execution summary"))
             } else if let duration = lastDuration {
                 Text(formattedDuration(duration))
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.small, weight: .regular, design: .monospaced))
+                    .font(.system(.subheadline, design: .monospaced).weight(.regular))
                     .foregroundStyle(ThemeEngine.shared.colors.toolbar.tertiaryTextSwiftUI)
                     .accessibilityLabel(
-                        String(localized: "Last query took \(formattedDuration(duration))")
+                        String(format: String(localized: "Last query took %@"), formattedDuration(duration))
                     )
-                    .help("Last query execution time")
+                    .help(String(localized: "Last query execution time"))
             } else {
                 Text("--")
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.small, weight: .regular, design: .monospaced))
+                    .font(.system(.subheadline, design: .monospaced).weight(.regular))
                     .foregroundStyle(.quaternary)
                     .accessibilityLabel(String(localized: "No query executed yet"))
-                    .help("Run a query to see execution time")
+                    .help(String(localized: "Run a query to see execution time"))
             }
         }
-        .padding(.trailing, ThemeEngine.shared.activeTheme.spacing.xs)
     }
 
     // MARK: - Helpers
@@ -63,14 +72,14 @@ struct ExecutionIndicatorView: View {
             return String(localized: "<1ms")
         } else if duration < 1.0 {
             let ms = String(format: "%.0f", duration * 1_000)
-            return String(localized: "\(ms)ms")
+            return String(format: String(localized: "%@ms"), ms)
         } else if duration < 60.0 {
             let secs = String(format: "%.2f", duration)
-            return String(localized: "\(secs)s")
+            return String(format: String(localized: "%@s"), secs)
         } else {
             let minutes = Int(duration) / 60
             let seconds = Int(duration) % 60
-            return String(localized: "\(minutes)m \(seconds)s")
+            return String(format: String(localized: "%dm %ds"), minutes, seconds)
         }
     }
 }

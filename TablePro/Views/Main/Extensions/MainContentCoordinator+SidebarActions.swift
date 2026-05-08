@@ -7,6 +7,7 @@
 
 import AppKit
 import Foundation
+import TableProPluginKit
 import UniformTypeIdentifiers
 
 extension MainContentCoordinator {
@@ -14,23 +15,22 @@ extension MainContentCoordinator {
 
     func closeResultSet(id: UUID) {
         guard let tabIdx = tabManager.selectedTabIndex else { return }
-        let rs = tabManager.tabs[tabIdx].resultSets.first { $0.id == id }
+        let rs = tabManager.tabs[tabIdx].display.resultSets.first { $0.id == id }
         guard rs?.isPinned != true else { return }
-        tabManager.tabs[tabIdx].resultSets.removeAll { $0.id == id }
-        if tabManager.tabs[tabIdx].activeResultSetId == id {
-            tabManager.tabs[tabIdx].activeResultSetId = tabManager.tabs[tabIdx].resultSets.last?.id
+        let tabId = tabManager.tabs[tabIdx].id
+        tabManager.tabs[tabIdx].display.resultSets.removeAll { $0.id == id }
+        if tabManager.tabs[tabIdx].display.activeResultSetId == id {
+            let newActiveId = tabManager.tabs[tabIdx].display.resultSets.last?.id
+            switchActiveResultSet(to: newActiveId, in: tabId)
         }
-        if tabManager.tabs[tabIdx].resultSets.isEmpty {
-            tabManager.tabs[tabIdx].rowBuffer = RowBuffer()
-            tabManager.tabs[tabIdx].resultColumns = []
-            tabManager.tabs[tabIdx].columnTypes = []
-            tabManager.tabs[tabIdx].resultRows = []
-            tabManager.tabs[tabIdx].errorMessage = nil
-            tabManager.tabs[tabIdx].rowsAffected = 0
-            tabManager.tabs[tabIdx].executionTime = nil
-            tabManager.tabs[tabIdx].statusMessage = nil
-            tabManager.tabs[tabIdx].resultVersion += 1
-            tabManager.tabs[tabIdx].isResultsCollapsed = true
+        if tabManager.tabs[tabIdx].display.resultSets.isEmpty {
+            setActiveTableRows(TableRows(), for: tabId)
+            tabManager.tabs[tabIdx].execution.errorMessage = nil
+            tabManager.tabs[tabIdx].execution.rowsAffected = 0
+            tabManager.tabs[tabIdx].execution.executionTime = nil
+            tabManager.tabs[tabIdx].execution.statusMessage = nil
+            tabManager.tabs[tabIdx].schemaVersion += 1
+            tabManager.tabs[tabIdx].display.isResultsCollapsed = true
             toolbarState.isResultsCollapsed = true
         }
     }
@@ -41,14 +41,14 @@ extension MainContentCoordinator {
         guard !safeModeLevel.blocksAllWrites else { return }
 
         if tabManager.tabs.isEmpty {
-            tabManager.addCreateTableTab(databaseName: connection.database)
+            tabManager.addCreateTableTab(databaseName: activeDatabaseName)
         } else {
             let payload = EditorTabPayload(
                 connectionId: connection.id,
                 tabType: .createTable,
-                databaseName: connection.database
+                databaseName: activeDatabaseName
             )
-            WindowOpener.shared.openNativeTab(payload)
+            WindowManager.shared.openTab(payload: payload)
         }
     }
 
@@ -64,14 +64,14 @@ extension MainContentCoordinator {
         let payload = EditorTabPayload(
             connectionId: connection.id,
             tabType: .query,
-            databaseName: connection.database,
+            databaseName: activeDatabaseName,
             initialQuery: template
         )
-        WindowOpener.shared.openNativeTab(payload)
+        WindowManager.shared.openTab(payload: payload)
     }
 
     func editViewDefinition(_ viewName: String) {
-        Task { @MainActor in
+        Task {
             do {
                 guard let driver = DatabaseManager.shared.driver(for: self.connection.id) else { return }
                 let definition = try await driver.fetchViewDefinition(view: viewName)
@@ -81,7 +81,7 @@ extension MainContentCoordinator {
                     tabType: .query,
                     initialQuery: definition
                 )
-                WindowOpener.shared.openNativeTab(payload)
+                WindowManager.shared.openTab(payload: payload)
             } catch {
                 let driver = DatabaseManager.shared.driver(for: self.connection.id)
                 let template = driver?.editViewFallbackTemplate(viewName: viewName)
@@ -93,19 +93,21 @@ extension MainContentCoordinator {
                     tabType: .query,
                     initialQuery: fallbackSQL
                 )
-                WindowOpener.shared.openNativeTab(payload)
+                WindowManager.shared.openTab(payload: payload)
             }
         }
     }
 
     // MARK: - Export/Import
 
-    func openExportDialog() {
+    func openExportDialog(preselectedTableNames: Set<String>? = nil) {
+        exportPreselectedTableNames = preselectedTableNames
         activeSheet = .exportDialog
     }
 
     func openExportQueryResultsDialog() {
-        guard let tab = tabManager.selectedTab, !tab.rowBuffer.rows.isEmpty else { return }
+        guard let tab = tabManager.selectedTab,
+              !tabSessionRegistry.tableRows(for: tab.id).rows.isEmpty else { return }
         activeSheet = .exportQueryResults
     }
 
@@ -114,15 +116,19 @@ extension MainContentCoordinator {
         guard PluginManager.shared.supportsImport(for: connection.type) else {
             AlertHelper.showErrorSheet(
                 title: String(localized: "Import Not Supported"),
-                message: String(localized: "SQL import is not supported for \(connection.type.rawValue) connections."),
+                message: String(format: String(localized: "SQL import is not supported for %@ connections."), connection.type.rawValue),
                 window: nil
             )
             return
         }
         let panel = NSOpenPanel()
         var contentTypes: [UTType] = []
-        if let sqlType = UTType(filenameExtension: "sql") {
-            contentTypes.append(sqlType)
+        for plugin in PluginManager.shared.allImportPlugins() {
+            for ext in type(of: plugin).acceptedFileExtensions {
+                if let utType = UTType(filenameExtension: ext) {
+                    contentTypes.append(utType)
+                }
+            }
         }
         if let gzType = UTType(filenameExtension: "gz") {
             contentTypes.append(gzType)
@@ -133,10 +139,51 @@ extension MainContentCoordinator {
         panel.allowsMultipleSelection = false
         panel.message = "Select SQL file to import"
 
-        panel.begin { [weak self] response in
+        guard let window = contentWindow else { return }
+        panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
             self?.importFileURL = url
             self?.activeSheet = .importDialog
+        }
+    }
+
+    // MARK: - Maintenance
+
+    func supportedMaintenanceOperations() -> [String] {
+        guard let driver = DatabaseManager.shared.driver(for: connectionId) else { return [] }
+        return driver.supportedMaintenanceOperations() ?? []
+    }
+
+    func showMaintenanceSheet(operation: String, tableName: String) {
+        activeSheet = .maintenance(operation: operation, tableName: tableName)
+    }
+
+    func executeMaintenance(operation: String, tableName: String, options: [String: String]) {
+        guard let driver = DatabaseManager.shared.driver(for: connectionId) else { return }
+        guard let statements = driver.maintenanceStatements(
+            operation: operation, table: tableName, options: options
+        ) else { return }
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                var lastResult: QueryResult?
+                for sql in statements {
+                    lastResult = try await driver.execute(query: sql)
+                }
+                await AlertHelper.showInfoSheet(
+                    title: String(format: String(localized: "%@ completed"), operation),
+                    message: lastResult?.statusMessage
+                        ?? String(format: String(localized: "%@ on %@ completed successfully."), operation, tableName),
+                    window: self.contentWindow
+                )
+            } catch {
+                await AlertHelper.showErrorSheet(
+                    title: String(format: String(localized: "%@ failed"), operation),
+                    message: error.localizedDescription,
+                    window: self.contentWindow
+                )
+            }
         }
     }
 }

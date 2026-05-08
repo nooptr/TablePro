@@ -22,7 +22,7 @@ internal struct BlobHexEditorView: View {
     private var readOnlyHexView: some View {
         ScrollView {
             Text(BlobFormattingService.shared.format(context.value.wrappedValue, for: .detail) ?? "")
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.tiny, design: .monospaced))
+                .font(.system(.caption2, design: .monospaced))
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
         }
@@ -33,7 +33,7 @@ internal struct BlobHexEditorView: View {
         VStack(alignment: .leading, spacing: 2) {
             TextField("Hex bytes", text: $hexEditText, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.tiny, design: .monospaced))
+                .font(.system(.caption2, design: .monospaced))
                 .lineLimit(3...8)
                 .focused($isFocused)
                 .onAppear {
@@ -53,14 +53,14 @@ internal struct BlobHexEditorView: View {
             HStack(spacing: 4) {
                 if let byteCount = context.value.wrappedValue.data(using: .isoLatin1)?.count, byteCount > 0 {
                     Text("\(byteCount) bytes")
-                        .font(.system(size: ThemeEngine.shared.activeTheme.typography.tiny))
+                        .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
 
                 if BlobFormattingService.shared.parseHex(hexEditText) == nil, !hexEditText.isEmpty {
                     Text("Invalid hex")
-                        .font(.system(size: ThemeEngine.shared.activeTheme.typography.tiny))
-                        .foregroundStyle(.red)
+                        .font(.caption2)
+                        .foregroundStyle(Color(nsColor: .systemRed))
                 }
             }
         }

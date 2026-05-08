@@ -14,7 +14,7 @@ import os
 final class ResultSet: Identifiable {
     let id: UUID
     var label: String
-    var rowBuffer: RowBuffer
+    var tableRows: TableRows
     var executionTime: TimeInterval?
     var rowsAffected: Int = 0
     var errorMessage: String?
@@ -22,25 +22,16 @@ final class ResultSet: Identifiable {
     var tableName: String?
     var isEditable: Bool = false
     var isPinned: Bool = false
-    var resultVersion: Int = 0
     var metadataVersion: Int = 0
     var sortState = SortState()
     var pagination = PaginationState()
     var columnLayout = ColumnLayoutState()
 
-    // Column metadata
-    var columnTypes: [ColumnType] = []
-    var columnDefaults: [String: String?] = [:]
-    var columnForeignKeys: [String: ForeignKeyInfo] = [:]
-    var columnEnumValues: [String: [String]] = [:]
-    var columnNullable: [String: Bool] = [:]
+    var resultColumns: [String] { tableRows.columns }
 
-    var resultColumns: [String] { rowBuffer.columns }
-    var resultRows: [[String?]] { rowBuffer.rows }
-
-    init(id: UUID = UUID(), label: String, rowBuffer: RowBuffer = RowBuffer()) {
+    init(id: UUID = UUID(), label: String, tableRows: TableRows = TableRows()) {
         self.id = id
         self.label = label
-        self.rowBuffer = rowBuffer
+        self.tableRows = tableRows
     }
 }

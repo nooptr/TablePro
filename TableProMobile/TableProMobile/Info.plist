@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>AnalyticsHMACSecret</key>
+	<string>$(ANALYTICS_HMAC_SECRET)</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>TablePro connects to database servers and SSH tunnels running on your local network, including Bonjour (.local) hostnames.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_ssh._tcp</string>
+		<string>_mysql._tcp</string>
+		<string>_postgresql._tcp</string>
+		<string>_redis._tcp</string>
+	</array>
+	<key>NSUserActivityTypes</key>
+	<array>
+		<string>com.TablePro.viewConnection</string>
+		<string>com.TablePro.viewTable</string>
+	</array>
+</dict>
+</plist>

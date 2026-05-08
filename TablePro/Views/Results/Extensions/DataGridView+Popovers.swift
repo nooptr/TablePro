@@ -9,9 +9,18 @@ import SwiftUI
 // MARK: - Popover Editors
 
 extension TableViewCoordinator {
+    func cellValue(at row: Int, column columnIndex: Int) -> String? {
+        guard let displayRow = displayRow(at: row), columnIndex >= 0, columnIndex < displayRow.values.count else {
+            return nil
+        }
+        return displayRow.values[columnIndex]
+    }
+
     func showDatePickerPopover(tableView: NSTableView, row: Int, column: Int, columnIndex: Int) {
-        let currentValue = rowProvider.value(atRow: row, column: columnIndex)
-        let columnType = rowProvider.columnTypes[columnIndex]
+        let currentValue = cellValue(at: row, column: columnIndex)
+        let tableRows = tableRowsProvider()
+        guard columnIndex >= 0, columnIndex < tableRows.columnTypes.count else { return }
+        let columnType = tableRows.columnTypes[columnIndex]
 
         guard tableView.view(atColumn: column, row: row, makeIfNecessary: false) != nil else { return }
 
@@ -22,29 +31,13 @@ extension TableViewCoordinator {
             value: currentValue,
             columnType: columnType
         ) { [weak self] newValue in
-            guard let self = self else { return }
-            let oldValue = self.rowProvider.value(atRow: row, column: columnIndex)
-            guard oldValue != newValue else { return }
-
-            let columnName = self.rowProvider.columns[columnIndex]
-            self.changeManager.recordCellChange(
-                rowIndex: row,
-                columnIndex: columnIndex,
-                columnName: columnName,
-                oldValue: oldValue,
-                newValue: newValue,
-                originalRow: self.rowProvider.rowValues(at: row) ?? []
-            )
-
-            self.rowProvider.updateValue(newValue, at: row, columnIndex: columnIndex)
-            self.onCellEdit?(row, columnIndex, newValue)
-
-            tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: column))
+            guard let self else { return }
+            self.commitCellEdit(row: row, columnIndex: columnIndex, newValue: newValue)
         }
     }
 
     func showForeignKeyPopover(tableView: NSTableView, row: Int, column: Int, columnIndex: Int, fkInfo: ForeignKeyInfo) {
-        let currentValue = rowProvider.value(atRow: row, column: columnIndex)
+        let currentValue = cellValue(at: row, column: columnIndex)
 
         guard tableView.view(atColumn: column, row: row, makeIfNecessary: false) != nil else { return }
         guard let databaseType, let connectionId else { return }
@@ -61,29 +54,33 @@ extension TableViewCoordinator {
                 connectionId: connectionId,
                 databaseType: databaseType,
                 onCommit: { newValue in
-                    self?.commitPopoverEdit(
-                        tableView: tableView,
-                        row: row,
-                        column: column,
-                        columnIndex: columnIndex,
-                        newValue: newValue
-                    )
+                    self?.commitPopoverEdit(row: row, columnIndex: columnIndex, newValue: newValue)
                 },
                 onDismiss: dismiss
             )
         }
     }
 
+    func toggleForeignKeyPreview(tableView: NSTableView, row: Int, column: Int, columnIndex: Int) {
+        if let popover = activeFKPreviewPopover, popover.isShown {
+            popover.close()
+            activeFKPreviewPopover = nil
+            return
+        }
+        showForeignKeyPreview(tableView: tableView, row: row, column: column, columnIndex: columnIndex)
+    }
+
     func showForeignKeyPreview(tableView: NSTableView, row: Int, column: Int, columnIndex: Int) {
-        guard columnIndex >= 0, columnIndex < rowProvider.columns.count else { return }
-        let columnName = rowProvider.columns[columnIndex]
-        guard let fkInfo = rowProvider.columnForeignKeys[columnName] else { return }
-        let cellValue = rowProvider.value(atRow: row, column: columnIndex)
+        let tableRows = tableRowsProvider()
+        guard columnIndex >= 0, columnIndex < tableRows.columns.count else { return }
+        let columnName = tableRows.columns[columnIndex]
+        guard let fkInfo = tableRows.columnForeignKeys[columnName] else { return }
+        let cellValue = cellValue(at: row, column: columnIndex)
         guard let databaseType, let connectionId else { return }
         guard tableView.view(atColumn: column, row: row, makeIfNecessary: false) != nil else { return }
 
         let cellRect = tableView.rect(ofRow: row).intersection(tableView.rect(ofColumn: column))
-        PopoverPresenter.show(
+        let popover = PopoverPresenter.show(
             relativeTo: cellRect,
             of: tableView,
             contentSize: NSSize(width: 380, height: 400)
@@ -96,15 +93,19 @@ extension TableViewCoordinator {
                 onNavigate: {
                     dismiss()
                     guard let value = cellValue else { return }
-                    self?.onNavigateFK?(value, fkInfo)
+                    self?.delegate?.dataGridNavigateFK(value: value, fkInfo: fkInfo)
                 },
                 onDismiss: dismiss
             )
         }
+        activeFKPreviewPopover = popover
     }
 
     func showJSONEditorPopover(tableView: NSTableView, row: Int, column: Int, columnIndex: Int) {
-        let currentValue = rowProvider.value(atRow: row, column: columnIndex)
+        let currentValue = cellValue(at: row, column: columnIndex)
+        let tableRows = tableRowsProvider()
+        guard columnIndex >= 0, columnIndex < tableRows.columns.count else { return }
+        let columnName = tableRows.columns[columnIndex]
 
         guard tableView.view(atColumn: column, row: row, makeIfNecessary: false) != nil else { return }
 
@@ -112,26 +113,32 @@ extension TableViewCoordinator {
         PopoverPresenter.show(
             relativeTo: cellRect,
             of: tableView,
-            contentSize: NSSize(width: 420, height: 340)
+            contentSize: nil
         ) { [weak self] dismiss in
             JSONEditorContentView(
                 initialValue: currentValue,
+                columnName: columnName,
                 onCommit: { newValue in
-                    self?.commitPopoverEdit(
-                        tableView: tableView,
-                        row: row,
-                        column: column,
-                        columnIndex: columnIndex,
-                        newValue: newValue
-                    )
+                    self?.commitPopoverEdit(row: row, columnIndex: columnIndex, newValue: newValue)
                 },
-                onDismiss: dismiss
+                onDismiss: dismiss,
+                onPopOut: { currentText in
+                    dismiss()
+                    JSONViewerWindowController.open(
+                        text: currentText,
+                        columnName: columnName,
+                        isEditable: true,
+                        onCommit: { newValue in
+                            self?.commitPopoverEdit(row: row, columnIndex: columnIndex, newValue: newValue)
+                        }
+                    )
+                }
             )
         }
     }
 
     func showBlobEditorPopover(tableView: NSTableView, row: Int, column: Int, columnIndex: Int) {
-        let currentValue = rowProvider.value(atRow: row, column: columnIndex)
+        let currentValue = cellValue(at: row, column: columnIndex)
 
         guard tableView.view(atColumn: column, row: row, makeIfNecessary: false) != nil else { return }
 
@@ -144,13 +151,7 @@ extension TableViewCoordinator {
             HexEditorContentView(
                 initialValue: currentValue,
                 onCommit: { newValue in
-                    self?.commitPopoverEdit(
-                        tableView: tableView,
-                        row: row,
-                        column: column,
-                        columnIndex: columnIndex,
-                        newValue: newValue
-                    )
+                    self?.commitPopoverEdit(row: row, columnIndex: columnIndex, newValue: newValue)
                 },
                 onDismiss: dismiss
             )
@@ -159,11 +160,13 @@ extension TableViewCoordinator {
 
     func showEnumPopover(tableView: NSTableView, row: Int, column: Int, columnIndex: Int) {
         guard tableView.view(atColumn: column, row: row, makeIfNecessary: false) != nil else { return }
-        let columnName = rowProvider.columns[columnIndex]
-        guard let allowedValues = rowProvider.columnEnumValues[columnName] else { return }
+        let tableRows = tableRowsProvider()
+        guard columnIndex >= 0, columnIndex < tableRows.columns.count else { return }
+        let columnName = tableRows.columns[columnIndex]
+        guard let allowedValues = tableRows.columnEnumValues[columnName] else { return }
 
-        let currentValue = rowProvider.value(atRow: row, column: columnIndex)
-        let isNullable = rowProvider.columnNullable[columnName] ?? true
+        let currentValue = cellValue(at: row, column: columnIndex)
+        let isNullable = tableRows.columnNullable[columnName] ?? true
 
         var values: [String] = []
         if isNullable {
@@ -181,7 +184,7 @@ extension TableViewCoordinator {
                 currentValue: currentValue,
                 isNullable: isNullable,
                 onCommit: { newValue in
-                    self?.commitPopoverEdit(tableView: tableView, row: row, column: column, columnIndex: columnIndex, newValue: newValue)
+                    self?.commitPopoverEdit(row: row, columnIndex: columnIndex, newValue: newValue)
                 },
                 onDismiss: dismiss
             )
@@ -190,10 +193,12 @@ extension TableViewCoordinator {
 
     func showSetPopover(tableView: NSTableView, row: Int, column: Int, columnIndex: Int) {
         guard tableView.view(atColumn: column, row: row, makeIfNecessary: false) != nil else { return }
-        let columnName = rowProvider.columns[columnIndex]
-        guard let allowedValues = rowProvider.columnEnumValues[columnName] else { return }
+        let tableRows = tableRowsProvider()
+        guard columnIndex >= 0, columnIndex < tableRows.columns.count else { return }
+        let columnName = tableRows.columns[columnIndex]
+        guard let allowedValues = tableRows.columnEnumValues[columnName] else { return }
 
-        let currentValue = rowProvider.value(atRow: row, column: columnIndex)
+        let currentValue = cellValue(at: row, column: columnIndex)
 
         let currentSet: Set<String>
         if let value = currentValue {
@@ -215,7 +220,7 @@ extension TableViewCoordinator {
                 allowedValues: allowedValues,
                 initialSelections: selections,
                 onCommit: { newValue in
-                    self?.commitPopoverEdit(tableView: tableView, row: row, column: column, columnIndex: columnIndex, newValue: newValue)
+                    self?.commitPopoverEdit(row: row, columnIndex: columnIndex, newValue: newValue)
                 },
                 onDismiss: dismiss
             )
@@ -224,19 +229,47 @@ extension TableViewCoordinator {
 
     func showDropdownMenu(tableView: NSTableView, row: Int, column: Int, columnIndex: Int) {
         guard tableView.view(atColumn: column, row: row, makeIfNecessary: false) != nil else { return }
+        let tableRows = tableRowsProvider()
+        guard columnIndex >= 0, columnIndex < tableRows.columns.count else { return }
 
-        let currentValue = rowProvider.value(atRow: row, column: columnIndex)
-        pendingDropdownRow = row
-        pendingDropdownColumn = columnIndex
+        let currentValue = cellValue(at: row, column: columnIndex)
+        let context = DropdownMenuContext(row: row, columnIndex: columnIndex)
+
+        let options: [String]
+        if let custom = customDropdownOptions?[columnIndex] {
+            options = custom
+        } else if let dbType = databaseType, PluginManager.shared.usesTrueFalseBooleans(for: dbType) {
+            options = ["true", "false"]
+        } else {
+            options = ["1", "0"]
+        }
 
         let menu = NSMenu()
-        for option in ["YES", "NO"] {
+        for option in options {
             let item = NSMenuItem(title: option, action: #selector(dropdownMenuItemSelected(_:)), keyEquivalent: "")
             item.target = self
+            item.representedObject = context
             if option == currentValue {
                 item.state = .on
             }
             menu.addItem(item)
+        }
+
+        let columnName = tableRows.columns[columnIndex]
+        let isNullable = tableRows.columnNullable[columnName] ?? true
+        if isNullable && customDropdownOptions?[columnIndex] == nil {
+            menu.addItem(.separator())
+            let nullItem = NSMenuItem(
+                title: String(localized: "Set NULL"),
+                action: #selector(dropdownMenuNullSelected(_:)),
+                keyEquivalent: ""
+            )
+            nullItem.target = self
+            nullItem.representedObject = context
+            if currentValue == nil {
+                nullItem.state = .on
+            }
+            menu.addItem(nullItem)
         }
 
         let cellRect = tableView.rect(ofRow: row).intersection(tableView.rect(ofColumn: column))
@@ -244,29 +277,26 @@ extension TableViewCoordinator {
     }
 
     @objc func dropdownMenuItemSelected(_ sender: NSMenuItem) {
-        let newValue = sender.title
-        let oldValue = rowProvider.value(atRow: pendingDropdownRow, column: pendingDropdownColumn)
-        guard oldValue != newValue else { return }
-        onCellEdit?(pendingDropdownRow, pendingDropdownColumn, newValue)
+        guard let context = sender.representedObject as? DropdownMenuContext else { return }
+        commitPopoverEdit(row: context.row, columnIndex: context.columnIndex, newValue: sender.title)
     }
 
-    func commitPopoverEdit(tableView: NSTableView, row: Int, column: Int, columnIndex: Int, newValue: String?) {
-        let oldValue = rowProvider.value(atRow: row, column: columnIndex)
-        guard oldValue != newValue else { return }
+    @objc func dropdownMenuNullSelected(_ sender: NSMenuItem) {
+        guard let context = sender.representedObject as? DropdownMenuContext else { return }
+        commitPopoverEdit(row: context.row, columnIndex: context.columnIndex, newValue: nil)
+    }
 
-        let columnName = rowProvider.columns[columnIndex]
-        changeManager.recordCellChange(
-            rowIndex: row,
-            columnIndex: columnIndex,
-            columnName: columnName,
-            oldValue: oldValue,
-            newValue: newValue,
-            originalRow: rowProvider.rowValues(at: row) ?? []
-        )
+    func commitPopoverEdit(row: Int, columnIndex: Int, newValue: String?) {
+        commitCellEdit(row: row, columnIndex: columnIndex, newValue: newValue)
+    }
+}
 
-        rowProvider.updateValue(newValue, at: row, columnIndex: columnIndex)
-        onCellEdit?(row, columnIndex, newValue)
+private final class DropdownMenuContext {
+    let row: Int
+    let columnIndex: Int
 
-        tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: column))
+    init(row: Int, columnIndex: Int) {
+        self.row = row
+        self.columnIndex = columnIndex
     }
 }

@@ -3,96 +3,112 @@
 //  TablePro
 //
 
-import AppKit
 import SwiftUI
 
 struct WelcomeConnectionRow: View {
     let connection: DatabaseConnection
     let sshProfile: SSHProfile?
-    var onConnect: (() -> Void)?
 
     private var displayTag: ConnectionTag? {
         guard let tagId = connection.tagId else { return nil }
         return TagStorage.shared.tag(for: tagId)
     }
 
-    var body: some View {
-        HStack(spacing: 12) {
-            connection.type.iconImage
-                .renderingMode(.template)
-                .font(.system(size: ThemeEngine.shared.activeTheme.iconSizes.medium))
-                .foregroundStyle(connection.displayColor)
-                .frame(
-                    width: ThemeEngine.shared.activeTheme.iconSizes.medium,
-                    height: ThemeEngine.shared.activeTheme.iconSizes.medium
-                )
-
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(connection.name)
-                        .font(.system(size: ThemeEngine.shared.activeTheme.typography.body, weight: .medium))
-                        .foregroundStyle(.primary)
-
-                    if let tag = displayTag {
-                        Text(tag.name)
-                            .font(.system(size: ThemeEngine.shared.activeTheme.typography.tiny))
-                            .foregroundStyle(tag.color.color)
-                            .padding(.horizontal, ThemeEngine.shared.activeTheme.spacing.xxs)
-                            .padding(.vertical, ThemeEngine.shared.activeTheme.spacing.xxxs)
-                            .background(
-                                RoundedRectangle(cornerRadius: 4).fill(
-                                    tag.color.color.opacity(0.15)))
-                    }
-                }
-
-                Text(connectionSubtitle)
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            Spacer()
-        }
-        .padding(.vertical, ThemeEngine.shared.activeTheme.spacing.xxs)
-        .contentShape(Rectangle())
-        .overlay(
-            DoubleClickView { onConnect?() }
-        )
+    private var showsLocalOnly: Bool {
+        connection.localOnly && !connection.isSample
     }
 
-    private var connectionSubtitle: String {
-        let ssh = connection.effectiveSSHConfig(profile: sshProfile)
-        if ssh.enabled {
-            return "SSH : \(ssh.username)@\(ssh.host)"
+    var body: some View {
+        HStack {
+            connection.type.iconImage
+                .renderingMode(.template)
+                .font(.title3)
+                .foregroundStyle(connection.displayColor)
+                .frame(width: 18, height: 18)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(connection.name)
+                    .font(.body)
+                    .foregroundStyle(.primary)
+
+                Text(subtitleText)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(subtitleText)
+            }
+
+            Spacer(minLength: 8)
+
+            trailingAccessories
         }
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private var trailingAccessories: some View {
+        HStack(spacing: 8) {
+            if showsLocalOnly {
+                Image(systemName: "icloud.slash")
+                    .imageScale(.small)
+                    .foregroundStyle(.tertiary)
+                    .help(String(localized: "Local only, not synced to iCloud"))
+                    .accessibilityLabel(String(localized: "Local only"))
+            }
+
+            if let tag = displayTag {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(tag.color.color)
+                        .frame(width: 8, height: 8)
+                    Text(tag.name)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(String(format: String(localized: "Tag: %@"), tag.name))
+            }
+        }
+    }
+
+    private var subtitleText: String {
+        var components: [String] = [primaryEndpoint]
+        if let viaText = sshViaText {
+            components.append(viaText)
+        }
+        if connection.isSample {
+            components.append(String(localized: "Sample"))
+        }
+        return components.joined(separator: " · ")
+    }
+
+    private var primaryEndpoint: String {
         if connection.host.isEmpty {
             return connection.database.isEmpty ? connection.type.rawValue : connection.database
         }
-        return connection.host
-    }
-}
-
-private struct DoubleClickView: NSViewRepresentable {
-    let onDoubleClick: () -> Void
-
-    func makeNSView(context: Context) -> NSView {
-        let view = PassThroughDoubleClickView()
-        view.onDoubleClick = onDoubleClick
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        (nsView as? PassThroughDoubleClickView)?.onDoubleClick = onDoubleClick
-    }
-}
-
-private class PassThroughDoubleClickView: NSView {
-    var onDoubleClick: (() -> Void)?
-
-    override func mouseDown(with event: NSEvent) {
-        if event.clickCount == 2 {
-            onDoubleClick?()
+        if connection.host.hasPrefix("/") {
+            return (connection.host as NSString).abbreviatingWithTildeInPath
         }
-        super.mouseDown(with: event)
+        if let mongoHosts = connection.additionalFields["mongoHosts"], mongoHosts.contains(",") {
+            let count = mongoHosts.split(separator: ",").count
+            return String(format: String(localized: "%@ (+%d more)"), hostWithOptionalPort, count - 1)
+        }
+        return hostWithOptionalPort
+    }
+
+    private var hostWithOptionalPort: String {
+        if connection.port == connection.type.defaultPort {
+            return connection.host
+        }
+        return "\(connection.host):\(connection.port)"
+    }
+
+    private var sshViaText: String? {
+        let ssh = connection.resolvedSSHConfig
+        guard ssh.enabled, !ssh.host.isEmpty else { return nil }
+        return String(format: String(localized: "via %@"), ssh.host)
     }
 }

@@ -3,23 +3,14 @@
 //  TablePro
 //
 //  Streaming SQL file parser that splits SQL statements while handling
-//  comments, string literals, and escape sequences.
+//  comments, string literals, escape sequences, MySQL conditional comments,
+//  DELIMITER commands, and hash comments.
 //
-//  Implementation: Uses a finite state machine to track parser context
-//  (normal, in-comment, in-string) while processing files in 64KB chunks.
-//  Handles edge cases where multi-character sequences (comments, escapes)
-//  span chunk boundaries by deferring processing of special characters
-//  until the next chunk arrives.
-//
-//  Performance: Uses NSString character(at:) for O(1) random access.
-//  Swift String.Index operations on bridged NSStrings are O(n) per call,
-//  which would make the inner loop O(n²) on large SQL dumps.
-//
+//  Uses NSString character(at:) for O(1) random access.
 
 import Foundation
 import os
 
-/// SQL statement parser that handles comments, strings, and multi-line statements
 final class SQLFileParser: Sendable {
     private static let logger = Logger(subsystem: "com.TablePro", category: "SQLFileParser")
 
@@ -34,28 +25,49 @@ final class SQLFileParser: Sendable {
         case inBacktickQuotedString
     }
 
-    // MARK: - Unicode Constants (all BMP-safe for UTF-16)
+    // MARK: - Unicode Constants
 
-    private static let kSemicolon: unichar = 0x3B     // ;
-    private static let kSingleQuote: unichar = 0x27   // '
-    private static let kDoubleQuote: unichar = 0x22   // "
-    private static let kBacktick: unichar = 0x60      // `
-    private static let kBackslash: unichar = 0x5C     // \
-    private static let kDash: unichar = 0x2D          // -
-    private static let kSlash: unichar = 0x2F         // /
-    private static let kStar: unichar = 0x2A          // *
-    private static let kNewline: unichar = 0x0A       // \n
-    private static let kSpace: unichar = 0x20         // space
-    private static let kTab: unichar = 0x09           // tab
-    private static let kCarriageReturn: unichar = 0x0D // \r
+    private static let kSemicolon: unichar = 0x3B
+    private static let kSingleQuote: unichar = 0x27
+    private static let kDoubleQuote: unichar = 0x22
+    private static let kBacktick: unichar = 0x60
+    private static let kBackslash: unichar = 0x5C
+    private static let kDash: unichar = 0x2D
+    private static let kSlash: unichar = 0x2F
+    private static let kStar: unichar = 0x2A
+    private static let kHash: unichar = 0x23
+    private static let kExclamation: unichar = 0x21
+    private static let kNewline: unichar = 0x0A
+    private static let kSpace: unichar = 0x20
+    private static let kTab: unichar = 0x09
+    private static let kCarriageReturn: unichar = 0x0D
 
-    /// Characters that can start multi-character sequences (comments, escapes)
-    /// and must not be processed at chunk boundaries without a lookahead character.
-    nonisolated private static func isMultiCharSequenceStart(_ char: unichar) -> Bool {
-        char == kDash || char == kSlash || char == kBackslash || char == kStar
+    // State-aware chunk boundary deferral. Characters that need lookahead
+    // in the current state must not be processed without nextChar available.
+    nonisolated private static func needsLookahead(
+        _ char: unichar, state: ParserState, delimiter: NSString, isSingleCharDelimiter: Bool
+    ) -> Bool {
+        switch state {
+        case .normal:
+            var result = char == kDash || char == kSlash || char == kBackslash || char == kStar
+                || char == kSingleQuote || char == kDoubleQuote || char == kBacktick
+            if !isSingleCharDelimiter && char == delimiter.character(at: 0) {
+                result = true
+            }
+            return result
+        case .inSingleQuotedString:
+            return char == kSingleQuote || char == kBackslash
+        case .inDoubleQuotedString:
+            return char == kDoubleQuote || char == kBackslash
+        case .inBacktickQuotedString:
+            return char == kBacktick
+        case .inMultiLineComment:
+            return char == kStar
+        case .inSingleLineComment:
+            return false
+        }
     }
 
-    /// Check if a unichar is whitespace (space, tab, newline, carriage return)
     nonisolated private static func isWhitespace(_ char: unichar) -> Bool {
         char == kSpace || char == kTab || char == kNewline || char == kCarriageReturn
     }
@@ -66,29 +78,236 @@ final class SQLFileParser: Sendable {
         hasContent ? (true, startLine) : (true, currentLine)
     }
 
-    /// Append a single UTF-16 code unit to an NSMutableString. O(1) amortized.
     private static func appendChar(_ char: unichar, to string: NSMutableString?) {
         guard let string else { return }
-        var ch = char
-        let single = NSString(characters: &ch, length: 1)
-        string.append(single as String)
+        var c = char
+        CFStringAppendCharacters(string as CFMutableString, &c, 1)
+    }
+
+    // MARK: - Delimiter Matching
+
+    private static func matchesDelimiter(
+        at position: Int, delimiter: NSString, in buffer: NSString, bufLen: Int
+    ) -> Bool {
+        let delimLen = delimiter.length
+        guard position + delimLen <= bufLen else { return false }
+        for j in 0..<delimLen {
+            if buffer.character(at: position + j) != delimiter.character(at: j) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static let delimiterPrefix = "DELIMITER "
+    private static let delimiterPrefixLength = 10
+
+    private static func extractDelimiterChange(_ text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.uppercased().hasPrefix(delimiterPrefix) else { return nil }
+        let newDelim = String(trimmed.dropFirst(delimiterPrefixLength))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return newDelim.isEmpty ? nil : newDelim
+    }
+
+    // MARK: - Mutable Parser Context
+
+    private struct ParserContext {
+        var state: ParserState = .normal
+        let currentStatement: NSMutableString?
+        var hasStatementContent = false
+        var currentLine = 1
+        var statementStartLine = 1
+        var isConditionalComment = false
+        var currentDelimiter: NSString = ";" as NSString
+        var isSingleCharDelimiter = true
+    }
+
+    private static func trimmedStatement(_ ctx: ParserContext) -> String {
+        (ctx.currentStatement as NSString?)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private static func resetStatement(_ ctx: inout ParserContext) {
+        ctx.currentStatement?.setString("")
+        ctx.hasStatementContent = false
+    }
+
+    // MARK: - Normal State Processing
+
+    private static func processDelimiterChange(_ ctx: inout ParserContext, char: unichar) {
+        guard char == kNewline && ctx.hasStatementContent else { return }
+        let text = trimmedStatement(ctx)
+        if let newDelim = extractDelimiterChange(text) {
+            ctx.currentDelimiter = newDelim as NSString
+            ctx.isSingleCharDelimiter = ctx.currentDelimiter.length == 1
+                && ctx.currentDelimiter.character(at: 0) == kSemicolon
+            resetStatement(&ctx)
+        }
+    }
+
+    private static func processNormalChar(
+        _ ctx: inout ParserContext,
+        char: unichar,
+        nextChar: unichar?,
+        i: inout Int,
+        nsBuffer: NSString,
+        bufLen: Int,
+        continuation: AsyncThrowingStream<(statement: String, lineNumber: Int), Error>.Continuation
+    ) -> Bool {
+        processDelimiterChange(&ctx, char: char)
+
+        if char == kDash && nextChar == kDash {
+            ctx.state = .inSingleLineComment
+            i += 2
+            return true
+        }
+
+        if char == kHash {
+            ctx.state = .inSingleLineComment
+            return false
+        }
+
+        if char == kSlash, let next = nextChar, next == kStar {
+            let thirdChar: unichar? = (i + 2 < bufLen)
+                ? nsBuffer.character(at: i + 2) : nil
+            ctx.isConditionalComment = thirdChar == kExclamation
+            ctx.state = .inMultiLineComment
+            if ctx.isConditionalComment {
+                (ctx.hasStatementContent, ctx.statementStartLine) = markContent(
+                    ctx.hasStatementContent, ctx.statementStartLine, ctx.currentLine)
+                appendChar(char, to: ctx.currentStatement)
+                appendChar(next, to: ctx.currentStatement)
+            }
+            i += 2
+            return true
+        }
+
+        if let advanced = processQuoteOpen(&ctx, char: char, nextChar: nextChar) {
+            if advanced { i += 2 }
+            return advanced
+        }
+
+        if ctx.isSingleCharDelimiter && char == kSemicolon {
+            yieldAndReset(&ctx, continuation: continuation)
+            return false
+        }
+
+        if !ctx.isSingleCharDelimiter
+            && matchesDelimiter(at: i, delimiter: ctx.currentDelimiter, in: nsBuffer, bufLen: bufLen)
+        {
+            yieldAndReset(&ctx, continuation: continuation)
+            i += ctx.currentDelimiter.length
+            return true
+        }
+
+        if !ctx.hasStatementContent && !isWhitespace(char) {
+            ctx.statementStartLine = ctx.currentLine
+            ctx.hasStatementContent = true
+        }
+        appendChar(char, to: ctx.currentStatement)
+        return false
+    }
+
+    private static func processQuoteOpen(
+        _ ctx: inout ParserContext,
+        char: unichar,
+        nextChar: unichar?
+    ) -> Bool? {
+        let quoteMapping: [(unichar, ParserState)] = [
+            (kSingleQuote, .inSingleQuotedString),
+            (kDoubleQuote, .inDoubleQuotedString),
+            (kBacktick, .inBacktickQuotedString)
+        ]
+        for (quoteChar, targetState) in quoteMapping {
+            guard char == quoteChar else { continue }
+            if let next = nextChar, next == quoteChar {
+                (ctx.hasStatementContent, ctx.statementStartLine) = markContent(
+                    ctx.hasStatementContent, ctx.statementStartLine, ctx.currentLine)
+                appendChar(char, to: ctx.currentStatement)
+                appendChar(next, to: ctx.currentStatement)
+                return true
+            }
+            ctx.state = targetState
+            (ctx.hasStatementContent, ctx.statementStartLine) = markContent(
+                ctx.hasStatementContent, ctx.statementStartLine, ctx.currentLine)
+            appendChar(char, to: ctx.currentStatement)
+            return false
+        }
+        return nil
+    }
+
+    private static func yieldAndReset(
+        _ ctx: inout ParserContext,
+        continuation: AsyncThrowingStream<(statement: String, lineNumber: Int), Error>.Continuation
+    ) {
+        if ctx.hasStatementContent {
+            let text = trimmedStatement(ctx)
+            continuation.yield((text, ctx.statementStartLine))
+        }
+        resetStatement(&ctx)
+    }
+
+    // MARK: - Comment State Processing
+
+    private static func processMultiLineComment(
+        _ ctx: inout ParserContext,
+        char: unichar,
+        nextChar: unichar?,
+        i: inout Int
+    ) -> Bool {
+        if ctx.isConditionalComment {
+            appendChar(char, to: ctx.currentStatement)
+        }
+        if char == kStar, let next = nextChar, next == kSlash {
+            if ctx.isConditionalComment {
+                appendChar(next, to: ctx.currentStatement)
+            }
+            ctx.state = .normal
+            ctx.isConditionalComment = false
+            i += 2
+            return true
+        }
+        return false
+    }
+
+    // MARK: - Quoted String State Processing
+
+    private static func processQuotedString(
+        _ ctx: inout ParserContext,
+        char: unichar,
+        nextChar: unichar?,
+        quoteChar: unichar,
+        supportsBackslashEscape: Bool = true,
+        i: inout Int
+    ) -> Bool {
+        appendChar(char, to: ctx.currentStatement)
+        if supportsBackslashEscape && char == kBackslash, let next = nextChar {
+            appendChar(next, to: ctx.currentStatement)
+            if next == kNewline { ctx.currentLine += 1 }
+            i += 2
+            return true
+        }
+        if char == quoteChar, let next = nextChar, next == quoteChar {
+            appendChar(next, to: ctx.currentStatement)
+            i += 2
+            return true
+        }
+        if char == quoteChar {
+            ctx.state = .normal
+        }
+        return false
     }
 
     // MARK: - Public API
 
-    /// Parse SQL file and return async stream of statements with line numbers
-    /// - Parameters:
-    ///   - url: File URL to parse
-    ///   - encoding: Text encoding to use
-    ///   - countOnly: When true, skips building statement strings for faster counting
-    /// - Returns: AsyncStream of (statement, lineNumber) tuples
     func parseFile(
         url: URL,
         encoding: String.Encoding,
         countOnly: Bool = false
-    ) async throws -> AsyncStream<(statement: String, lineNumber: Int)> {
-        AsyncStream { continuation in
-            Task.detached {
+    ) -> AsyncThrowingStream<(statement: String, lineNumber: Int), Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task.detached {
                 do {
                     let fileHandle = try FileHandle(forReadingFrom: url)
                     defer {
@@ -99,12 +318,7 @@ final class SQLFileParser: Sendable {
                         }
                     }
 
-                    var state: ParserState = .normal
-                    // nil when countOnly — skips all string building via optional chaining
-                    let currentStatement: NSMutableString? = countOnly ? nil : NSMutableString()
-                    var hasStatementContent = false
-                    var currentLine = 1
-                    var statementStartLine = 1
+                    var ctx = ParserContext(currentStatement: countOnly ? nil : NSMutableString())
                     let nsBuffer = NSMutableString()
                     let chunkSize = 65_536
 
@@ -118,7 +332,9 @@ final class SQLFileParser: Sendable {
 
                         guard let chunk = String(data: data, encoding: encoding) else {
                             Self.logger.error("Failed to decode chunk with encoding \(encoding.description)")
-                            continuation.finish()
+                            continuation.finish(throwing: DecompressionError.fileReadFailed(
+                                "Failed to decode file with \(encoding.description) encoding"
+                            ))
                             return
                         }
 
@@ -130,107 +346,48 @@ final class SQLFileParser: Sendable {
                             let char = nsBuffer.character(at: i)
                             let nextChar: unichar? = (i + 1 < bufLen) ? nsBuffer.character(at: i + 1) : nil
 
-                            // Defer processing if at chunk boundary with a multi-char start
-                            if nextChar == nil && Self.isMultiCharSequenceStart(char) {
+                            if nextChar == nil && Self.needsLookahead(
+                                char, state: ctx.state,
+                                delimiter: ctx.currentDelimiter,
+                                isSingleCharDelimiter: ctx.isSingleCharDelimiter
+                            ) {
                                 break
                             }
 
-                            if char == Self.kNewline { currentLine += 1 }
+                            if char == Self.kNewline { ctx.currentLine += 1 }
                             var didManuallyAdvance = false
 
-                            switch state {
+                            switch ctx.state {
                             case .normal:
-                                if char == Self.kDash && nextChar == Self.kDash {
-                                    state = .inSingleLineComment
-                                    if nextChar == Self.kNewline { currentLine += 1 }
-                                    i += 2
-                                    didManuallyAdvance = true
-                                } else if char == Self.kSlash && nextChar == Self.kStar {
-                                    state = .inMultiLineComment
-                                    if nextChar == Self.kNewline { currentLine += 1 }
-                                    i += 2
-                                    didManuallyAdvance = true
-                                } else if char == Self.kSingleQuote {
-                                    state = .inSingleQuotedString
-                                    (hasStatementContent, statementStartLine) = Self.markContent(hasStatementContent, statementStartLine, currentLine)
-                                    Self.appendChar(char, to: currentStatement)
-                                } else if char == Self.kDoubleQuote {
-                                    state = .inDoubleQuotedString
-                                    (hasStatementContent, statementStartLine) = Self.markContent(hasStatementContent, statementStartLine, currentLine)
-                                    Self.appendChar(char, to: currentStatement)
-                                } else if char == Self.kBacktick {
-                                    state = .inBacktickQuotedString
-                                    (hasStatementContent, statementStartLine) = Self.markContent(hasStatementContent, statementStartLine, currentLine)
-                                    Self.appendChar(char, to: currentStatement)
-                                } else if char == Self.kSemicolon {
-                                    if hasStatementContent {
-                                        let text = (currentStatement as NSString?)?
-                                            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                                        continuation.yield((text, statementStartLine))
-                                    }
-                                    currentStatement?.setString("")
-                                    hasStatementContent = false
-                                } else {
-                                    if !hasStatementContent && !Self.isWhitespace(char) {
-                                        statementStartLine = currentLine
-                                        hasStatementContent = true
-                                    }
-                                    Self.appendChar(char, to: currentStatement)
-                                }
+                                didManuallyAdvance = Self.processNormalChar(
+                                    &ctx, char: char, nextChar: nextChar,
+                                    i: &i, nsBuffer: nsBuffer, bufLen: bufLen,
+                                    continuation: continuation)
 
                             case .inSingleLineComment:
                                 if char == Self.kNewline {
-                                    state = .normal
+                                    ctx.state = .normal
                                 }
 
                             case .inMultiLineComment:
-                                if char == Self.kStar && nextChar == Self.kSlash {
-                                    state = .normal
-                                    if nextChar == Self.kNewline { currentLine += 1 }
-                                    i += 2
-                                    didManuallyAdvance = true
-                                }
+                                didManuallyAdvance = Self.processMultiLineComment(
+                                    &ctx, char: char, nextChar: nextChar, i: &i)
 
                             case .inSingleQuotedString:
-                                Self.appendChar(char, to: currentStatement)
-                                if char == Self.kBackslash, let next = nextChar {
-                                    Self.appendChar(next, to: currentStatement)
-                                    if next == Self.kNewline { currentLine += 1 }
-                                    i += 2
-                                    didManuallyAdvance = true
-                                } else if char == Self.kSingleQuote, let next = nextChar,
-                                          next == Self.kSingleQuote {
-                                    Self.appendChar(next, to: currentStatement)
-                                    if next == Self.kNewline { currentLine += 1 }
-                                    i += 2
-                                    didManuallyAdvance = true
-                                } else if char == Self.kSingleQuote {
-                                    state = .normal
-                                }
+                                didManuallyAdvance = Self.processQuotedString(
+                                    &ctx, char: char, nextChar: nextChar,
+                                    quoteChar: Self.kSingleQuote, i: &i)
 
                             case .inDoubleQuotedString:
-                                Self.appendChar(char, to: currentStatement)
-                                if char == Self.kBackslash, let next = nextChar {
-                                    Self.appendChar(next, to: currentStatement)
-                                    if next == Self.kNewline { currentLine += 1 }
-                                    i += 2
-                                    didManuallyAdvance = true
-                                } else if char == Self.kDoubleQuote {
-                                    state = .normal
-                                }
+                                didManuallyAdvance = Self.processQuotedString(
+                                    &ctx, char: char, nextChar: nextChar,
+                                    quoteChar: Self.kDoubleQuote, i: &i)
 
                             case .inBacktickQuotedString:
-                                Self.appendChar(char, to: currentStatement)
-                                if char == Self.kBacktick {
-                                    if let next = nextChar, next == Self.kBacktick {
-                                        Self.appendChar(next, to: currentStatement)
-                                        if next == Self.kNewline { currentLine += 1 }
-                                        i += 2
-                                        didManuallyAdvance = true
-                                    } else {
-                                        state = .normal
-                                    }
-                                }
+                                didManuallyAdvance = Self.processQuotedString(
+                                    &ctx, char: char, nextChar: nextChar,
+                                    quoteChar: Self.kBacktick,
+                                    supportsBackslashEscape: false, i: &i)
                             }
 
                             if !didManuallyAdvance {
@@ -238,7 +395,6 @@ final class SQLFileParser: Sendable {
                             }
                         }
 
-                        // Keep unprocessed characters for next chunk
                         if i < bufLen {
                             nsBuffer.deleteCharacters(in: NSRange(location: 0, length: i))
                         } else {
@@ -246,32 +402,30 @@ final class SQLFileParser: Sendable {
                         }
                     }
 
-                    // Add final statement if any
-                    if hasStatementContent {
-                        let text = (currentStatement as NSString?)?
-                            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                        continuation.yield((text, statementStartLine))
+                    if ctx.hasStatementContent {
+                        let text = Self.trimmedStatement(ctx)
+                        if Self.extractDelimiterChange(text) == nil {
+                            continuation.yield((text, ctx.statementStartLine))
+                        }
                     }
 
                     continuation.finish()
                 } catch {
                     Self.logger.error("SQL file parsing failed: \(error.localizedDescription)")
-                    Self.logger.error("Error details: \(error)")
-                    continuation.finish()
+                    continuation.finish(throwing: error)
                 }
+            }
+
+            continuation.onTermination = { @Sendable _ in
+                task.cancel()
             }
         }
     }
 
-    /// Count total statements in file (requires full file scan)
-    /// - Parameters:
-    ///   - url: File URL to parse
-    ///   - encoding: Text encoding to use
-    /// - Returns: Total number of statements
     func countStatements(url: URL, encoding: String.Encoding) async throws -> Int {
         var count = 0
 
-        for await _ in try await parseFile(url: url, encoding: encoding, countOnly: true) {
+        for try await _ in parseFile(url: url, encoding: encoding, countOnly: true) {
             try Task.checkCancellation()
             count += 1
         }

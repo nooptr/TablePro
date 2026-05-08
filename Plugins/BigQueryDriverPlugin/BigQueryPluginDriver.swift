@@ -239,122 +239,6 @@ internal final class BigQueryPluginDriver: PluginDatabaseDriver, @unchecked Send
         )
     }
 
-    func fetchRowCount(query: String) async throws -> Int {
-        guard let conn = connection else {
-            throw BigQueryError.notConnected
-        }
-
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if BigQueryQueryBuilder.isTaggedQuery(trimmed) {
-            if let params = BigQueryQueryBuilder.decode(trimmed) {
-                let dataset = resolveDataset(from: params)
-                let columns = lock.withLock { _columnCache["\(dataset).\(params.table)"] } ?? []
-                let resolvedParams = BigQueryQueryParams(
-                    table: params.table, dataset: dataset, sortColumns: params.sortColumns,
-                    limit: params.limit, offset: params.offset, filters: params.filters,
-                    logicMode: params.logicMode, searchText: params.searchText, searchColumns: params.searchColumns
-                )
-                let countSQL = BigQueryQueryBuilder.buildCountSQL(
-                    from: resolvedParams, projectId: conn.projectId, columns: columns
-                )
-                let result = try await conn.executeQuery(countSQL, defaultDataset: dataset)
-                if let row = result.queryResponse.rows?.first, let cell = row.f?.first,
-                   case .string(let val) = cell.v, let count = Int(val)
-                {
-                    return count
-                }
-            }
-            return 0
-        }
-
-        let dataset = lock.withLock { _currentDataset }
-        let countSQL = "SELECT COUNT(*) FROM (\(trimmed))"
-        let result = try await conn.executeQuery(countSQL, defaultDataset: dataset)
-        if let row = result.queryResponse.rows?.first, let cell = row.f?.first,
-           case .string(let val) = cell.v, let count = Int(val)
-        {
-            return count
-        }
-        return 0
-    }
-
-    func fetchRows(query: String, offset: Int, limit: Int) async throws -> PluginQueryResult {
-        let startTime = Date()
-
-        guard let conn = connection else {
-            throw BigQueryError.notConnected
-        }
-
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if BigQueryQueryBuilder.isTaggedQuery(trimmed) {
-            if let decoded = BigQueryQueryBuilder.decode(trimmed) {
-                let dataset = resolveDataset(from: decoded)
-                let params = BigQueryQueryParams(
-                    table: decoded.table,
-                    dataset: dataset,
-                    sortColumns: decoded.sortColumns,
-                    limit: limit,
-                    offset: offset,
-                    filters: decoded.filters,
-                    logicMode: decoded.logicMode,
-                    searchText: decoded.searchText,
-                    searchColumns: decoded.searchColumns
-                )
-                let columns = lock.withLock { _columnCache["\(dataset).\(params.table)"] } ?? []
-                let sql = BigQueryQueryBuilder.buildSQL(
-                    from: params, projectId: conn.projectId, columns: columns
-                )
-                let result = try await conn.executeQuery(sql, defaultDataset: dataset)
-
-                if let schema = result.queryResponse.schema, let fields = schema.fields {
-                    let colNames = fields.map(\.name)
-                    let typeNames = BigQueryTypeMapper.columnTypeNames(from: schema)
-                    let rows = BigQueryTypeMapper.flattenRows(from: result.queryResponse, schema: schema)
-                    return PluginQueryResult(
-                        columns: colNames,
-                        columnTypeNames: typeNames,
-                        rows: rows,
-                        rowsAffected: 0,
-                        executionTime: Date().timeIntervalSince(startTime),
-                        statusMessage: buildCostMessage(result)
-                    )
-                }
-            }
-            return PluginQueryResult.empty
-        }
-
-        // For ad-hoc SQL, wrap with LIMIT/OFFSET
-        let dataset = lock.withLock { _currentDataset }
-        let cleaned = trimmed.replacingOccurrences(
-            of: ";\\s*\\z", with: "", options: .regularExpression
-        )
-        let strippedSQL = cleaned.replacingOccurrences(
-            of: "\\s+LIMIT\\s+\\d+(\\s+OFFSET\\s+\\d+)?\\s*\\z",
-            with: "",
-            options: [.regularExpression, .caseInsensitive]
-        )
-        let paginatedSQL = "\(strippedSQL) LIMIT \(limit) OFFSET \(offset)"
-        let result = try await conn.executeQuery(paginatedSQL, defaultDataset: dataset)
-
-        if let schema = result.queryResponse.schema, let fields = schema.fields {
-            let colNames = fields.map(\.name)
-            let typeNames = BigQueryTypeMapper.columnTypeNames(from: schema)
-            let rows = BigQueryTypeMapper.flattenRows(from: result.queryResponse, schema: schema)
-            return PluginQueryResult(
-                columns: colNames,
-                columnTypeNames: typeNames,
-                rows: rows,
-                rowsAffected: 0,
-                executionTime: Date().timeIntervalSince(startTime),
-                statusMessage: buildCostMessage(result)
-            )
-        }
-
-        return PluginQueryResult.empty
-    }
-
     // MARK: - Query Cancellation
 
     func cancelQuery() throws {
@@ -685,6 +569,108 @@ internal final class BigQueryPluginDriver: PluginDatabaseDriver, @unchecked Send
         )
     }
 
+    // MARK: - Streaming
+
+    func streamRows(query: String) -> AsyncThrowingStream<PluginStreamElement, Error> {
+        AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
+            let streamTask = Task {
+                do {
+                    try await self.performStreamRows(query: query, continuation: continuation)
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+
+            continuation.onTermination = { @Sendable _ in
+                streamTask.cancel()
+            }
+        }
+    }
+
+    private func performStreamRows(
+        query: String,
+        continuation: AsyncThrowingStream<PluginStreamElement, Error>.Continuation
+    ) async throws {
+        guard let conn = connection else {
+            throw BigQueryError.notConnected
+        }
+
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let dataset = lock.withLock { _currentDataset }
+
+        let sql: String
+        if BigQueryQueryBuilder.isTaggedQuery(trimmed) {
+            guard let params = BigQueryQueryBuilder.decode(trimmed) else {
+                throw BigQueryError.invalidResponse("Failed to decode tagged query")
+            }
+            let resolvedDataset = resolveDataset(from: params)
+            let columns = lock.withLock { _columnCache["\(resolvedDataset).\(params.table)"] } ?? []
+            let resolvedParams = BigQueryQueryParams(
+                table: params.table, dataset: resolvedDataset, sortColumns: params.sortColumns,
+                limit: params.limit, offset: params.offset, filters: params.filters,
+                logicMode: params.logicMode, searchText: params.searchText, searchColumns: params.searchColumns
+            )
+            sql = BigQueryQueryBuilder.buildSQL(
+                from: resolvedParams, projectId: conn.projectId, columns: columns
+            )
+        } else {
+            sql = trimmed.replacingOccurrences(
+                of: ";\\s*\\z", with: "", options: .regularExpression
+            )
+        }
+
+        let jobInfo = try await conn.executeJobAndWait(sql, defaultDataset: dataset)
+        defer { conn.clearCurrentJob() }
+
+        let firstPage = try await conn.getQueryResults(
+            jobId: jobInfo.jobId, location: jobInfo.location
+        )
+
+        guard let schema = firstPage.schema, let fields = schema.fields, !fields.isEmpty else {
+            continuation.yield(.header(PluginStreamHeader(
+                columns: ["Result"],
+                columnTypeNames: ["STRING"],
+                estimatedRowCount: nil
+            )))
+            continuation.finish()
+            return
+        }
+
+        let columns = fields.map(\.name)
+        let typeNames = BigQueryTypeMapper.columnTypeNames(from: schema)
+        let estimatedCount = firstPage.totalRows.flatMap { Int($0) }
+
+        continuation.yield(.header(PluginStreamHeader(
+            columns: columns,
+            columnTypeNames: typeNames,
+            estimatedRowCount: estimatedCount
+        )))
+
+        let flatRows = BigQueryTypeMapper.flattenRows(from: firstPage, schema: schema)
+        if !flatRows.isEmpty {
+            continuation.yield(.rows(flatRows))
+        }
+
+        var pageToken = firstPage.pageToken
+
+        while let token = pageToken {
+            try Task.checkCancellation()
+
+            let nextPage = try await conn.getQueryResults(
+                jobId: jobInfo.jobId, location: jobInfo.location, pageToken: token
+            )
+
+            let nextRows = BigQueryTypeMapper.flattenRows(from: nextPage, schema: schema)
+            if !nextRows.isEmpty {
+                continuation.yield(.rows(nextRows))
+            }
+
+            pageToken = nextPage.pageToken
+        }
+
+        continuation.finish()
+    }
+
     func buildExplainQuery(_ sql: String) -> String? {
         "EXPLAIN \(sql)"
     }
@@ -697,10 +683,20 @@ internal final class BigQueryPluginDriver: PluginDatabaseDriver, @unchecked Send
         "CREATE OR REPLACE VIEW \(quoteIdentifier(viewName)) AS\nSELECT * FROM table_name;"
     }
 
-    func createDatabase(name: String, charset: String, collation: String?) async throws {
+    func createDatabaseFormSpec() async throws -> PluginCreateDatabaseFormSpec? {
+        PluginCreateDatabaseFormSpec(fields: [], footnote: nil)
+    }
+
+    func createDatabase(_ request: PluginCreateDatabaseRequest) async throws {
+        guard let conn = connection else { throw BigQueryError.notConnected }
+        let escaped = request.name.replacingOccurrences(of: "`", with: "\\`")
+        _ = try await conn.executeQuery("CREATE SCHEMA `\(escaped)`")
+    }
+
+    func dropDatabase(name: String) async throws {
         guard let conn = connection else { throw BigQueryError.notConnected }
         let escaped = name.replacingOccurrences(of: "`", with: "\\`")
-        _ = try await conn.executeQuery("CREATE SCHEMA `\(escaped)`")
+        _ = try await conn.executeQuery("DROP SCHEMA `\(escaped)`")
     }
 
     func generateAddColumnSQL(table: String, column: PluginColumnDefinition) -> String? {

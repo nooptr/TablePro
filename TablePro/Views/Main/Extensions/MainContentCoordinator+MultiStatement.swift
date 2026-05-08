@@ -1,32 +1,24 @@
-//
-//  MainContentCoordinator+MultiStatement.swift
-//  TablePro
-//
-//  Multi-statement SQL execution support for MainContentCoordinator.
-//  Executes each statement sequentially, stopping on first error.
-//
-
 import AppKit
 import Foundation
+import os
+
+private let multiStatementLogger = Logger(subsystem: "com.TablePro", category: "MainContentCoordinator+MultiStatement")
 
 extension MainContentCoordinator {
     // MARK: - Multi-Statement Execution
 
-    /// Execute multiple SQL statements sequentially within a transaction,
-    /// stopping on first error with automatic rollback.
-    /// Displays results from the last SELECT statement (if any).
     func executeMultipleStatements(_ statements: [String]) {
         guard let index = tabManager.selectedTabIndex else { return }
-        guard !tabManager.tabs[index].isExecuting else { return }
+        guard !tabManager.tabs[index].execution.isExecuting else { return }
 
         currentQueryTask?.cancel()
         queryGeneration += 1
         let capturedGeneration = queryGeneration
 
         var tab = tabManager.tabs[index]
-        tab.isExecuting = true
-        tab.executionTime = nil
-        tab.errorMessage = nil
+        tab.execution.isExecuting = true
+        tab.execution.executionTime = nil
+        tab.execution.errorMessage = nil
         tabManager.tabs[index] = tab
         toolbarState.setExecuting(true)
 
@@ -48,14 +40,22 @@ extension MainContentCoordinator {
                     throw DatabaseError.notConnected
                 }
 
-                // Wrap in a transaction for atomicity
-                try await driver.beginTransaction()
+                let useTransaction = driver.supportsTransactions
 
-                /// Rollback transaction and reset executing state for early exits.
+                if useTransaction {
+                    try await driver.beginTransaction()
+                }
+
                 @MainActor func rollbackAndResetState() async {
-                    try? await driver.rollbackTransaction()
+                    if useTransaction {
+                        do {
+                            try await driver.rollbackTransaction()
+                        } catch {
+                            multiStatementLogger.error("Rollback failed: \(error.localizedDescription, privacy: .public)")
+                        }
+                    }
                     if let idx = tabManager.tabs.firstIndex(where: { $0.id == tabId }) {
-                        tabManager.tabs[idx].isExecuting = false
+                        tabManager.tabs[idx].execution.isExecuting = false
                     }
                     currentQueryTask = nil
                     toolbarState.setExecuting(false)
@@ -78,35 +78,30 @@ extension MainContentCoordinator {
                     cumulativeTime += result.executionTime
                     totalRowsAffected += result.rowsAffected
 
-                    // Keep the last result that has columns (i.e. a SELECT)
                     if !result.columns.isEmpty {
                         lastSelectResult = result
                         lastSelectSQL = sql
                     }
 
-                    // Build a ResultSet for this statement
                     let stmtTableName = await MainActor.run { extractTableName(from: sql) }
-                    let rs = ResultSet(label: stmtTableName ?? "Result \(stmtIndex + 1)")
-                    // Deep copy to prevent C buffer retention issues
-                    rs.rowBuffer = RowBuffer(
-                        rows: result.rows.map { row in row.map { $0.map { String($0) } } },
+                    let stmtRows = TableRows.from(
+                        queryRows: result.rows.map { row in row.map { $0.map { String($0) } } },
                         columns: result.columns.map { String($0) },
                         columnTypes: result.columnTypes
                     )
+                    let rs = ResultSet(label: stmtTableName ?? "Result \(stmtIndex + 1)", tableRows: stmtRows)
                     rs.executionTime = result.executionTime
                     rs.rowsAffected = result.rowsAffected
                     rs.statusMessage = result.statusMessage
                     rs.tableName = stmtTableName
-                    rs.resultVersion = 1
                     newResultSets.append(rs)
 
-                    // Record with semicolon preserved for history/favorites
                     let historySQL = sql.hasSuffix(";") ? sql : sql + ";"
                     await MainActor.run {
                         QueryHistoryManager.shared.recordQuery(
                             query: historySQL,
                             connectionId: conn.id,
-                            databaseName: conn.database,
+                            databaseName: activeDatabaseName,
                             executionTime: result.executionTime,
                             rowCount: result.rows.count,
                             wasSuccessful: true,
@@ -115,10 +110,10 @@ extension MainContentCoordinator {
                     }
                 }
 
-                // Commit the transaction
-                try await driver.commitTransaction()
+                if useTransaction {
+                    try await driver.commitTransaction()
+                }
 
-                // All statements succeeded — update tab with results
                 await MainActor.run {
                     applyMultiStatementResults(
                         tabId: tabId,
@@ -131,18 +126,19 @@ extension MainContentCoordinator {
                     )
                 }
             } catch {
-                // Rollback on failure
-                if let driver = DatabaseManager.shared.driver(for: conn.id) {
-                    try? await driver.rollbackTransaction()
+                if let driver = DatabaseManager.shared.driver(for: conn.id), driver.supportsTransactions {
+                    do {
+                        try await driver.rollbackTransaction()
+                    } catch {
+                        multiStatementLogger.error("Rollback failed: \(error.localizedDescription, privacy: .public)")
+                    }
                 }
 
-                // Always reset isExecuting even if generation is stale —
-                // skipping this leaves the tab permanently stuck in "executing" state.
                 if capturedGeneration != queryGeneration {
                     await MainActor.run { [weak self] in
                         guard let self else { return }
                         if let idx = tabManager.tabs.firstIndex(where: { $0.id == tabId }) {
-                            tabManager.tabs[idx].isExecuting = false
+                            tabManager.tabs[idx].execution.isExecuting = false
                         }
                         currentQueryTask = nil
                         toolbarState.setExecuting(false)
@@ -154,7 +150,6 @@ extension MainContentCoordinator {
                 let contextMsg = "Statement \(failedStmtIndex)/\(totalCount) failed: "
                     + error.localizedDescription
 
-                // Add an error ResultSet for the failed statement
                 let errorRS = ResultSet(label: "Error \(failedStmtIndex)")
                 errorRS.errorMessage = error.localizedDescription
                 newResultSets.append(errorRS)
@@ -165,14 +160,13 @@ extension MainContentCoordinator {
 
                     if let idx = tabManager.tabs.firstIndex(where: { $0.id == tabId }) {
                         var errTab = tabManager.tabs[idx]
-                        errTab.errorMessage = contextMsg
-                        errTab.isExecuting = false
-                        errTab.executionTime = cumulativeTime
+                        errTab.execution.errorMessage = contextMsg
+                        errTab.execution.isExecuting = false
+                        errTab.execution.executionTime = cumulativeTime
 
-                        // Attach accumulated ResultSets (successful + error)
-                        let pinnedResults = errTab.resultSets.filter(\.isPinned)
-                        errTab.resultSets = pinnedResults + newResultSets
-                        errTab.activeResultSetId = newResultSets.last?.id
+                        let pinnedResults = errTab.display.resultSets.filter(\.isPinned)
+                        errTab.display.resultSets = pinnedResults + newResultSets
+                        errTab.display.activeResultSetId = newResultSets.last?.id
 
                         tabManager.tabs[idx] = errTab
                     }
@@ -182,7 +176,7 @@ extension MainContentCoordinator {
                     QueryHistoryManager.shared.recordQuery(
                         query: recordSQL,
                         connectionId: conn.id,
-                        databaseName: conn.database,
+                        databaseName: activeDatabaseName,
                         executionTime: cumulativeTime,
                         rowCount: 0,
                         wasSuccessful: false,
@@ -201,7 +195,7 @@ extension MainContentCoordinator {
 
     // MARK: - Multi-Statement Result Application
 
-    private func applyMultiStatementResults(
+    internal func applyMultiStatementResults(
         tabId: UUID,
         capturedGeneration: Int,
         cumulativeTime: TimeInterval,
@@ -214,10 +208,9 @@ extension MainContentCoordinator {
         toolbarState.setExecuting(false)
         toolbarState.lastQueryDuration = cumulativeTime
 
-        // Always reset isExecuting even if generation is stale
         if capturedGeneration != queryGeneration {
             if let idx = tabManager.tabs.firstIndex(where: { $0.id == tabId }) {
-                tabManager.tabs[idx].isExecuting = false
+                tabManager.tabs[idx].execution.isExecuting = false
             }
             return
         }
@@ -233,43 +226,39 @@ extension MainContentCoordinator {
             let safeRows = selectResult.rows.map { row in
                 row.map { $0.map { String($0) } }
             }
-            // For table tabs, preserve existing tableName instead of re-extracting
-            // from SQL — extractTableName can fail on schema-qualified/quoted names
             let tableName: String?
-            if updatedTab.tabType == .table, let existing = updatedTab.tableName {
+            if updatedTab.tabType == .table, let existing = updatedTab.tableContext.tableName {
                 tableName = existing
             } else {
                 tableName = lastSelectSQL.flatMap { extractTableName(from: $0) }
             }
 
-            updatedTab.resultColumns = safeColumns
-            updatedTab.columnTypes = safeColumnTypes
-            updatedTab.resultRows = safeRows
-            updatedTab.tableName = tableName
-            updatedTab.isEditable = tableName != nil && updatedTab.isEditable
+            setActiveTableRows(
+                TableRows.from(queryRows: safeRows, columns: safeColumns, columnTypes: safeColumnTypes),
+                for: updatedTab.id
+            )
+            updatedTab.tableContext.tableName = tableName
+            updatedTab.tableContext.isEditable = tableName != nil && updatedTab.tableContext.isEditable
         } else {
-            updatedTab.resultColumns = []
-            updatedTab.columnTypes = []
-            updatedTab.resultRows = []
-            // Preserve tableName for table tabs even when no SELECT result
+            setActiveTableRows(TableRows(), for: updatedTab.id)
             if updatedTab.tabType != .table {
-                updatedTab.tableName = nil
+                updatedTab.tableContext.tableName = nil
             }
-            updatedTab.isEditable = false
+            updatedTab.tableContext.isEditable = false
         }
 
-        updatedTab.resultVersion += 1
-        updatedTab.executionTime = cumulativeTime
-        updatedTab.rowsAffected = totalRowsAffected
-        updatedTab.isExecuting = false
-        updatedTab.lastExecutedAt = Date()
-        updatedTab.errorMessage = nil
+        updatedTab.schemaVersion += 1
+        updatedTab.execution.executionTime = cumulativeTime
+        updatedTab.execution.rowsAffected = totalRowsAffected
+        updatedTab.execution.isExecuting = false
+        updatedTab.execution.lastExecutedAt = Date()
+        updatedTab.execution.errorMessage = nil
 
-        let pinnedResults = updatedTab.resultSets.filter(\.isPinned)
-        updatedTab.resultSets = pinnedResults + newResultSets
-        updatedTab.activeResultSetId = newResultSets.last?.id
-        if updatedTab.isResultsCollapsed {
-            updatedTab.isResultsCollapsed = false
+        let pinnedResults = updatedTab.display.resultSets.filter(\.isPinned)
+        updatedTab.display.resultSets = pinnedResults + newResultSets
+        updatedTab.display.activeResultSetId = newResultSets.last?.id
+        if updatedTab.display.isResultsCollapsed {
+            updatedTab.display.isResultsCollapsed = false
         }
         toolbarState.isResultsCollapsed = false
 
@@ -277,7 +266,6 @@ extension MainContentCoordinator {
 
         if tabManager.selectedTabId == tabId {
             changeManager.clearChangesAndUndoHistory()
-            changeManager.reloadVersion += 1
         }
     }
 }

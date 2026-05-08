@@ -14,6 +14,10 @@ final class SQLitePlugin: NSObject, TableProPlugin, DriverPlugin {
     static let pluginDescription = "SQLite file-based database support"
     static let capabilities: [PluginCapability] = [.databaseDriver]
 
+    static let explainVariants: [ExplainVariant] = [
+        ExplainVariant(id: "explain", label: "Explain", sqlPrefix: "EXPLAIN QUERY PLAN")
+    ]
+
     static let databaseTypeId = "SQLite"
     static let databaseDisplayName = "SQLite"
     static let iconName = "sqlite-icon"
@@ -165,7 +169,7 @@ private actor SQLiteConnectionActor {
         var truncated = false
 
         while sqlite3_step(statement) == SQLITE_ROW {
-            if rows.count >= PluginRowLimits.defaultMax {
+            if rows.count >= PluginRowLimits.emergencyMax {
                 truncated = true
                 break
             }
@@ -208,6 +212,93 @@ private actor SQLiteConnectionActor {
             executionTime: executionTime,
             isTruncated: truncated
         )
+    }
+
+    func streamQuery(_ query: String, continuation: AsyncThrowingStream<PluginStreamElement, Error>.Continuation) throws {
+        guard let db else {
+            throw SQLitePluginError.notConnected
+        }
+
+        var statement: OpaquePointer?
+
+        let prepareResult = sqlite3_prepare_v2(db, query, -1, &statement, nil)
+        if prepareResult != SQLITE_OK {
+            let errorMessage = String(cString: sqlite3_errmsg(db))
+            throw SQLitePluginError.queryFailed(errorMessage)
+        }
+
+        let columnCount = sqlite3_column_count(statement)
+        var columns: [String] = []
+        var columnTypeNames: [String] = []
+
+        for i in 0..<columnCount {
+            if let name = sqlite3_column_name(statement, i) {
+                columns.append(String(cString: name))
+            } else {
+                columns.append("column_\(i)")
+            }
+
+            if let typePtr = sqlite3_column_decltype(statement, i) {
+                columnTypeNames.append(String(cString: typePtr))
+            } else {
+                columnTypeNames.append("")
+            }
+        }
+
+        continuation.yield(.header(PluginStreamHeader(
+            columns: columns,
+            columnTypeNames: columnTypeNames,
+            estimatedRowCount: nil
+        )))
+
+        let batchSize = 5_000
+        var batch: [PluginRow] = []
+        batch.reserveCapacity(batchSize)
+
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if Task.isCancelled {
+                if !batch.isEmpty {
+                    continuation.yield(.rows(batch))
+                }
+                sqlite3_finalize(statement)
+                continuation.finish(throwing: CancellationError())
+                return
+            }
+
+            var row: [String?] = []
+
+            for i in 0..<columnCount {
+                let colType = sqlite3_column_type(statement, i)
+                if colType == SQLITE_NULL {
+                    row.append(nil)
+                } else if colType == SQLITE_BLOB {
+                    let byteCount = Int(sqlite3_column_bytes(statement, i))
+                    if byteCount > 0, let blobPtr = sqlite3_column_blob(statement, i) {
+                        let data = Data(bytes: blobPtr, count: byteCount)
+                        row.append(String(data: data, encoding: .isoLatin1) ?? "")
+                    } else {
+                        row.append("")
+                    }
+                } else if let text = sqlite3_column_text(statement, i) {
+                    row.append(String(cString: text))
+                } else {
+                    row.append(nil)
+                }
+            }
+
+            batch.append(row)
+            if batch.count >= batchSize {
+                continuation.yield(.rows(batch))
+                batch.removeAll(keepingCapacity: true)
+            }
+        }
+
+        if !batch.isEmpty {
+            continuation.yield(.rows(batch))
+        }
+
+        sqlite3_finalize(statement)
+        continuation.finish()
     }
 
     func executeParameterizedQuery(_ query: String, stringParams: [String?]) throws -> SQLiteRawResult {
@@ -279,7 +370,7 @@ private actor SQLiteConnectionActor {
         var truncated = false
 
         while sqlite3_step(statement) == SQLITE_ROW {
-            if rows.count >= PluginRowLimits.defaultMax {
+            if rows.count >= PluginRowLimits.emergencyMax {
                 truncated = true
                 break
             }
@@ -343,8 +434,6 @@ final class SQLitePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     nonisolated(unsafe) private var _dbHandleForInterrupt: OpaquePointer?
 
     private static let logger = Logger(subsystem: "com.TablePro", category: "SQLitePluginDriver")
-    private static let limitRegex = try? NSRegularExpression(pattern: "(?i)\\s+LIMIT\\s+\\d+")
-    private static let offsetRegex = try? NSRegularExpression(pattern: "(?i)\\s+OFFSET\\s+\\d+")
 
     var currentSchema: String? { nil }
     var serverVersion: String? { String(cString: sqlite3_libversion()) }
@@ -432,6 +521,22 @@ final class SQLitePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         "EXPLAIN QUERY PLAN \(sql)"
     }
 
+    // MARK: - Maintenance
+
+    func supportedMaintenanceOperations() -> [String]? {
+        ["VACUUM", "ANALYZE", "REINDEX", "Integrity Check"]
+    }
+
+    func maintenanceStatements(operation: String, table: String?, schema: String?, options: [String: String]) -> [String]? {
+        switch operation {
+        case "VACUUM": return ["VACUUM"]
+        case "ANALYZE": return table.map { ["ANALYZE \(quoteIdentifier($0))"] } ?? ["ANALYZE"]
+        case "REINDEX": return table.map { ["REINDEX \(quoteIdentifier($0))"] } ?? ["REINDEX"]
+        case "Integrity Check": return ["PRAGMA integrity_check"]
+        default: return nil
+        }
+    }
+
     // MARK: - View Templates
 
     func createViewTemplate() -> String? {
@@ -453,20 +558,62 @@ final class SQLitePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         ["PRAGMA foreign_keys = ON"]
     }
 
-    // MARK: - Pagination
+    // MARK: - User Query
 
-    func fetchRowCount(query: String) async throws -> Int {
-        let baseQuery = stripLimitOffset(from: query)
-        let countQuery = "SELECT COUNT(*) FROM (\(baseQuery))"
-        let result = try await execute(query: countQuery)
-        guard let firstRow = result.rows.first, let countStr = firstRow.first else { return 0 }
-        return Int(countStr ?? "0") ?? 0
-    }
+    func executeUserQuery(query: String, rowCap: Int?, parameters: [String?]?) async throws -> PluginQueryResult {
+        if let parameters {
+            let raw = try await executeParameterized(query: query, parameters: parameters)
+            guard let cap = rowCap, cap > 0, raw.rows.count > cap else { return raw }
+            return PluginQueryResult(
+                columns: raw.columns,
+                columnTypeNames: raw.columnTypeNames,
+                rows: Array(raw.rows.prefix(cap)),
+                rowsAffected: raw.rowsAffected,
+                executionTime: raw.executionTime,
+                isTruncated: true,
+                statusMessage: raw.statusMessage
+            )
+        }
 
-    func fetchRows(query: String, offset: Int, limit: Int) async throws -> PluginQueryResult {
-        let baseQuery = stripLimitOffset(from: query)
-        let paginatedQuery = "\(baseQuery) LIMIT \(limit) OFFSET \(offset)"
-        return try await execute(query: paginatedQuery)
+        let startTime = Date()
+        var columns: [String] = []
+        var columnTypeNames: [String] = []
+        var rows: [[String?]] = []
+        var truncated = false
+
+        let stream = streamRows(query: query)
+        for try await element in stream {
+            switch element {
+            case .header(let header):
+                columns = header.columns
+                columnTypeNames = header.columnTypeNames
+            case .rows(let batch):
+                if let cap = rowCap, cap > 0 {
+                    let remaining = cap - rows.count
+                    if remaining <= 0 {
+                        truncated = true
+                    } else if batch.count > remaining {
+                        rows.append(contentsOf: batch.prefix(remaining))
+                        truncated = true
+                    } else {
+                        rows.append(contentsOf: batch)
+                    }
+                } else {
+                    rows.append(contentsOf: batch)
+                }
+                if truncated { break }
+            }
+            if truncated { break }
+        }
+
+        return PluginQueryResult(
+            columns: columns,
+            columnTypeNames: columnTypeNames,
+            rows: rows,
+            rowsAffected: 0,
+            executionTime: Date().timeIntervalSince(startTime),
+            isTruncated: truncated
+        )
     }
 
     // MARK: - Schema Operations
@@ -500,7 +647,8 @@ final class SQLitePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             }
 
             let isNullable = row[3] == "0"
-            let isPrimaryKey = row[5] == "1"
+            // PRAGMA table_info pk column: 0 = not PK, 1+ = position in composite PK
+            let isPrimaryKey = row[5] != nil && row[5] != "0"
             let defaultValue = row[4]
 
             return PluginColumnInfo(
@@ -534,7 +682,8 @@ final class SQLitePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
 
             let isNullable = row[4] == "0"
             let defaultValue = row[5]
-            let isPrimaryKey = row[6] == "1"
+            // PRAGMA table_info pk column: 0 = not PK, 1+ = position in composite PK
+            let isPrimaryKey = row[6] != nil && row[6] != "0"
 
             let column = PluginColumnInfo(
                 name: columnName,
@@ -723,10 +872,6 @@ final class SQLitePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         PluginDatabaseMetadata(name: database)
     }
 
-    func createDatabase(name: String, charset: String, collation: String?) async throws {
-        throw SQLitePluginError.unsupportedOperation
-    }
-
     // MARK: - All Tables Metadata
 
     func allTablesMetadataSQL(schema: String?) -> String? {
@@ -757,27 +902,29 @@ final class SQLitePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         interruptLock.unlock()
     }
 
+    // MARK: - Streaming
+
+    func streamRows(query: String) -> AsyncThrowingStream<PluginStreamElement, Error> {
+        let queryToRun = String(query)
+        return AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
+            let streamTask = Task {
+                do {
+                    try await self.connectionActor.streamQuery(queryToRun, continuation: continuation)
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { @Sendable _ in
+                streamTask.cancel()
+            }
+        }
+    }
+
     private func expandPath(_ path: String) -> String {
         if path.hasPrefix("~") {
             return NSString(string: path).expandingTildeInPath
         }
         return path
-    }
-
-    private func stripLimitOffset(from query: String) -> String {
-        var result = query
-
-        if let limitRegex = Self.limitRegex {
-            let range = NSRange(result.startIndex..., in: result)
-            result = limitRegex.stringByReplacingMatches(in: result, range: range, withTemplate: "")
-        }
-
-        if let offsetRegex = Self.offsetRegex {
-            let range = NSRange(result.startIndex..., in: result)
-            result = offsetRegex.stringByReplacingMatches(in: result, range: range, withTemplate: "")
-        }
-
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Create Table DDL
@@ -843,6 +990,32 @@ final class SQLitePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             def += " ON UPDATE \(fk.onUpdate)"
         }
         return def
+    }
+
+    // MARK: - ALTER TABLE DDL
+
+    func generateAddColumnSQL(table: String, column: PluginColumnDefinition) -> String? {
+        let colDef = sqliteColumnDefinition(column, inlinePK: false)
+        return "ALTER TABLE \(quoteIdentifier(table)) ADD COLUMN \(colDef)"
+    }
+
+    func generateModifyColumnSQL(table: String, oldColumn: PluginColumnDefinition, newColumn: PluginColumnDefinition) -> String? {
+        guard oldColumn.name != newColumn.name else { return nil }
+        return "ALTER TABLE \(quoteIdentifier(table)) RENAME COLUMN \(quoteIdentifier(oldColumn.name)) TO \(quoteIdentifier(newColumn.name))"
+    }
+
+    func generateDropColumnSQL(table: String, columnName: String) -> String? {
+        "ALTER TABLE \(quoteIdentifier(table)) DROP COLUMN \(quoteIdentifier(columnName))"
+    }
+
+    func generateAddIndexSQL(table: String, index: PluginIndexDefinition) -> String? {
+        let cols = index.columns.map { quoteIdentifier($0) }.joined(separator: ", ")
+        let unique = index.isUnique ? "UNIQUE " : ""
+        return "CREATE \(unique)INDEX \(quoteIdentifier(index.name)) ON \(quoteIdentifier(table)) (\(cols))"
+    }
+
+    func generateDropIndexSQL(table: String, indexName: String) -> String? {
+        "DROP INDEX \(quoteIdentifier(indexName))"
     }
 
     private func formatDDL(_ ddl: String) -> String {

@@ -15,13 +15,9 @@ import Foundation
 /// Configuration for SQL formatting behavior
 struct SQLFormatterOptions {
     var uppercaseKeywords: Bool = true
-    var indentSize: Int = 2  // spaces per indent level
-    var alignColumns: Bool = true
+    var indentSize: Int = 2
     var preserveComments: Bool = true
-    var formatJoins: Bool = true
-    var alignWhere: Bool = true
 
-    /// Default options with all features enabled
     static let `default` = SQLFormatterOptions()
 }
 
@@ -52,11 +48,11 @@ enum SQLFormatterError: LocalizedError {
         case .emptyInput:
             return String(localized: "Cannot format empty SQL")
         case .dialectUnsupported(let type):
-            return String(localized: "Formatting not supported for \(type.rawValue)")
+            return String(format: String(localized: "Formatting not supported for %@"), type.rawValue)
         case .invalidCursorPosition(let pos, let max):
-            return String(localized: "Cursor position \(pos) exceeds SQL length (\(max))")
+            return String(format: String(localized: "Cursor position %d exceeds SQL length (%d)"), pos, max)
         case .internalError(let message):
-            return String(localized: "Formatter error: \(message)")
+            return String(format: String(localized: "Formatter error: %@"), message)
         }
     }
 }

@@ -10,19 +10,61 @@ import os
 import TableProPluginKit
 
 /// Service for persisting database connections
+@MainActor
 final class ConnectionStorage {
     static let shared = ConnectionStorage()
     private static let logger = Logger(subsystem: "com.TablePro", category: "ConnectionStorage")
 
     private let connectionsKey = "com.TablePro.connections"
-    private let defaults = UserDefaults.standard
+    private let migratedToFileKey = "com.TablePro.connectionsMigratedToFile"
+    private let defaults: UserDefaults
+    private let syncTracker: SyncChangeTracker
+    private let appSettingsProvider: () -> AppSettingsStorage
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
-    /// In-memory cache to avoid re-decoding JSON from UserDefaults on every access
+    /// In-memory cache to avoid re-decoding JSON from file on every access
     private var cachedConnections: [DatabaseConnection]?
 
-    private init() {}
+    private let fileURL: URL
+
+    init(
+        fileURL: URL = ConnectionStorage.defaultFileURL(),
+        userDefaults: UserDefaults = .standard,
+        syncTracker: SyncChangeTracker = .shared,
+        appSettings: @escaping @autoclosure () -> AppSettingsStorage = .shared
+    ) {
+        self.fileURL = fileURL
+        self.defaults = userDefaults
+        self.syncTracker = syncTracker
+        self.appSettingsProvider = appSettings
+
+        migrateFromUserDefaultsIfNeeded()
+    }
+
+    nonisolated static func defaultFileURL() -> URL {
+        let appSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? FileManager.default.temporaryDirectory
+        let dir = appSupport.appendingPathComponent("TablePro", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("connections.json")
+    }
+
+    /// One-time migration from UserDefaults to atomic file storage.
+    private func migrateFromUserDefaultsIfNeeded() {
+        guard !defaults.bool(forKey: migratedToFileKey),
+              let data = defaults.data(forKey: connectionsKey) else { return }
+        do {
+            try data.write(to: fileURL, options: .atomic)
+            defaults.set(true, forKey: migratedToFileKey)
+            defaults.removeObject(forKey: connectionsKey)
+            Self.logger.info("Migrated connections from UserDefaults to \(self.fileURL.path)")
+        } catch {
+            Self.logger.error("Failed to migrate connections to file: \(error)")
+        }
+    }
 
     // MARK: - Connection CRUD
 
@@ -30,7 +72,7 @@ final class ConnectionStorage {
     func loadConnections() -> [DatabaseConnection] {
         if let cached = cachedConnections { return cached }
 
-        guard let data = defaults.data(forKey: connectionsKey) else {
+        guard let data = try? Data(contentsOf: fileURL) else {
             return []
         }
 
@@ -40,6 +82,19 @@ final class ConnectionStorage {
             let connections = storedConnections.map { stored in
                 stored.toConnection()
             }
+
+            // Migration: assign sortOrder from array position for pre-existing data
+            if connections.count > 1 && connections.allSatisfy({ $0.sortOrder == 0 }) {
+                var migrated = connections
+                for i in migrated.indices { migrated[i].sortOrder = i }
+                let migratedStored = migrated.map { StoredConnection(from: $0) }
+                if let data = try? encoder.encode(migratedStored) {
+                    try? data.write(to: fileURL, options: .atomic)
+                }
+                cachedConnections = migrated
+                return migrated
+            }
+
             cachedConnections = connections
             return connections
         } catch {
@@ -54,7 +109,7 @@ final class ConnectionStorage {
 
         do {
             let data = try encoder.encode(storedConnections)
-            defaults.set(data, forKey: connectionsKey)
+            try data.write(to: fileURL, options: .atomic)
             cachedConnections = nil
         } catch {
             Self.logger.error("Failed to save connections: \(error)")
@@ -71,7 +126,9 @@ final class ConnectionStorage {
         var connections = loadConnections()
         connections.append(connection)
         saveConnections(connections)
-        SyncChangeTracker.shared.markDirty(.connection, id: connection.id.uuidString)
+        if !connection.localOnly && !connection.isSample {
+            syncTracker.markDirty(.connection, id: connection.id.uuidString)
+        }
 
         if let password = password, !password.isEmpty {
             savePassword(password, for: connection.id)
@@ -84,7 +141,9 @@ final class ConnectionStorage {
         if let index = connections.firstIndex(where: { $0.id == connection.id }) {
             connections[index] = connection
             saveConnections(connections)
-            SyncChangeTracker.shared.markDirty(.connection, id: connection.id.uuidString)
+            if !connection.localOnly && !connection.isSample {
+                syncTracker.markDirty(.connection, id: connection.id.uuidString)
+            }
 
             if let password = password {
                 if password.isEmpty {
@@ -98,10 +157,12 @@ final class ConnectionStorage {
 
     /// Delete a connection
     func deleteConnection(_ connection: DatabaseConnection) {
-        SyncChangeTracker.shared.markDeleted(.connection, id: connection.id.uuidString)
         var connections = loadConnections()
         connections.removeAll { $0.id == connection.id }
         saveConnections(connections)
+        if !connection.localOnly && !connection.isSample {
+            syncTracker.markDeleted(.connection, id: connection.id.uuidString)
+        }
         deletePassword(for: connection.id)
         deleteSSHPassword(for: connection.id)
         deleteKeyPassphrase(for: connection.id)
@@ -109,17 +170,21 @@ final class ConnectionStorage {
 
         let secureFieldIds = Self.secureFieldIds(for: connection.type)
         deleteAllPluginSecureFields(for: connection.id, fieldIds: secureFieldIds)
+
+        let appSettings = appSettingsProvider()
+        appSettings.saveLastDatabase(nil, for: connection.id)
+        appSettings.saveLastSchema(nil, for: connection.id)
     }
 
     /// Batch-delete multiple connections and clean up their Keychain entries
     func deleteConnections(_ connectionsToDelete: [DatabaseConnection]) {
-        for conn in connectionsToDelete {
-            SyncChangeTracker.shared.markDeleted(.connection, id: conn.id.uuidString)
-        }
         let idsToDelete = Set(connectionsToDelete.map(\.id))
         var all = loadConnections()
         all.removeAll { idsToDelete.contains($0.id) }
         saveConnections(all)
+        for conn in connectionsToDelete where !conn.localOnly && !conn.isSample {
+            syncTracker.markDeleted(.connection, id: conn.id.uuidString)
+        }
         for conn in connectionsToDelete {
             deletePassword(for: conn.id)
             deleteSSHPassword(for: conn.id)
@@ -127,6 +192,9 @@ final class ConnectionStorage {
             deleteTOTPSecret(for: conn.id)
             let fields = Self.secureFieldIds(for: conn.type)
             deleteAllPluginSecureFields(for: conn.id, fieldIds: fields)
+            let appSettings = appSettingsProvider()
+            appSettings.saveLastDatabase(nil, for: conn.id)
+            appSettings.saveLastSchema(nil, for: conn.id)
         }
     }
 
@@ -138,7 +206,7 @@ final class ConnectionStorage {
         // Create duplicate with new ID and "(Copy)" suffix
         let duplicate = DatabaseConnection(
             id: newId,
-            name: "\(connection.name) (Copy)",
+            name: String(format: String(localized: "%@ (Copy)"), connection.name),
             host: connection.host,
             port: connection.port,
             database: connection.database,
@@ -150,10 +218,15 @@ final class ConnectionStorage {
             tagId: connection.tagId,
             groupId: connection.groupId,
             sshProfileId: connection.sshProfileId,
+            sshTunnelMode: connection.sshTunnelMode,
             safeModeLevel: connection.safeModeLevel,
             aiPolicy: connection.aiPolicy,
+            aiRules: connection.aiRules,
+            aiAlwaysAllowedTools: connection.aiAlwaysAllowedTools,
             redisDatabase: connection.redisDatabase,
             startupCommands: connection.startupCommands,
+            sortOrder: connection.sortOrder,
+            localOnly: connection.localOnly,
             additionalFields: connection.additionalFields.isEmpty ? nil : connection.additionalFields
         )
 
@@ -161,7 +234,9 @@ final class ConnectionStorage {
         var connections = loadConnections()
         connections.append(duplicate)
         saveConnections(connections)
-        SyncChangeTracker.shared.markDirty(.connection, id: duplicate.id.uuidString)
+        if !duplicate.localOnly {
+            syncTracker.markDirty(.connection, id: duplicate.id.uuidString)
+        }
 
         // Copy all passwords from source to duplicate (skip DB password in prompt mode)
         if !connection.promptForPassword, let password = loadPassword(for: connection.id) {
@@ -189,77 +264,70 @@ final class ConnectionStorage {
 
     // MARK: - Keychain (Password Storage)
 
-    // Thread safety note (SVC-15): SecItemCopyMatching is synchronous but all call sites
-    // are already off the main thread:
-    //   - MySQLDriver.connect() / PostgreSQLDriver.connect() — non-@MainActor async funcs
-    //   - DatabaseManager — uses Task.detached for SSH/key passphrase loads
-    //   - ConnectionFormView — single-item lookup during form population (negligible latency)
-    // No async wrapper is needed; adding one would add complexity without measurable benefit.
-
     func savePassword(_ password: String, for connectionId: UUID) {
         let key = "com.TablePro.password.\(connectionId.uuidString)"
-        KeychainHelper.shared.saveString(password, forKey: key)
+        KeychainHelper.shared.writeString(password, forKey: key)
     }
 
     func loadPassword(for connectionId: UUID) -> String? {
         let key = "com.TablePro.password.\(connectionId.uuidString)"
-        return KeychainHelper.shared.loadString(forKey: key)
+        return resolveString(.init(label: "Database password", connectionId: connectionId), forKey: key)
     }
 
     func deletePassword(for connectionId: UUID) {
         let key = "com.TablePro.password.\(connectionId.uuidString)"
-        KeychainHelper.shared.delete(key: key)
+        KeychainHelper.shared.delete(forKey: key)
     }
 
     // MARK: - SSH Password Storage
 
     func saveSSHPassword(_ password: String, for connectionId: UUID) {
         let key = "com.TablePro.sshpassword.\(connectionId.uuidString)"
-        KeychainHelper.shared.saveString(password, forKey: key)
+        KeychainHelper.shared.writeString(password, forKey: key)
     }
 
     func loadSSHPassword(for connectionId: UUID) -> String? {
         let key = "com.TablePro.sshpassword.\(connectionId.uuidString)"
-        return KeychainHelper.shared.loadString(forKey: key)
+        return resolveString(.init(label: "SSH password", connectionId: connectionId), forKey: key)
     }
 
     func deleteSSHPassword(for connectionId: UUID) {
         let key = "com.TablePro.sshpassword.\(connectionId.uuidString)"
-        KeychainHelper.shared.delete(key: key)
+        KeychainHelper.shared.delete(forKey: key)
     }
 
     // MARK: - Key Passphrase Storage
 
     func saveKeyPassphrase(_ passphrase: String, for connectionId: UUID) {
         let key = "com.TablePro.keypassphrase.\(connectionId.uuidString)"
-        KeychainHelper.shared.saveString(passphrase, forKey: key)
+        KeychainHelper.shared.writeString(passphrase, forKey: key)
     }
 
     func loadKeyPassphrase(for connectionId: UUID) -> String? {
         let key = "com.TablePro.keypassphrase.\(connectionId.uuidString)"
-        return KeychainHelper.shared.loadString(forKey: key)
+        return resolveString(.init(label: "Key passphrase", connectionId: connectionId), forKey: key)
     }
 
     func deleteKeyPassphrase(for connectionId: UUID) {
         let key = "com.TablePro.keypassphrase.\(connectionId.uuidString)"
-        KeychainHelper.shared.delete(key: key)
+        KeychainHelper.shared.delete(forKey: key)
     }
 
     // MARK: - Plugin Secure Field Storage
 
     func savePluginSecureField(_ value: String, fieldId: String, for connectionId: UUID) {
         let key = "com.TablePro.plugin.\(fieldId).\(connectionId.uuidString)"
-        KeychainHelper.shared.saveString(value, forKey: key)
+        KeychainHelper.shared.writeString(value, forKey: key)
     }
 
     func loadPluginSecureField(fieldId: String, for connectionId: UUID) -> String? {
         let key = "com.TablePro.plugin.\(fieldId).\(connectionId.uuidString)"
-        return KeychainHelper.shared.loadString(forKey: key)
+        return resolveString(.init(label: "Plugin field \(fieldId)", connectionId: connectionId), forKey: key)
     }
 
     func deletePluginSecureField(fieldId: String, for connectionId: UUID) {
         let key = "com.TablePro.plugin.\(fieldId).\(connectionId.uuidString)"
-        KeychainHelper.shared.delete(key: key)
+        KeychainHelper.shared.delete(forKey: key)
     }
 
     func deleteAllPluginSecureFields(for connectionId: UUID, fieldIds: [String]) {
@@ -272,17 +340,36 @@ final class ConnectionStorage {
 
     func saveTOTPSecret(_ secret: String, for connectionId: UUID) {
         let key = "com.TablePro.totpsecret.\(connectionId.uuidString)"
-        KeychainHelper.shared.saveString(secret, forKey: key)
+        KeychainHelper.shared.writeString(secret, forKey: key)
     }
 
     func loadTOTPSecret(for connectionId: UUID) -> String? {
         let key = "com.TablePro.totpsecret.\(connectionId.uuidString)"
-        return KeychainHelper.shared.loadString(forKey: key)
+        return resolveString(.init(label: "TOTP secret", connectionId: connectionId), forKey: key)
     }
 
     func deleteTOTPSecret(for connectionId: UUID) {
         let key = "com.TablePro.totpsecret.\(connectionId.uuidString)"
-        KeychainHelper.shared.delete(key: key)
+        KeychainHelper.shared.delete(forKey: key)
+    }
+
+    private struct SecretContext {
+        let label: String
+        let connectionId: UUID
+    }
+
+    private func resolveString(_ context: SecretContext, forKey key: String) -> String? {
+        switch KeychainHelper.shared.readStringResult(forKey: key) {
+        case .found(let value):
+            return value
+        case .locked:
+            Self.logger.warning(
+                "\(context.label, privacy: .public) unavailable — Keychain locked (connId=\(context.connectionId.uuidString, privacy: .public))"
+            )
+            return nil
+        case .notFound:
+            return nil
+        }
     }
 
     // MARK: - Plugin Secure Field Migration
@@ -295,8 +382,8 @@ final class ConnectionStorage {
 
     func migratePluginSecureFieldsIfNeeded() {
         let migrationKey = "com.TablePro.pluginSecureFieldsMigrated"
-        guard !UserDefaults.standard.bool(forKey: migrationKey) else { return }
-        defer { UserDefaults.standard.set(true, forKey: migrationKey) }
+        guard !defaults.bool(forKey: migrationKey) else { return }
+        defer { defaults.set(true, forKey: migrationKey) }
 
         var connections = loadConnections()
         var changed = false
@@ -335,11 +422,10 @@ private struct StoredConnection: Codable {
     // SSH Configuration
     let sshEnabled: Bool
     let sshHost: String
-    let sshPort: Int
+    let sshPort: Int?
     let sshUsername: String
     let sshAuthMethod: String
     let sshPrivateKeyPath: String
-    let sshUseSSHConfig: Bool
     let sshAgentSocketPath: String
 
     // SSL Configuration
@@ -360,6 +446,12 @@ private struct StoredConnection: Codable {
     // AI policy
     let aiPolicy: String?
 
+    // AI rules text included in the system prompt for this connection
+    let aiRules: String?
+
+    // AI tools whitelisted for this connection
+    let aiAlwaysAllowedTools: [String]?
+
     // MongoDB-specific
     let mongoAuthSource: String?
     let mongoReadPreference: String?
@@ -377,11 +469,22 @@ private struct StoredConnection: Codable {
     // Startup commands
     let startupCommands: String?
 
+    // Sort order for sync
+    let sortOrder: Int
+
+    // Local-only (excluded from iCloud sync)
+    let localOnly: Bool
+
+    let isSample: Bool
+
     // TOTP configuration
     let totpMode: String
     let totpAlgorithm: String
     let totpDigits: Int
     let totpPeriod: Int
+
+    // SSH tunnel mode (v2 JSON blob preserving jump hosts + profile links)
+    let sshTunnelModeJson: Data?
 
     // Plugin-driven additional fields
     let additionalFields: [String: String]?
@@ -402,7 +505,6 @@ private struct StoredConnection: Codable {
         self.sshUsername = connection.sshConfig.username
         self.sshAuthMethod = connection.sshConfig.authMethod.rawValue
         self.sshPrivateKeyPath = connection.sshConfig.privateKeyPath
-        self.sshUseSSHConfig = connection.sshConfig.useSSHConfig
         self.sshAgentSocketPath = connection.sshConfig.agentSocketPath
 
         // TOTP configuration
@@ -428,6 +530,10 @@ private struct StoredConnection: Codable {
 
         // AI policy
         self.aiPolicy = connection.aiPolicy?.rawValue
+        self.aiRules = connection.aiRules
+        self.aiAlwaysAllowedTools = connection.aiAlwaysAllowedTools.isEmpty
+            ? nil
+            : Array(connection.aiAlwaysAllowedTools).sorted()
 
         // MongoDB-specific
         self.mongoAuthSource = connection.mongoAuthSource
@@ -446,6 +552,18 @@ private struct StoredConnection: Codable {
         // Startup commands
         self.startupCommands = connection.startupCommands
 
+        // Sort order
+        self.sortOrder = connection.sortOrder
+
+        // Local-only
+        self.localOnly = connection.localOnly
+
+        // Sample marker
+        self.isSample = connection.isSample
+
+        // SSH tunnel mode (v2 format preserving jump hosts, profiles, etc.)
+        self.sshTunnelModeJson = try? JSONEncoder().encode(connection.sshTunnelMode)
+
         // Plugin-driven additional fields
         self.additionalFields = connection.additionalFields.isEmpty ? nil : connection.additionalFields
     }
@@ -453,16 +571,21 @@ private struct StoredConnection: Codable {
     private enum CodingKeys: String, CodingKey {
         case id, name, host, port, database, username, type
         case sshEnabled, sshHost, sshPort, sshUsername, sshAuthMethod, sshPrivateKeyPath
-        case sshUseSSHConfig, sshAgentSocketPath
+        case sshAgentSocketPath
         case totpMode, totpAlgorithm, totpDigits, totpPeriod
         case sslMode, sslCaCertificatePath, sslClientCertificatePath, sslClientKeyPath
         case color, tagId, groupId, sshProfileId
         case safeModeLevel
         case isReadOnly // Legacy key for migration reading only
         case aiPolicy
+        case aiRules
+        case aiAlwaysAllowedTools
         case mongoAuthSource, mongoReadPreference, mongoWriteConcern, redisDatabase
-        case mssqlSchema, oracleServiceName, startupCommands
+        case mssqlSchema, oracleServiceName, startupCommands, sortOrder
+        case sshTunnelModeJson
         case additionalFields
+        case localOnly
+        case isSample
     }
 
     func encode(to encoder: Encoder) throws {
@@ -476,11 +599,10 @@ private struct StoredConnection: Codable {
         try container.encode(type, forKey: .type)
         try container.encode(sshEnabled, forKey: .sshEnabled)
         try container.encode(sshHost, forKey: .sshHost)
-        try container.encode(sshPort, forKey: .sshPort)
+        try container.encodeIfPresent(sshPort, forKey: .sshPort)
         try container.encode(sshUsername, forKey: .sshUsername)
         try container.encode(sshAuthMethod, forKey: .sshAuthMethod)
         try container.encode(sshPrivateKeyPath, forKey: .sshPrivateKeyPath)
-        try container.encode(sshUseSSHConfig, forKey: .sshUseSSHConfig)
         try container.encode(sshAgentSocketPath, forKey: .sshAgentSocketPath)
         try container.encode(totpMode, forKey: .totpMode)
         try container.encode(totpAlgorithm, forKey: .totpAlgorithm)
@@ -496,9 +618,15 @@ private struct StoredConnection: Codable {
         try container.encodeIfPresent(sshProfileId, forKey: .sshProfileId)
         try container.encode(safeModeLevel, forKey: .safeModeLevel)
         try container.encodeIfPresent(aiPolicy, forKey: .aiPolicy)
+        try container.encodeIfPresent(aiRules, forKey: .aiRules)
+        try container.encodeIfPresent(aiAlwaysAllowedTools, forKey: .aiAlwaysAllowedTools)
         try container.encodeIfPresent(redisDatabase, forKey: .redisDatabase)
         try container.encodeIfPresent(startupCommands, forKey: .startupCommands)
+        try container.encode(sortOrder, forKey: .sortOrder)
+        try container.encodeIfPresent(sshTunnelModeJson, forKey: .sshTunnelModeJson)
         try container.encodeIfPresent(additionalFields, forKey: .additionalFields)
+        try container.encode(localOnly, forKey: .localOnly)
+        try container.encode(isSample, forKey: .isSample)
     }
 
     // Custom decoder to handle migration from old format
@@ -515,11 +643,10 @@ private struct StoredConnection: Codable {
 
         sshEnabled = try container.decode(Bool.self, forKey: .sshEnabled)
         sshHost = try container.decode(String.self, forKey: .sshHost)
-        sshPort = try container.decode(Int.self, forKey: .sshPort)
+        sshPort = try container.decodeIfPresent(Int.self, forKey: .sshPort)
         sshUsername = try container.decode(String.self, forKey: .sshUsername)
         sshAuthMethod = try container.decode(String.self, forKey: .sshAuthMethod)
         sshPrivateKeyPath = try container.decode(String.self, forKey: .sshPrivateKeyPath)
-        sshUseSSHConfig = try container.decode(Bool.self, forKey: .sshUseSSHConfig)
         sshAgentSocketPath = try container.decodeIfPresent(String.self, forKey: .sshAgentSocketPath) ?? ""
 
         // TOTP configuration (migration: use defaults if missing)
@@ -553,6 +680,8 @@ private struct StoredConnection: Codable {
             safeModeLevel = wasReadOnly ? SafeModeLevel.readOnly.rawValue : SafeModeLevel.silent.rawValue
         }
         aiPolicy = try container.decodeIfPresent(String.self, forKey: .aiPolicy)
+        aiRules = try container.decodeIfPresent(String.self, forKey: .aiRules)
+        aiAlwaysAllowedTools = try container.decodeIfPresent([String].self, forKey: .aiAlwaysAllowedTools)
         mongoAuthSource = try container.decodeIfPresent(String.self, forKey: .mongoAuthSource)
         mongoReadPreference = try container.decodeIfPresent(String.self, forKey: .mongoReadPreference)
         mongoWriteConcern = try container.decodeIfPresent(String.self, forKey: .mongoWriteConcern)
@@ -560,7 +689,11 @@ private struct StoredConnection: Codable {
         mssqlSchema = try container.decodeIfPresent(String.self, forKey: .mssqlSchema)
         oracleServiceName = try container.decodeIfPresent(String.self, forKey: .oracleServiceName)
         startupCommands = try container.decodeIfPresent(String.self, forKey: .startupCommands)
+        sortOrder = try container.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
+        sshTunnelModeJson = try container.decodeIfPresent(Data.self, forKey: .sshTunnelModeJson)
         additionalFields = try container.decodeIfPresent([String: String].self, forKey: .additionalFields)
+        localOnly = try container.decodeIfPresent(Bool.self, forKey: .localOnly) ?? false
+        isSample = try container.decodeIfPresent(Bool.self, forKey: .isSample) ?? false
     }
 
     func toConnection() -> DatabaseConnection {
@@ -571,13 +704,29 @@ private struct StoredConnection: Codable {
             username: sshUsername,
             authMethod: SSHAuthMethod(rawValue: sshAuthMethod) ?? .password,
             privateKeyPath: sshPrivateKeyPath,
-            useSSHConfig: sshUseSSHConfig,
             agentSocketPath: sshAgentSocketPath
         )
         sshConfig.totpMode = TOTPMode(rawValue: totpMode) ?? .none
         sshConfig.totpAlgorithm = TOTPAlgorithm(rawValue: totpAlgorithm) ?? .sha1
         sshConfig.totpDigits = totpDigits
         sshConfig.totpPeriod = totpPeriod
+
+        // Prefer sshTunnelModeJson (v2 format) over legacy flat fields
+        let resolvedTunnelMode: SSHTunnelMode
+        if let json = sshTunnelModeJson,
+           let decoded = try? JSONDecoder().decode(SSHTunnelMode.self, from: json) {
+            resolvedTunnelMode = decoded
+            switch decoded {
+            case .disabled:
+                break
+            case .inline(let config):
+                sshConfig = config
+            case .profile(_, let snapshot):
+                sshConfig = snapshot
+            }
+        } else {
+            resolvedTunnelMode = .disabled
+        }
 
         let sslConfig = SSLConfiguration(
             mode: SSLMode(rawValue: sslMode) ?? .disabled,
@@ -623,10 +772,16 @@ private struct StoredConnection: Codable {
             tagId: parsedTagId,
             groupId: parsedGroupId,
             sshProfileId: parsedSSHProfileId,
+            sshTunnelMode: resolvedTunnelMode,
             safeModeLevel: SafeModeLevel(rawValue: safeModeLevel) ?? .silent,
             aiPolicy: parsedAIPolicy,
+            aiRules: aiRules,
+            aiAlwaysAllowedTools: Set(aiAlwaysAllowedTools ?? []),
             redisDatabase: redisDatabase,
             startupCommands: startupCommands,
+            sortOrder: sortOrder,
+            localOnly: localOnly,
+            isSample: isSample,
             additionalFields: mergedFields
         )
     }

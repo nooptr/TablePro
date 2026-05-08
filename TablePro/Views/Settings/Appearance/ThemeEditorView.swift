@@ -22,13 +22,11 @@ internal struct ThemeEditorView: View {
     private enum EditorTab: String, CaseIterable {
         case fonts = "Fonts"
         case colors = "Colors"
-        case layout = "Layout"
 
         var localizedName: String {
             switch self {
             case .fonts: return String(localized: "Fonts")
             case .colors: return String(localized: "Colors")
-            case .layout: return String(localized: "Layout")
             }
         }
     }
@@ -36,7 +34,7 @@ internal struct ThemeEditorView: View {
     var body: some View {
         VStack(spacing: 0) {
             Text(theme.name)
-                .font(.system(size: 15, weight: .semibold))
+                .font(.title3.weight(.semibold))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 16)
                 .padding(.top, 12)
@@ -77,12 +75,6 @@ internal struct ThemeEditorView: View {
             } else {
                 duplicatePrompt
             }
-        case .layout:
-            if isEditable {
-                ThemeEditorLayoutSection()
-            } else {
-                duplicatePrompt
-            }
         }
     }
 
@@ -91,17 +83,17 @@ internal struct ThemeEditorView: View {
             Spacer()
 
             Image(systemName: "lock.fill")
-                .font(.system(size: 24))
+                .font(.title2)
                 .foregroundStyle(.secondary)
 
             Text(theme.isBuiltIn
                 ? String(localized: "This is a built-in theme.")
                 : String(localized: "This is a registry theme."))
-                .font(.system(size: 13))
+                .font(.body)
                 .foregroundStyle(.secondary)
 
-            Text(String(localized: "Duplicate it to customize colors and layout."))
-                .font(.system(size: 11))
+            Text(String(localized: "Duplicate it to customize colors."))
+                .font(.subheadline)
                 .foregroundStyle(.tertiary)
 
             Button(String(localized: "Duplicate Theme")) {

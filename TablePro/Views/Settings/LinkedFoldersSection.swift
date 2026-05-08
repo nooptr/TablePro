@@ -42,7 +42,7 @@ struct LinkedFoldersSection: View {
                 }
             }
         } footer: {
-            Text("Watched folders are scanned for .tablepro files. Connections appear read-only in the sidebar.")
+            Text("Watched folders are scanned for .tablepro files. Connections appear read only in the sidebar.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -85,10 +85,12 @@ struct LinkedFoldersSection: View {
                 removeFolder(folder)
             } label: {
                 Image(systemName: "trash")
+                    .frame(width: 24, height: 24)
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
             .help(String(localized: "Remove Folder"))
+            .accessibilityLabel(String(localized: "Remove folder"))
         }
     }
 
@@ -101,15 +103,16 @@ struct LinkedFoldersSection: View {
         panel.allowsMultipleSelection = false
         panel.message = String(localized: "Choose a folder to watch for .tablepro connection files")
 
-        panel.begin { response in
+        guard let window = NSApp.keyWindow else { return }
+        panel.beginSheetModal(for: window) { response in
             guard response == .OK, let url = panel.url else { return }
             let path = PathPortability.contractHome(url.path)
 
-            guard !folders.contains(where: { $0.path == path }) else { return }
+            guard !self.folders.contains(where: { $0.path == path }) else { return }
 
             let folder = LinkedFolder(path: path)
             LinkedFolderStorage.shared.addFolder(folder)
-            folders = LinkedFolderStorage.shared.loadFolders()
+            self.folders = LinkedFolderStorage.shared.loadFolders()
             LinkedFolderWatcher.shared.reload()
         }
     }
@@ -118,18 +121,5 @@ struct LinkedFoldersSection: View {
         LinkedFolderStorage.shared.removeFolder(folder)
         folders = LinkedFolderStorage.shared.loadFolders()
         LinkedFolderWatcher.shared.reload()
-    }
-}
-
-// MARK: - Pro Badge
-
-private struct ProBadge: View {
-    var body: some View {
-        Text("PRO")
-            .font(.system(size: 9, weight: .bold))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 4)
-            .padding(.vertical, 1)
-            .background(.orange, in: RoundedRectangle(cornerRadius: 3))
     }
 }

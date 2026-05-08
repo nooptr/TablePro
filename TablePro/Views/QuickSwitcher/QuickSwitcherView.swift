@@ -23,7 +23,6 @@ internal struct QuickSwitcherSheet: View {
     @State private var viewModel = QuickSwitcherViewModel()
 
     private enum FocusField {
-        case search
         case itemList
     }
 
@@ -33,7 +32,7 @@ internal struct QuickSwitcherSheet: View {
         VStack(spacing: 0) {
             // Header
             Text("Quick Switcher")
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.body, weight: .semibold))
+                .font(.body.weight(.semibold))
                 .padding(.vertical, 12)
 
             Divider()
@@ -66,18 +65,9 @@ internal struct QuickSwitcherSheet: View {
                 databaseType: databaseType
             )
         }
-        .defaultFocus($focus, .search)
         .onExitCommand { dismiss() }
         .onKeyPress(.return) {
             openSelectedItem()
-            return .handled
-        }
-        .onKeyPress(.upArrow) {
-            viewModel.moveUp()
-            return .handled
-        }
-        .onKeyPress(.downArrow) {
-            viewModel.moveDown()
             return .handled
         }
         .onKeyPress(characters: .init(charactersIn: "jn"), phases: [.down, .repeat]) { keyPress in
@@ -95,28 +85,13 @@ internal struct QuickSwitcherSheet: View {
     // MARK: - Search Toolbar
 
     private var searchToolbar: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.body))
-                .foregroundStyle(.tertiary)
-
-            TextField("Search tables, views, databases...", text: $viewModel.searchText)
-                .textFieldStyle(.plain)
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.body))
-                .focused($focus, equals: .search)
-
-            if !viewModel.searchText.isEmpty {
-                Button(action: { viewModel.searchText = "" }) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .cornerRadius(6)
+        NativeSearchField(
+            text: $viewModel.searchText,
+            placeholder: String(localized: "Search tables, views, databases..."),
+            onMoveUp: { viewModel.moveUp() },
+            onMoveDown: { viewModel.moveDown() },
+            focusOnAppear: true
+        )
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
     }
@@ -135,7 +110,7 @@ internal struct QuickSwitcherSheet: View {
                             }
                         } header: {
                             Text(sectionTitle(for: group.kind))
-                                .font(.system(size: ThemeEngine.shared.activeTheme.typography.caption, weight: .semibold))
+                                .font(.caption.weight(.semibold))
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -158,51 +133,42 @@ internal struct QuickSwitcherSheet: View {
     }
 
     private func itemRow(_ item: QuickSwitcherItem) -> some View {
-        let isSelected = item.id == viewModel.selectedItemId
-
-        return HStack(spacing: 10) {
+        HStack(spacing: 10) {
             Image(systemName: item.iconName)
-                .font(.system(size: ThemeEngine.shared.activeTheme.iconSizes.default))
-                .foregroundStyle(isSelected ? .white : .secondary)
+                .font(.body)
+                .foregroundStyle(.secondary)
 
             Text(item.name)
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.body))
-                .foregroundStyle(isSelected ? .white : .primary)
+                .font(.body)
                 .lineLimit(1)
                 .truncationMode(.tail)
 
             if !item.subtitle.isEmpty {
                 Text(item.subtitle)
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
-                    .foregroundStyle(isSelected ? Color.white.opacity(0.7) : Color.secondary)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
 
             Spacer()
 
             Text(item.kindLabel)
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.caption, weight: .medium))
-                .foregroundStyle(isSelected ? .white.opacity(0.7) : .secondary)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(
                     RoundedRectangle(cornerRadius: 4)
-                        .fill(isSelected ? Color.white.opacity(0.15) : Color(nsColor: .quaternaryLabelColor))
+                        .fill(Color(nsColor: .quaternaryLabelColor))
                 )
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
-        .listRowBackground(
-            RoundedRectangle(cornerRadius: 4)
-                .fill(isSelected ? Color(nsColor: .selectedContentBackgroundColor) : Color.clear)
-                .padding(.horizontal, 4)
-        )
-        .listRowInsets(ThemeEngine.shared.activeTheme.spacing.listRowInsets.swiftUI)
         .listRowSeparator(.hidden)
         .id(item.id)
         .tag(item.id)
         .overlay(
-            DoubleClickOverlay {
+            DoubleClickDetector {
                 viewModel.selectedItemId = item.id
                 openSelectedItem()
             }
@@ -216,7 +182,7 @@ internal struct QuickSwitcherSheet: View {
             ProgressView()
                 .scaleEffect(0.8)
             Text("Loading...")
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.medium))
+                .font(.callout)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -225,18 +191,18 @@ internal struct QuickSwitcherSheet: View {
     private var emptyState: some View {
         VStack(spacing: 12) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: ThemeEngine.shared.activeTheme.iconSizes.extraLarge))
+                .font(.title2)
                 .foregroundStyle(.secondary)
 
             if viewModel.searchText.isEmpty {
                 Text("No objects found")
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.body, weight: .medium))
+                    .font(.body.weight(.medium))
             } else {
                 Text("No matching objects")
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.body, weight: .medium))
+                    .font(.body.weight(.medium))
 
                 Text("No objects match \"\(viewModel.searchText)\"")
-                    .font(.system(size: ThemeEngine.shared.activeTheme.typography.small))
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
         }
@@ -279,33 +245,5 @@ internal struct QuickSwitcherSheet: View {
         guard let item = viewModel.selectedItem else { return }
         onSelect(item)
         dismiss()
-    }
-}
-
-// MARK: - DoubleClickOverlay
-
-/// NSViewRepresentable that detects double-clicks without interfering with native List selection
-private struct DoubleClickOverlay: NSViewRepresentable {
-    let onDoubleClick: () -> Void
-
-    func makeNSView(context: Context) -> NSView {
-        let view = PassThroughDoubleClickView()
-        view.onDoubleClick = onDoubleClick
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        (nsView as? PassThroughDoubleClickView)?.onDoubleClick = onDoubleClick
-    }
-}
-
-private class PassThroughDoubleClickView: NSView {
-    var onDoubleClick: (() -> Void)?
-
-    override func mouseDown(with event: NSEvent) {
-        if event.clickCount == 2 {
-            onDoubleClick?()
-        }
-        super.mouseDown(with: event)
     }
 }

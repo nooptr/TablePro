@@ -83,12 +83,10 @@ internal final class QuickSwitcherViewModel {
                     ))
                 }
             } catch {
-                Self.logger.debug("Failed to fetch databases for quick switcher: \(error.localizedDescription, privacy: .public)")
+                Self.logger.warning("Failed to fetch databases for quick switcher: \(error.localizedDescription, privacy: .public)")
             }
 
-            // Schemas (only for databases that support them)
-            let supportsSchemas = [DatabaseType.postgresql, .redshift, .oracle, .mssql]
-            if supportsSchemas.contains(databaseType) {
+            if PluginManager.shared.supportsSchemaSwitching(for: databaseType) {
                 do {
                     let schemas = try await driver.fetchSchemas()
                     for schema in schemas {
@@ -100,7 +98,7 @@ internal final class QuickSwitcherViewModel {
                         ))
                     }
                 } catch {
-                    Self.logger.debug("Failed to fetch schemas for quick switcher: \(error.localizedDescription, privacy: .public)")
+                    Self.logger.warning("Failed to fetch schemas for quick switcher: \(error.localizedDescription, privacy: .public)")
                 }
             }
         }
@@ -133,7 +131,7 @@ internal final class QuickSwitcherViewModel {
     /// Debounced filter update
     func updateFilter() {
         filterTask?.cancel()
-        filterTask = Task { @MainActor in
+        filterTask = Task {
             try? await Task.sleep(for: .milliseconds(50))
             guard !Task.isCancelled else { return }
             applyFilter()

@@ -19,8 +19,10 @@ struct QuerySuccessView: View {
 
             // Success icon
             Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 64))
-                .foregroundStyle(.green)
+                .font(.largeTitle)
+                .imageScale(.large)
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(Color(nsColor: .systemGreen))
 
             // Success message
             Text("Query executed successfully")
@@ -59,13 +61,13 @@ struct QuerySuccessView: View {
     private func formatExecutionTime(_ time: TimeInterval) -> String {
         if time < 0.001 {
             let ms = String(format: "%.3f", time * 1_000)
-            return String(localized: "\(ms) ms")
+            return String(format: String(localized: "%@ ms"), ms)
         } else if time < 1 {
             let ms = String(format: "%.2f", time * 1_000)
-            return String(localized: "\(ms) ms")
+            return String(format: String(localized: "%@ ms"), ms)
         } else {
             let secs = String(format: "%.2f", time)
-            return String(localized: "\(secs) s")
+            return String(format: String(localized: "%@ s"), secs)
         }
     }
 }

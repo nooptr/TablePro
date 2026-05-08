@@ -59,6 +59,35 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
 
     private static let logger = Logger(subsystem: "com.TablePro", category: "PluginDriverAdapter")
 
+    private static let iso8601Formatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static func stringValue(for parameter: Any) -> String {
+        switch parameter {
+        case let s as String:
+            return s
+        case let b as Bool:
+            return b ? "1" : "0"
+        case let i as any BinaryInteger:
+            return String(i)
+        case let f as any BinaryFloatingPoint:
+            let d = Double(f)
+            guard d.isFinite else { return "NULL" }
+            return String(d)
+        case let d as Date:
+            return Self.iso8601Formatter.string(from: d)
+        case let data as Data:
+            return data.map { String(format: "%02x", $0) }.joined()
+        case let uuid as UUID:
+            return uuid.uuidString
+        default:
+            return String(describing: parameter)
+        }
+    }
+
     init(connection: DatabaseConnection, pluginDriver: any PluginDatabaseDriver) {
         self.connection = connection
         self.pluginDriver = pluginDriver
@@ -96,18 +125,27 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
     func executeParameterized(query: String, parameters: [Any?]) async throws -> QueryResult {
         let stringParams = parameters.map { param -> String? in
             guard let p = param else { return nil }
-            return String(describing: p)
+            return Self.stringValue(for: p)
         }
         let pluginResult = try await pluginDriver.executeParameterized(query: query, parameters: stringParams)
         return mapQueryResult(pluginResult)
     }
 
-    func fetchRowCount(query: String) async throws -> Int {
-        try await pluginDriver.fetchRowCount(query: query)
-    }
-
-    func fetchRows(query: String, offset: Int, limit: Int) async throws -> QueryResult {
-        let pluginResult = try await pluginDriver.fetchRows(query: query, offset: offset, limit: limit)
+    func executeUserQuery(query: String, rowCap: Int?, parameters: [Any?]?) async throws -> QueryResult {
+        let stringParams: [String?]?
+        if let parameters {
+            stringParams = parameters.map { param -> String? in
+                guard let p = param else { return nil }
+                return Self.stringValue(for: p)
+            }
+        } else {
+            stringParams = nil
+        }
+        let pluginResult = try await pluginDriver.executeUserQuery(
+            query: query,
+            rowCap: rowCap,
+            parameters: stringParams
+        )
         return mapQueryResult(pluginResult)
     }
 
@@ -127,7 +165,16 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
 
     func fetchColumns(table: String) async throws -> [ColumnInfo] {
         let pluginColumns = try await pluginDriver.fetchColumns(table: table, schema: pluginDriver.currentSchema)
-        return pluginColumns.map { col in
+        return mapPluginColumns(pluginColumns)
+    }
+
+    func fetchColumns(table: String, schema: String?) async throws -> [ColumnInfo] {
+        let pluginColumns = try await pluginDriver.fetchColumns(table: table, schema: schema ?? pluginDriver.currentSchema)
+        return mapPluginColumns(pluginColumns)
+    }
+
+    private func mapPluginColumns(_ pluginColumns: [PluginColumnInfo]) -> [ColumnInfo] {
+        pluginColumns.map { col in
             ColumnInfo(
                 name: col.name,
                 dataType: col.dataType,
@@ -150,7 +197,9 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
                 columns: idx.columns,
                 isUnique: idx.isUnique,
                 isPrimary: idx.isPrimary,
-                type: idx.type
+                type: idx.type,
+                columnPrefixes: idx.columnPrefixes,
+                whereClause: idx.whereClause
             )
         }
     }
@@ -163,6 +212,7 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
                 column: fk.column,
                 referencedTable: fk.referencedTable,
                 referencedColumn: fk.referencedColumn,
+                referencedSchema: fk.referencedSchema,
                 onDelete: fk.onDelete,
                 onUpdate: fk.onUpdate
             )
@@ -230,8 +280,18 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
         )
     }
 
-    func createDatabase(name: String, charset: String, collation: String?) async throws {
-        try await pluginDriver.createDatabase(name: name, charset: charset, collation: collation)
+    func createDatabaseFormSpec() async throws -> CreateDatabaseFormSpec? {
+        guard let pluginSpec = try await pluginDriver.createDatabaseFormSpec() else { return nil }
+        return mapFormSpec(pluginSpec)
+    }
+
+    func createDatabase(_ request: CreateDatabaseRequest) async throws {
+        let pluginRequest = PluginCreateDatabaseRequest(name: request.name, values: request.values)
+        try await pluginDriver.createDatabase(pluginRequest)
+    }
+
+    func dropDatabase(name: String) async throws {
+        try await pluginDriver.dropDatabase(name: name)
     }
 
     // MARK: - Batch Operations
@@ -255,7 +315,8 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
         for (table, fks) in pluginResult {
             result[table] = fks.map { fk in
                 ForeignKeyInfo(name: fk.name, column: fk.column, referencedTable: fk.referencedTable,
-                               referencedColumn: fk.referencedColumn, onDelete: fk.onDelete, onUpdate: fk.onUpdate)
+                               referencedColumn: fk.referencedColumn, referencedSchema: fk.referencedSchema,
+                               onDelete: fk.onDelete, onUpdate: fk.onUpdate)
             }
         }
         return result
@@ -278,6 +339,10 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
     }
 
     // MARK: - Transaction Management
+
+    var supportsTransactions: Bool {
+        pluginDriver.supportsTransactions
+    }
 
     func beginTransaction() async throws {
         try await pluginDriver.beginTransaction()
@@ -391,6 +456,16 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
         pluginDriver.foreignKeyEnableStatements()
     }
 
+    // MARK: - Maintenance Operations
+
+    func supportedMaintenanceOperations() -> [String]? {
+        pluginDriver.supportedMaintenanceOperations()
+    }
+
+    func maintenanceStatements(operation: String, table: String?, options: [String: String]) -> [String]? {
+        pluginDriver.maintenanceStatements(operation: operation, table: table, schema: pluginDriver.currentSchema, options: options)
+    }
+
     // MARK: - All Tables Metadata SQL
 
     func allTablesMetadataSQL(schema: String?) -> String? {
@@ -457,5 +532,46 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
         let result = classifier.classify(rawTypeName: rawTypeName)
         columnTypeCache[rawTypeName] = result
         return result
+    }
+}
+
+private extension PluginDriverAdapter {
+    func mapFormSpec(_ spec: PluginCreateDatabaseFormSpec) -> CreateDatabaseFormSpec {
+        CreateDatabaseFormSpec(
+            fields: spec.fields.map(mapFormField),
+            footnote: spec.footnote
+        )
+    }
+
+    func mapFormField(_ field: PluginCreateDatabaseFormSpec.Field) -> CreateDatabaseFormSpec.Field {
+        CreateDatabaseFormSpec.Field(
+            id: field.id,
+            label: field.label,
+            kind: mapFieldKind(field.kind),
+            visibleWhen: field.visibleWhen.map(mapVisibility),
+            groupedBy: field.groupedBy
+        )
+    }
+
+    func mapFieldKind(_ kind: PluginCreateDatabaseFormSpec.FieldKind) -> CreateDatabaseFormSpec.FieldKind {
+        switch kind {
+        case .picker(let options, let defaultValue):
+            return .picker(options: options.map(mapOption), defaultValue: defaultValue)
+        case .searchable(let options, let defaultValue):
+            return .searchable(options: options.map(mapOption), defaultValue: defaultValue)
+        }
+    }
+
+    func mapOption(_ option: PluginCreateDatabaseFormSpec.Option) -> CreateDatabaseFormSpec.Option {
+        CreateDatabaseFormSpec.Option(
+            value: option.value,
+            label: option.label,
+            subtitle: option.subtitle,
+            group: option.group
+        )
+    }
+
+    func mapVisibility(_ visibility: PluginCreateDatabaseFormSpec.Visibility) -> CreateDatabaseFormSpec.Visibility {
+        CreateDatabaseFormSpec.Visibility(fieldId: visibility.fieldId, equals: visibility.equals)
     }
 }

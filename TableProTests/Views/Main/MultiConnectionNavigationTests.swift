@@ -26,14 +26,11 @@ struct MultiConnectionNavigationTests {
         let connection = TestFixtures.makeConnection(id: id, name: name, database: database, type: type)
         let tabManager = QueryTabManager()
         let changeManager = DataChangeManager()
-        let filterStateManager = FilterStateManager()
         let toolbarState = ConnectionToolbarState()
         let coordinator = MainContentCoordinator(
             connection: connection,
             tabManager: tabManager,
             changeManager: changeManager,
-            filterStateManager: filterStateManager,
-            columnVisibilityManager: ColumnVisibilityManager(),
             toolbarState: toolbarState
         )
         return (coordinator, tabManager)
@@ -43,20 +40,20 @@ struct MultiConnectionNavigationTests {
 
     @Test("Fast path sets showStructure on the existing active tab")
     @MainActor
-    func fastPathSetsShowStructure() {
+    func fastPathSetsShowStructure() throws {
         let (coordinator, tabManager) = makeCoordinator(database: "db_a")
         defer { coordinator.teardown() }
 
-        tabManager.addTableTab(tableName: "users", databaseType: .mysql, databaseName: "db_a")
+        try tabManager.addTableTab(tableName: "users", databaseType: .mysql, databaseName: "db_a")
         guard let idx = tabManager.selectedTabIndex else {
             Issue.record("Expected selected tab index")
             return
         }
-        #expect(tabManager.tabs[idx].showStructure == false)
+        #expect(tabManager.tabs[idx].display.resultsViewMode != .structure)
 
         coordinator.openTableTab("users", showStructure: true)
 
-        #expect(tabManager.tabs[idx].showStructure == true)
+        #expect(tabManager.tabs[idx].display.resultsViewMode == .structure)
     }
 
     // MARK: - openTableTab: isView marks tab correctly
@@ -75,8 +72,8 @@ struct MultiConnectionNavigationTests {
             Issue.record("Expected a tab to be added")
             return
         }
-        #expect(tab.isView == true)
-        #expect(tab.isEditable == false)
+        #expect(tab.tableContext.isView == true)
+        #expect(tab.tableContext.isEditable == false)
     }
 
     // MARK: - openTableTab: databaseName from connection
@@ -95,10 +92,8 @@ struct MultiConnectionNavigationTests {
             Issue.record("Expected a tab to be added")
             return
         }
-        #expect(tab.databaseName == "primary_db")
+        #expect(tab.tableContext.databaseName == "primary_db")
     }
-
-    // Note: isSwitchingDatabase guard test lives in SwitchDatabaseTests.swift
 
     // MARK: - openTableTab: different database types create correct tab
 
@@ -113,8 +108,8 @@ struct MultiConnectionNavigationTests {
         coordinator.openTableTab("accounts")
 
         #expect(tabManager.tabs.count == 1)
-        #expect(tabManager.tabs.first?.tableName == "accounts")
-        #expect(tabManager.tabs.first?.databaseName == "pg_db")
+        #expect(tabManager.tabs.first?.tableContext.tableName == "accounts")
+        #expect(tabManager.tabs.first?.tableContext.databaseName == "pg_db")
     }
 
     @Test("openTableTab with sqlite connection adds tab")
@@ -128,20 +123,20 @@ struct MultiConnectionNavigationTests {
         coordinator.openTableTab("items")
 
         #expect(tabManager.tabs.count == 1)
-        #expect(tabManager.tabs.first?.tableName == "items")
-        #expect(tabManager.tabs.first?.databaseName == "local.db")
+        #expect(tabManager.tabs.first?.tableContext.tableName == "items")
+        #expect(tabManager.tabs.first?.tableContext.databaseName == "local.db")
     }
 
     // MARK: - SidebarNavigationResult: skip for all database types
 
     @Test("resolve returns skip for mysql when same table is active")
     @MainActor
-    func resolveSkipForMysql() {
+    func resolveSkipForMysql() throws {
         let manager = QueryTabManager()
-        manager.addTableTab(tableName: "users", databaseType: .mysql, databaseName: "mydb")
+        try manager.addTableTab(tableName: "users", databaseType: .mysql, databaseName: "mydb")
         let result = SidebarNavigationResult.resolve(
             clickedTableName: "users",
-            currentTabTableName: manager.selectedTab?.tableName,
+            currentTabTableName: manager.selectedTab?.tableContext.tableName,
             hasExistingTabs: !manager.tabs.isEmpty
         )
         #expect(result == .skip)
@@ -149,12 +144,12 @@ struct MultiConnectionNavigationTests {
 
     @Test("resolve returns skip for postgresql when same table is active")
     @MainActor
-    func resolveSkipForPostgresql() {
+    func resolveSkipForPostgresql() throws {
         let manager = QueryTabManager()
-        manager.addTableTab(tableName: "accounts", databaseType: .postgresql, databaseName: "pgdb")
+        try manager.addTableTab(tableName: "accounts", databaseType: .postgresql, databaseName: "pgdb")
         let result = SidebarNavigationResult.resolve(
             clickedTableName: "accounts",
-            currentTabTableName: manager.selectedTab?.tableName,
+            currentTabTableName: manager.selectedTab?.tableContext.tableName,
             hasExistingTabs: !manager.tabs.isEmpty
         )
         #expect(result == .skip)
@@ -162,12 +157,12 @@ struct MultiConnectionNavigationTests {
 
     @Test("resolve returns skip for sqlite when same table is active")
     @MainActor
-    func resolveSkipForSqlite() {
+    func resolveSkipForSqlite() throws {
         let manager = QueryTabManager()
-        manager.addTableTab(tableName: "items", databaseType: .sqlite, databaseName: "local.db")
+        try manager.addTableTab(tableName: "items", databaseType: .sqlite, databaseName: "local.db")
         let result = SidebarNavigationResult.resolve(
             clickedTableName: "items",
-            currentTabTableName: manager.selectedTab?.tableName,
+            currentTabTableName: manager.selectedTab?.tableContext.tableName,
             hasExistingTabs: !manager.tabs.isEmpty
         )
         #expect(result == .skip)
@@ -209,7 +204,7 @@ struct MultiConnectionNavigationTests {
 
     @Test("Two coordinators with different connections have independent tab managers")
     @MainActor
-    func twoCoordinatorsHaveIndependentTabManagers() {
+    func twoCoordinatorsHaveIndependentTabManagers() throws {
         let (coordinatorA, tabManagerA) = makeCoordinator(name: "ConnA", database: "db_a")
         let (coordinatorB, tabManagerB) = makeCoordinator(name: "ConnB", database: "db_b")
         defer {
@@ -217,19 +212,19 @@ struct MultiConnectionNavigationTests {
             coordinatorB.teardown()
         }
 
-        tabManagerA.addTableTab(tableName: "users", databaseType: .mysql, databaseName: "db_a")
-        tabManagerB.addTableTab(tableName: "orders", databaseType: .mysql, databaseName: "db_b")
-        tabManagerB.addTableTab(tableName: "products", databaseType: .mysql, databaseName: "db_b")
+        try tabManagerA.addTableTab(tableName: "users", databaseType: .mysql, databaseName: "db_a")
+        try tabManagerB.addTableTab(tableName: "orders", databaseType: .mysql, databaseName: "db_b")
+        try tabManagerB.addTableTab(tableName: "products", databaseType: .mysql, databaseName: "db_b")
 
         #expect(tabManagerA.tabs.count == 1)
         #expect(tabManagerB.tabs.count == 2)
-        #expect(tabManagerA.tabs.first?.tableName == "users")
-        #expect(tabManagerB.tabs.first?.tableName == "orders")
+        #expect(tabManagerA.tabs.first?.tableContext.tableName == "users")
+        #expect(tabManagerB.tabs.first?.tableContext.tableName == "orders")
     }
 
     @Test("openTableTab on coordinator A does not affect coordinator B's tabs")
     @MainActor
-    func openTableTabOnADoesNotAffectB() {
+    func openTableTabOnADoesNotAffectB() throws {
         let (coordinatorA, tabManagerA) = makeCoordinator(name: "ConnA", database: "db_a")
         let (coordinatorB, tabManagerB) = makeCoordinator(name: "ConnB", database: "db_b")
         defer {
@@ -237,13 +232,13 @@ struct MultiConnectionNavigationTests {
             coordinatorB.teardown()
         }
 
-        tabManagerB.addTableTab(tableName: "orders", databaseType: .mysql, databaseName: "db_b")
+        try tabManagerB.addTableTab(tableName: "orders", databaseType: .mysql, databaseName: "db_b")
         let tabCountBefore = tabManagerB.tabs.count
 
         coordinatorA.openTableTab("users")
 
         #expect(tabManagerA.tabs.count == 1)
         #expect(tabManagerB.tabs.count == tabCountBefore)
-        #expect(tabManagerB.tabs.first?.tableName == "orders")
+        #expect(tabManagerB.tabs.first?.tableContext.tableName == "orders")
     }
 }

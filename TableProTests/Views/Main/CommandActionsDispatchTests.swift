@@ -20,19 +20,16 @@ struct CommandActionsDispatchTests {
         let state = SessionStateFactory.create(connection: connection, payload: nil)
         let coordinator = state.coordinator
 
-        var selectedRowIndices: Set<Int> = []
         var selectedTables: Set<TableInfo> = []
         var pendingTruncates: Set<String> = []
         var pendingDeletes: Set<String> = []
         var tableOperationOptions: [String: TableOperationOptions] = [:]
-        var editingCell: CellPosition? = nil
         let rightPanelState = RightPanelState()
 
         let actions = MainContentCommandActions(
             coordinator: coordinator,
-            filterStateManager: state.filterStateManager,
             connection: connection,
-            selectedRowIndices: Binding(get: { selectedRowIndices }, set: { selectedRowIndices = $0 }),
+            selectionState: coordinator.selectionState,
             selectedTables: Binding(get: { selectedTables }, set: { selectedTables = $0 }),
             pendingTruncates: Binding(get: { pendingTruncates }, set: { pendingTruncates = $0 }),
             pendingDeletes: Binding(get: { pendingDeletes }, set: { pendingDeletes = $0 }),
@@ -40,8 +37,7 @@ struct CommandActionsDispatchTests {
                 get: { tableOperationOptions },
                 set: { tableOperationOptions = $0 }
             ),
-            rightPanelState: rightPanelState,
-            editingCell: Binding(get: { editingCell }, set: { editingCell = $0 })
+            rightPanelState: rightPanelState
         )
 
         return (actions, coordinator)
@@ -57,7 +53,7 @@ struct CommandActionsDispatchTests {
         actions.loadQueryIntoEditor("SELECT 1")
 
         let tab = coordinator.tabManager.selectedTab
-        #expect(tab?.query == "SELECT 1")
+        #expect(tab?.content.query == "SELECT 1")
     }
 
     // MARK: - insertQueryFromAI
@@ -70,7 +66,7 @@ struct CommandActionsDispatchTests {
         actions.insertQueryFromAI("SELECT 2")
 
         let tab = coordinator.tabManager.selectedTab
-        #expect(tab?.query == "SELECT 2")
+        #expect(tab?.content.query == "SELECT 2")
     }
 
     @Test("insertQueryFromAI appends to existing query")
@@ -80,13 +76,13 @@ struct CommandActionsDispatchTests {
 
         // Set an initial query on the tab
         if let idx = coordinator.tabManager.selectedTabIndex {
-            coordinator.tabManager.tabs[idx].query = "SELECT 1"
+            coordinator.tabManager.tabs[idx].content.query = "SELECT 1"
         }
 
         actions.insertQueryFromAI("SELECT 2")
 
         let tab = coordinator.tabManager.selectedTab
-        #expect(tab?.query == "SELECT 1\n\nSELECT 2")
+        #expect(tab?.content.query == "SELECT 1\n\nSELECT 2")
     }
 
     // MARK: - copySelectedRows (structure mode)
@@ -98,7 +94,7 @@ struct CommandActionsDispatchTests {
 
         // Enable structure mode on the selected tab
         if let idx = coordinator.tabManager.selectedTabIndex {
-            coordinator.tabManager.tabs[idx].showStructure = true
+            coordinator.tabManager.tabs[idx].display.resultsViewMode = .structure
         }
 
         // Install a spy handler
@@ -121,7 +117,7 @@ struct CommandActionsDispatchTests {
 
         // Enable structure mode on the selected tab
         if let idx = coordinator.tabManager.selectedTabIndex {
-            coordinator.tabManager.tabs[idx].showStructure = true
+            coordinator.tabManager.tabs[idx].display.resultsViewMode = .structure
         }
 
         // Install a spy handler

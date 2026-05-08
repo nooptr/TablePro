@@ -6,20 +6,15 @@
 import Foundation
 import os
 
-/// Manages SQL favorites with notifications and sync tracking
-internal final class SQLFavoriteManager {
+/// Manages SQL favorites with notifications
+internal final class SQLFavoriteManager: @unchecked Sendable {
     static let shared = SQLFavoriteManager()
     private static let logger = Logger(subsystem: "com.TablePro", category: "SQLFavoriteManager")
 
     private let storage: SQLFavoriteStorage
 
-    /// Creates an isolated manager with its own storage. For testing only.
-    init(isolatedStorage: SQLFavoriteStorage) {
-        self.storage = isolatedStorage
-    }
-
-    private init() {
-        self.storage = SQLFavoriteStorage.shared
+    init(storage: SQLFavoriteStorage = .shared) {
+        self.storage = storage
     }
 
     // MARK: - Favorites
@@ -27,7 +22,6 @@ internal final class SQLFavoriteManager {
     func addFavorite(_ favorite: SQLFavorite) async -> Bool {
         let result = await storage.addFavorite(favorite)
         if result {
-            SyncChangeTracker.shared.markDirty(.favorite, id: favorite.id.uuidString)
             postUpdateNotification()
         }
         return result
@@ -36,7 +30,6 @@ internal final class SQLFavoriteManager {
     func updateFavorite(_ favorite: SQLFavorite) async -> Bool {
         let result = await storage.updateFavorite(favorite)
         if result {
-            SyncChangeTracker.shared.markDirty(.favorite, id: favorite.id.uuidString)
             postUpdateNotification()
         }
         return result
@@ -45,22 +38,20 @@ internal final class SQLFavoriteManager {
     func deleteFavorite(id: UUID) async -> Bool {
         let result = await storage.deleteFavorite(id: id)
         if result {
-            SyncChangeTracker.shared.markDeleted(.favorite, id: id.uuidString)
             postUpdateNotification()
         }
         return result
     }
 
     func deleteFavorites(ids: [UUID]) async {
-        for id in ids {
-            let result = await storage.deleteFavorite(id: id)
-            if result {
-                SyncChangeTracker.shared.markDeleted(.favorite, id: id.uuidString)
-            }
-        }
-        if !ids.isEmpty {
+        let result = await storage.deleteFavorites(ids: ids)
+        if result {
             postUpdateNotification()
         }
+    }
+
+    func fetchFavorite(id: UUID) async -> SQLFavorite? {
+        await storage.fetchFavorite(id: id)
     }
 
     func fetchFavorites(
@@ -76,7 +67,6 @@ internal final class SQLFavoriteManager {
     func addFolder(_ folder: SQLFavoriteFolder) async -> Bool {
         let result = await storage.addFolder(folder)
         if result {
-            SyncChangeTracker.shared.markDirty(.favoriteFolder, id: folder.id.uuidString)
             postUpdateNotification()
         }
         return result
@@ -85,7 +75,6 @@ internal final class SQLFavoriteManager {
     func updateFolder(_ folder: SQLFavoriteFolder) async -> Bool {
         let result = await storage.updateFolder(folder)
         if result {
-            SyncChangeTracker.shared.markDirty(.favoriteFolder, id: folder.id.uuidString)
             postUpdateNotification()
         }
         return result
@@ -94,7 +83,6 @@ internal final class SQLFavoriteManager {
     func deleteFolder(id: UUID) async -> Bool {
         let result = await storage.deleteFolder(id: id)
         if result {
-            SyncChangeTracker.shared.markDeleted(.favoriteFolder, id: id.uuidString)
             postUpdateNotification()
         }
         return result
@@ -107,7 +95,48 @@ internal final class SQLFavoriteManager {
     // MARK: - Keyword Support
 
     func fetchKeywordMap(connectionId: UUID? = nil) async -> [String: (name: String, query: String)] {
-        await storage.fetchKeywordMap(connectionId: connectionId)
+        var map = await storage.fetchKeywordMap(connectionId: connectionId)
+        let linked = await fetchLinkedKeywordMap(connectionId: connectionId)
+        for (keyword, value) in linked where map[keyword] == nil {
+            map[keyword] = value
+        }
+        return map
+    }
+
+    private func fetchLinkedKeywordMap(connectionId: UUID?) async -> [String: (name: String, query: String)] {
+        let folders = LinkedSQLFolderStorage.shared.loadFolders()
+            .filter { $0.isEnabled }
+            .filter { $0.connectionId == nil || $0.connectionId == connectionId }
+        guard !folders.isEmpty else { return [:] }
+
+        let folderIds = Set(folders.map(\.id))
+        let folderURLsById = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0.expandedURL) })
+
+        let rows = await LinkedSQLIndex.shared.fetchKeywordRows(folderIds: folderIds)
+        guard !rows.isEmpty else { return [:] }
+
+        return await Task.detached(priority: .utility) {
+            await withTaskGroup(of: (String, (name: String, query: String))?.self) { group in
+                for row in rows {
+                    guard let folderURL = folderURLsById[row.folderId] else { continue }
+                    let fileURL = folderURL.appendingPathComponent(row.relativePath)
+                    let keyword = row.keyword
+                    let name = row.name
+                    group.addTask {
+                        guard let loaded = FileTextLoader.load(fileURL) else { return nil }
+                        return (keyword, (name: name, query: loaded.content))
+                    }
+                }
+
+                var map: [String: (name: String, query: String)] = [:]
+                for await result in group {
+                    if let (keyword, value) = result, map[keyword] == nil {
+                        map[keyword] = value
+                    }
+                }
+                return map
+            }
+        }.value
     }
 
     func isKeywordAvailable(
@@ -121,7 +150,7 @@ internal final class SQLFavoriteManager {
     // MARK: - Notifications
 
     private func postUpdateNotification() {
-        DispatchQueue.main.async {
+        Task {
             NotificationCenter.default.post(name: .sqlFavoritesDidUpdate, object: nil)
         }
     }

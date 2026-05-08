@@ -51,11 +51,25 @@ struct ExportableConnection: Codable {
     let color: String?
     let tagName: String?
     let groupName: String?
+    let sshProfileId: String?
     let safeModeLevel: String?
     let aiPolicy: String?
     let additionalFields: [String: String]?
     let redisDatabase: Int?
     let startupCommands: String?
+    let localOnly: Bool?
+
+    func renamed(to newName: String) -> ExportableConnection {
+        ExportableConnection(
+            name: newName, host: host, port: port, database: database,
+            username: username, type: type, sshConfig: sshConfig,
+            sslConfig: sslConfig, color: color, tagName: tagName,
+            groupName: groupName, sshProfileId: sshProfileId,
+            safeModeLevel: safeModeLevel, aiPolicy: aiPolicy,
+            additionalFields: additionalFields, redisDatabase: redisDatabase,
+            startupCommands: startupCommands, localOnly: localOnly
+        )
+    }
 }
 
 // MARK: - SSH Config
@@ -63,11 +77,10 @@ struct ExportableConnection: Codable {
 struct ExportableSSHConfig: Codable {
     let enabled: Bool
     let host: String
-    let port: Int
+    let port: Int?
     let username: String
     let authMethod: String
     let privateKeyPath: String
-    let useSSHConfig: Bool
     let agentSocketPath: String
     let jumpHosts: [ExportableJumpHost]?
     let totpMode: String?
@@ -78,7 +91,7 @@ struct ExportableSSHConfig: Codable {
 
 struct ExportableJumpHost: Codable {
     let host: String
-    let port: Int
+    let port: Int?
     let username: String
     let authMethod: String
     let privateKeyPath: String

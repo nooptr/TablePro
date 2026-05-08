@@ -126,18 +126,18 @@ struct EditorTabPayloadTests {
 
     @Test("Init from QueryTab maps fields correctly")
     @MainActor
-    func initFromQueryTab() {
+    func initFromQueryTab() throws {
         let tabManager = QueryTabManager()
-        tabManager.addTableTab(tableName: "users", databaseType: .mysql, databaseName: "mydb")
+        try tabManager.addTableTab(tableName: "users", databaseType: .mysql, databaseName: "mydb")
         let tab = tabManager.tabs.first!
         let connectionId = UUID()
         let payload = EditorTabPayload(from: tab, connectionId: connectionId)
         #expect(payload.connectionId == connectionId)
         #expect(payload.tabType == tab.tabType)
-        #expect(payload.tableName == tab.tableName)
-        #expect(payload.databaseName == tab.databaseName)
-        #expect(payload.initialQuery == tab.query)
-        #expect(payload.isView == tab.isView)
-        #expect(payload.showStructure == tab.showStructure)
+        #expect(payload.tableName == tab.tableContext.tableName)
+        #expect(payload.databaseName == tab.tableContext.databaseName)
+        #expect(payload.initialQuery == tab.content.query)
+        #expect(payload.isView == tab.tableContext.isView)
+        #expect(payload.showStructure == (tab.display.resultsViewMode == .structure))
     }
 }

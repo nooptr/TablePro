@@ -19,10 +19,13 @@ extension Notification.Name {
     static let connectionUpdated = Notification.Name("connectionUpdated")
     static let connectionStatusDidChange = Notification.Name("connectionStatusDidChange")
     static let databaseDidConnect = Notification.Name("databaseDidConnect")
-    static let connectionShareFileOpened = Notification.Name("connectionShareFileOpened")
     static let exportConnections = Notification.Name("exportConnections")
     static let importConnections = Notification.Name("importConnections")
+    static let importConnectionsFromApp = Notification.Name("importConnectionsFromApp")
     static let linkedFoldersDidUpdate = Notification.Name("linkedFoldersDidUpdate")
+    static let focusConnectionFormWindowRequested = Notification.Name("focusConnectionFormWindowRequested")
+    static let openSampleDatabaseRequested = Notification.Name("openSampleDatabaseRequested")
+    static let resetSampleDatabaseRequested = Notification.Name("resetSampleDatabaseRequested")
 
     // MARK: - License
 
@@ -35,8 +38,13 @@ extension Notification.Name {
     // MARK: - SQL Favorites
 
     static let sqlFavoritesDidUpdate = Notification.Name("sqlFavoritesDidUpdate")
+    static let saveAsFavoriteRequested = Notification.Name("saveAsFavoriteRequested")
 
-    // MARK: - Settings Window
+    // MARK: - Plugins
 
-    static let openSettingsWindow = Notification.Name("com.TablePro.openSettingsWindow")
+    static let pluginsRejected = Notification.Name("pluginsRejected")
+
+    // MARK: - Feedback
+
+    static let showFeedbackWindow = Notification.Name("com.TablePro.showFeedbackWindow")
 }

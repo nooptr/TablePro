@@ -64,10 +64,6 @@ private final class MockPluginDriver: PluginDatabaseDriver, @unchecked Sendable 
     func execute(query: String) async throws -> PluginQueryResult {
         PluginQueryResult(columns: [], columnTypeNames: [], rows: [], rowsAffected: 0, executionTime: 0)
     }
-    func fetchRowCount(query: String) async throws -> Int { 0 }
-    func fetchRows(query: String, offset: Int, limit: Int) async throws -> PluginQueryResult {
-        PluginQueryResult(columns: [], columnTypeNames: [], rows: [], rowsAffected: 0, executionTime: 0)
-    }
     func fetchTables(schema: String?) async throws -> [PluginTableInfo] { [] }
     func fetchColumns(table: String, schema: String?) async throws -> [PluginColumnInfo] { [] }
     func fetchIndexes(table: String, schema: String?) async throws -> [PluginIndexInfo] { [] }
@@ -300,8 +296,8 @@ struct SchemaStatementGeneratorPluginTests {
         let generator = SchemaStatementGenerator(tableName: "users", pluginDriver: mock)
         let stmts = try generator.generate(changes: [.modifyPrimaryKey(old: ["id"], new: ["id", "tenant_id"])])
 
-        #expect(stmts.count == 1)
-        #expect(stmts[0].sql.contains("PLUGIN_PK"))
+        #expect(stmts.count == 2)
+        #expect(stmts[1].sql.contains("PLUGIN_PK"))
         #expect(stmts[0].isDestructive)
     }
 
@@ -345,9 +341,9 @@ struct SchemaStatementGeneratorPluginTests {
         let newIndex = makeIndex(name: "idx_email", columns: ["email", "name"], isUnique: true)
         let stmts = try generator.generate(changes: [.modifyIndex(old: oldIndex, new: newIndex)])
 
-        #expect(stmts.count == 1)
+        #expect(stmts.count == 2)
         #expect(stmts[0].sql.contains("DROP INDEX"))
-        #expect(stmts[0].sql.contains("CREATE INDEX"))
+        #expect(stmts[1].sql.contains("CREATE INDEX"))
     }
 
     @Test("Modify index throws when drop returns nil")
@@ -382,9 +378,9 @@ struct SchemaStatementGeneratorPluginTests {
         let newFK = makeForeignKey(name: "fk_role", refColumns: ["role_id"])
         let stmts = try generator.generate(changes: [.modifyForeignKey(old: oldFK, new: newFK)])
 
-        #expect(stmts.count == 1)
+        #expect(stmts.count == 2)
         #expect(stmts[0].sql.contains("DROP CONSTRAINT"))
-        #expect(stmts[0].sql.contains("ADD CONSTRAINT"))
+        #expect(stmts[1].sql.contains("ADD CONSTRAINT"))
     }
 
     // MARK: - Dependency Ordering
@@ -484,7 +480,7 @@ struct SchemaStatementGeneratorPluginTests {
         let generator = SchemaStatementGenerator(tableName: "users", pluginDriver: mock)
         let stmts = try generator.generate(changes: [.modifyPrimaryKey(old: ["id"], new: ["id", "tenant_id"])])
 
-        #expect(stmts.count == 1)
+        #expect(stmts.count == 2)
         #expect(stmts[0].isDestructive == true)
     }
 

@@ -264,7 +264,7 @@ bundle_dylibs() {
     # (e.g. strchrnul) that don't exist on earlier OS versions → launch crash.
     echo "   Verifying deployment target compatibility..."
     local deploy_target
-    deploy_target=$(grep -m 1 '^\s*MACOSX_DEPLOYMENT_TARGET = ' <<< "$build_settings" | awk '{print $3}')
+    deploy_target=$(grep -m 1 'MACOSX_DEPLOYMENT_TARGET' "$PROJECT/project.pbxproj" | awk -F'= ' '{print $2}' | tr -d ' ;')
     if [ -n "$deploy_target" ]; then
         local deploy_major
         deploy_major=$(echo "$deploy_target" | cut -d. -f1)
@@ -309,28 +309,15 @@ build_for_arch() {
     echo ""
     echo "🔨 Building for $arch..."
 
-    # Fetch build settings once for this arch (used by build_for_arch and bundle_dylibs)
-    echo "Fetching build settings..."
-    if ! build_settings=$(xcodebuild -project "$PROJECT" -scheme "$SCHEME" -configuration "$CONFIG" -arch "$arch" -skipPackagePluginValidation -showBuildSettings 2>&1); then
-        echo "❌ FATAL: xcodebuild -showBuildSettings failed"
-        echo "$build_settings"
-        exit 1
-    fi
-
     # Prepare architecture-specific libraries
     prepare_mariadb "$arch"
     prepare_libpq "$arch"
     prepare_libmongoc "$arch"
     prepare_hiredis "$arch"
 
-    # Remove AppIcon.icon if present — Xcode 26's automatic icon format
-    # uses SVG rendering with GPU effects (shadows, translucency) that
-    # crashes actool/ibtoold in headless CI environments.
-    # The traditional AppIcon.appiconset in Assets.xcassets is used instead.
-    if [ -d "TablePro/AppIcon.icon" ]; then
-        echo "🎨 Removing AppIcon.icon (not supported in headless CI)..."
-        rm -rf "TablePro/AppIcon.icon"
-    fi
+    # Create OpenSSL shared dylibs for this architecture
+    echo "📦 Creating OpenSSL shared dylibs for $arch..."
+    scripts/create-openssl-dylibs.sh "$arch"
 
     # Persistent SPM package cache (speeds up CI on self-hosted runners)
     SPM_CACHE_DIR="${HOME}/.spm-cache"
@@ -362,9 +349,15 @@ build_for_arch() {
         CODE_SIGN_IDENTITY="$SIGN_IDENTITY" \
         CODE_SIGN_STYLE=Manual \
         DEVELOPMENT_TEAM="$TEAM_ID" \
+        GCC_OPTIMIZATION_LEVEL=s \
+        SWIFT_OPTIMIZATION_LEVEL=-O \
+        LLVM_LTO=YES_THIN \
+        CLANG_COVERAGE_MAPPING=NO \
+        ENABLE_CODE_COVERAGE=NO \
         ${ANALYTICS_HMAC_SECRET:+ANALYTICS_HMAC_SECRET="$ANALYTICS_HMAC_SECRET"} \
         -skipPackagePluginValidation \
         -clonedSourcePackagesDirPath "$SPM_CACHE_DIR" \
+        -derivedDataPath build/DerivedData \
         build 2>&1 | tee "build-${arch}.log"; then
         echo "❌ FATAL: xcodebuild failed for $arch"
         echo "Check build-${arch}.log for details"
@@ -372,20 +365,8 @@ build_for_arch() {
     fi
     echo "✅ Build succeeded for $arch"
 
-    # Get binary path with validation
-    DERIVED_DATA=$(grep -m 1 "BUILD_DIR" <<< "$build_settings" | awk '{print $3}')
-
-    if [ -z "$DERIVED_DATA" ]; then
-        echo "❌ FATAL: Failed to determine build directory from xcodebuild settings"
-        echo "This usually indicates:"
-        echo "  1. The Xcode project is corrupted"
-        echo "  2. The scheme '$SCHEME' doesn't exist"
-        echo "  3. Xcode changed its output format"
-        echo ""
-        echo "Run this command to debug:"
-        echo "  xcodebuild -project '$PROJECT' -scheme '$SCHEME' -showBuildSettings | grep BUILD_DIR"
-        exit 1
-    fi
+    # Deterministic path via -derivedDataPath (no -showBuildSettings needed)
+    DERIVED_DATA="build/DerivedData/Build/Products"
 
     APP_PATH="${DERIVED_DATA}/${CONFIG}/TablePro.app"
     echo "📂 Expected app path: $APP_PATH"
@@ -457,6 +438,20 @@ build_for_arch() {
         echo "🔪 Main binary: $before → $after"
     fi
 
+    # Strip helper executables in Contents/MacOS
+    for helper in "$BUILD_DIR/$OUTPUT_NAME/Contents/MacOS"/*; do
+        [ -f "$helper" ] || continue
+        [ "$(basename "$helper")" = "TablePro" ] && continue
+        local hname
+        hname=$(basename "$helper")
+        local before
+        before=$(ls -lh "$helper" | awk '{print $5}')
+        strip -x "$helper"
+        local after
+        after=$(ls -lh "$helper" | awk '{print $5}')
+        echo "   $hname: $before → $after"
+    done
+
     # Strip PluginKit framework
     local pluginkit_binary="$BUILD_DIR/$OUTPUT_NAME/Contents/Frameworks/TableProPluginKit.framework/Versions/A/TableProPluginKit"
     if [ -f "$pluginkit_binary" ]; then
@@ -464,11 +459,52 @@ build_for_arch() {
         echo "   TableProPluginKit framework stripped"
     fi
 
-    # Bundle non-system dynamic libraries (libpq, OpenSSL, etc.)
+    # Remove development rpaths (absolute source paths) from all binaries
+    echo "🔧 Stripping development rpaths..."
+    for binary in "$main_binary" \
+        "$BUILD_DIR/$OUTPUT_NAME/Contents/MacOS"/* \
+        "$PLUGINS_DIR"/*.tableplugin/Contents/MacOS/*; do
+        [ -f "$binary" ] || continue
+        otool -l "$binary" 2>/dev/null | grep "Libs/dylibs" | awk '{print $2}' | while read -r rpath; do
+            install_name_tool -delete_rpath "$rpath" "$binary" 2>/dev/null || true
+        done || true
+    done
+
+    # Strip Sparkle helper binaries
+    local sparkle_dir="$BUILD_DIR/$OUTPUT_NAME/Contents/Frameworks/Sparkle.framework/Versions/B"
+    for sparkle_bin in \
+        "$sparkle_dir/Autoupdate" \
+        "$sparkle_dir/Updater.app/Contents/MacOS/Updater"; do
+        if [ -f "$sparkle_bin" ]; then
+            strip -x "$sparkle_bin"
+            echo "   $(basename "$sparkle_bin") (Sparkle) stripped"
+        fi
+    done
+
+    # Remove Sparkle XPC services (not needed for non-sandboxed apps)
+    if [ -d "$sparkle_dir/XPCServices" ]; then
+        rm -rf "$sparkle_dir/XPCServices"
+        echo "   Removed Sparkle XPC services (non-sandboxed app)"
+    fi
+
+    # Copy shared OpenSSL dylibs into Frameworks
+    echo "📦 Copying OpenSSL shared dylibs to Frameworks/..."
+    FRAMEWORKS_EMBED_DIR="$BUILD_DIR/$OUTPUT_NAME/Contents/Frameworks"
+    mkdir -p "$FRAMEWORKS_EMBED_DIR"
+    for lib in libcrypto.3.dylib libssl.3.dylib; do
+        if [ -f "Libs/dylibs/$lib" ]; then
+            cp -f "Libs/dylibs/$lib" "$FRAMEWORKS_EMBED_DIR/$lib"
+            chmod 644 "$FRAMEWORKS_EMBED_DIR/$lib"
+            echo "   Copied $lib"
+        else
+            echo "   WARNING: Libs/dylibs/$lib not found"
+        fi
+    done
+
+    # Bundle non-system dynamic libraries (libpq, etc.)
     bundle_dylibs "$BUILD_DIR/$OUTPUT_NAME"
 
     # Sign the entire app bundle with Developer ID.
-    # Must deep-sign all nested executables (Sparkle has XPC services, helper apps).
     # Sign from inside out: nested binaries → frameworks → dylibs → app.
     echo "🔏 Signing app bundle with: $SIGN_IDENTITY"
     FRAMEWORKS_DIR="$BUILD_DIR/$OUTPUT_NAME/Contents/Frameworks"
@@ -517,6 +553,14 @@ build_for_arch() {
         done
     fi
 
+    # Sign helper executables in Contents/MacOS (e.g., mcp-server)
+    MACOS_DIR="$BUILD_DIR/$OUTPUT_NAME/Contents/MacOS"
+    for helper in "$MACOS_DIR"/*; do
+        [ -f "$helper" ] || continue
+        [ "$(basename "$helper")" = "TablePro" ] && continue
+        codesign -fs "$SIGN_IDENTITY" --force --options runtime --timestamp "$helper"
+    done
+
     # Embed provisioning profile (required for iCloud entitlements)
     PROFILE=$(find ~/Library/MobileDevice/Provisioning\ Profiles -name "*.provisionprofile" -print -quit 2>/dev/null)
     if [ -n "$PROFILE" ]; then
@@ -551,6 +595,14 @@ build_for_arch() {
     # Verify binary is executable
     if [ ! -x "$BINARY_PATH" ]; then
         echo "❌ FATAL: Binary is not executable"
+        exit 1
+    fi
+
+    # Verify embedded MCP stdio bridge made it into the bundle
+    MCP_CLI_PATH="$BUILD_DIR/$OUTPUT_NAME/Contents/MacOS/tablepro-mcp"
+    if [ ! -x "$MCP_CLI_PATH" ]; then
+        echo "❌ FATAL: tablepro-mcp helper missing from $MCP_CLI_PATH"
+        echo "Check the mcp-server target's Copy Files build phase on the TablePro target."
         exit 1
     fi
 
@@ -613,12 +665,22 @@ if [ "$NOTARIZE" = "true" ]; then
         ditto -c -k --keepParent "$app" "$zip_path"
 
         echo "   Submitting $name for notarization..."
-        if xcrun notarytool submit "$zip_path" --keychain-profile "TablePro" --wait; then
+        submit_output=$(xcrun notarytool submit "$zip_path" --keychain-profile "TablePro" --wait 2>&1)
+        submit_status=$?
+        echo "$submit_output"
+
+        submission_id=$(echo "$submit_output" | grep "id:" | head -1 | awk '{print $2}')
+
+        if [ $submit_status -eq 0 ] && echo "$submit_output" | grep -q "status: Accepted"; then
             echo "   Stapling $name..."
             xcrun stapler staple "$app"
             echo "   ✅ $name notarized and stapled"
         else
             echo "   ❌ Notarization failed for $name"
+            if [ -n "$submission_id" ]; then
+                echo "   📋 Fetching notarization log for $submission_id..."
+                xcrun notarytool log "$submission_id" --keychain-profile "TablePro" 2>&1 || true
+            fi
             exit 1
         fi
         rm -f "$zip_path"

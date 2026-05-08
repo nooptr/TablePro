@@ -9,6 +9,8 @@ import UniformTypeIdentifiers
 
 struct InstalledPluginsView: View {
     private let pluginManager = PluginManager.shared
+    private let registryClient = RegistryClient.shared
+    private let installTracker = PluginInstallTracker.shared
 
     @State private var selectedPluginId: String?
     @State private var searchText = ""
@@ -36,6 +38,11 @@ struct InstalledPluginsView: View {
                     .frame(minWidth: 340)
             }
         }
+        .task {
+            if registryClient.fetchState == .idle {
+                await registryClient.fetchManifest()
+            }
+        }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             guard let provider = providers.first,
                   provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) else {
@@ -46,7 +53,7 @@ struct InstalledPluginsView: View {
                       let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
                 let ext = url.pathExtension.lowercased()
                 guard ext == "zip" || ext == "tableplugin" else { return }
-                Task { @MainActor in
+                Task {
                     installPlugin(from: url)
                 }
             }
@@ -64,7 +71,7 @@ struct InstalledPluginsView: View {
     private var restartBanner: some View {
         HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle")
-                .foregroundStyle(.yellow)
+                .foregroundStyle(Color(nsColor: .systemYellow))
             Text("Restart TablePro to fully unload removed plugins.")
                 .font(.callout)
             Spacer()
@@ -80,8 +87,7 @@ struct InstalledPluginsView: View {
 
     private var pluginList: some View {
         VStack(spacing: 0) {
-            TextField("Filter...", text: $searchText)
-                .textFieldStyle(.roundedBorder)
+            NativeSearchField(text: $searchText, placeholder: String(localized: "Filter..."))
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
 
@@ -126,7 +132,7 @@ struct InstalledPluginsView: View {
             .buttonStyle(.borderless)
             .disabled(selectedPlugin == nil || selectedPlugin?.source == .builtIn)
             .accessibilityLabel(
-                selectedPlugin.map { String(localized: "Uninstall \($0.name)") }
+                selectedPlugin.map { String(format: String(localized: "Uninstall %@"), $0.name) }
                     ?? String(localized: "Uninstall plugin")
             )
 
@@ -169,6 +175,12 @@ struct InstalledPluginsView: View {
 
             Spacer()
 
+            if pluginManager.registryUpdate(for: plugin.id) != nil {
+                Image(systemName: "arrow.up.circle.fill")
+                    .foregroundStyle(Color(nsColor: .systemBlue))
+                    .font(.caption)
+            }
+
             Text(plugin.source == .builtIn ? String(localized: "Built-in") : String(localized: "User"))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -199,12 +211,16 @@ struct InstalledPluginsView: View {
                         .toggleStyle(.switch)
                         .labelsHidden()
                         .controlSize(.small)
-                        .accessibilityLabel(String(localized: "Enable \(selected.name)"))
+                        .accessibilityLabel(String(format: String(localized: "Enable %@"), selected.name))
                     }
 
                     Text("v\(selected.version) · \(selected.source == .builtIn ? String(localized: "Built-in") : String(localized: "User-installed"))")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+
+                    if let registryPlugin = pluginManager.registryUpdate(for: selected.id) {
+                        updateActionView(for: selected, registryPlugin: registryPlugin)
+                    }
 
                     if !selected.pluginDescription.isEmpty {
                         Text(selected.pluginDescription)
@@ -277,13 +293,79 @@ struct InstalledPluginsView: View {
         } else {
             VStack(spacing: 8) {
                 Image(systemName: "puzzlepiece.extension")
-                    .font(.system(size: 32))
+                    .font(.title)
                     .foregroundStyle(.tertiary)
                 Text("Select a Plugin")
                     .font(.headline)
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    // MARK: - Update
+
+    @ViewBuilder
+    private func updateActionView(for plugin: PluginEntry, registryPlugin: RegistryPlugin) -> some View {
+        if let progress = installTracker.state(for: plugin.id) {
+            switch progress.phase {
+            case .downloading(let fraction):
+                HStack(spacing: 8) {
+                    ProgressView(value: fraction)
+                    Text("\(Int(fraction * 100))%")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+            case .installing:
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Updating...")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            case .completed:
+                Label(
+                    String(format: String(localized: "Updated to v%@"), registryPlugin.version),
+                    systemImage: "checkmark.circle.fill"
+                )
+                .foregroundStyle(Color(nsColor: .systemGreen))
+                .font(.callout)
+            case .failed:
+                Button(String(localized: "Retry Update")) { updatePlugin(registryPlugin) }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+        } else {
+            HStack(spacing: 8) {
+                Text(String(format: String(localized: "v%@ available"), registryPlugin.version))
+                    .font(.callout)
+                    .foregroundStyle(Color(nsColor: .systemBlue))
+                Button(String(localized: "Update")) { updatePlugin(registryPlugin) }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+            }
+        }
+    }
+
+    private func updatePlugin(_ registryPlugin: RegistryPlugin) {
+        Task {
+            installTracker.beginInstall(pluginId: registryPlugin.id)
+            do {
+                _ = try await pluginManager.updateFromRegistry(registryPlugin) { fraction in
+                    installTracker.updateProgress(pluginId: registryPlugin.id, fraction: fraction)
+                    if fraction >= 1.0 {
+                        installTracker.markInstalling(pluginId: registryPlugin.id)
+                    }
+                }
+                installTracker.completeInstall(pluginId: registryPlugin.id)
+            } catch {
+                installTracker.failInstall(pluginId: registryPlugin.id, error: error.localizedDescription)
+                errorAlertTitle = String(localized: "Plugin Update Failed")
+                errorAlertMessage = error.localizedDescription
+                showErrorAlert = true
+            }
         }
     }
 
@@ -297,9 +379,11 @@ struct InstalledPluginsView: View {
         panel.canChooseDirectories = false
         panel.treatsFilePackagesAsDirectories = false
 
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-
-        installPlugin(from: url)
+        guard let window = NSApp.keyWindow else { return }
+        panel.beginSheetModal(for: window) { response in
+            guard response == .OK, let url = panel.url else { return }
+            self.installPlugin(from: url)
+        }
     }
 
     private func installPlugin(from url: URL) {
@@ -316,10 +400,10 @@ struct InstalledPluginsView: View {
     }
 
     private func uninstallPlugin(_ plugin: PluginEntry) {
-        Task { @MainActor in
+        Task {
             let confirmed = await AlertHelper.confirmDestructive(
                 title: String(localized: "Uninstall Plugin?"),
-                message: String(localized: "\"\(plugin.name)\" will be removed from your system. This action cannot be undone."),
+                message: String(format: String(localized: "\"%@\" will be removed from your system. This action cannot be undone."), plugin.name),
                 confirmButton: String(localized: "Uninstall"),
                 cancelButton: String(localized: "Cancel")
             )

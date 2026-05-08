@@ -16,8 +16,6 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     private var _currentSchema: String = "public"
 
     private static let logger = Logger(subsystem: "com.TablePro.PostgreSQLDriver", category: "RedshiftPluginDriver")
-    private static let limitRegex = try? NSRegularExpression(pattern: "(?i)\\s+LIMIT\\s+\\d+")
-    private static let offsetRegex = try? NSRegularExpression(pattern: "(?i)\\s+OFFSET\\s+\\d+")
 
     var currentSchema: String? { _currentSchema }
     var supportsSchemas: Bool { true }
@@ -117,18 +115,13 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         )
     }
 
-    func fetchRowCount(query: String) async throws -> Int {
-        let baseQuery = stripLimitOffset(from: query)
-        let countQuery = "SELECT COUNT(*) FROM (\(baseQuery)) AS __count_subquery__"
-        let result = try await execute(query: countQuery)
-        guard let firstRow = result.rows.first, let countStr = firstRow.first else { return 0 }
-        return Int(countStr ?? "0") ?? 0
-    }
+    // MARK: - Streaming
 
-    func fetchRows(query: String, offset: Int, limit: Int) async throws -> PluginQueryResult {
-        let baseQuery = stripLimitOffset(from: query)
-        let paginatedQuery = "\(baseQuery) LIMIT \(limit) OFFSET \(offset)"
-        return try await execute(query: paginatedQuery)
+    func streamRows(query: String) -> AsyncThrowingStream<PluginStreamElement, Error> {
+        guard let pqConn = libpqConnection else {
+            return AsyncThrowingStream { $0.finish(throwing: LibPQPluginError.notConnected) }
+        }
+        return pqConn.streamQuery(query)
     }
 
     // MARK: - Reconnect
@@ -541,10 +534,11 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
 
     func fetchSchemas() async throws -> [String] {
         let result = try await execute(query: """
-            SELECT schema_name FROM information_schema.schemata
-            WHERE schema_name NOT LIKE 'pg_%'
-              AND schema_name <> 'information_schema'
-            ORDER BY schema_name
+            SELECT nspname FROM pg_namespace
+            WHERE nspname NOT LIKE 'pg_%'
+              AND nspname <> 'information_schema'
+              AND has_schema_privilege(current_user, nspname, 'USAGE')
+            ORDER BY nspname
             """)
         return result.rows.compactMap { row in row.first.flatMap { $0 } }
     }
@@ -619,27 +613,44 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         }
     }
 
-    func createDatabase(name: String, charset: String, collation: String?) async throws {
-        let escapedName = name.replacingOccurrences(of: "\"", with: "\"\"")
-        let validCharsets = ["UTF8", "LATIN1", "SQL_ASCII"]
-        let normalizedCharset = charset.uppercased()
-        guard validCharsets.contains(normalizedCharset) else {
-            throw LibPQPluginError(message: "Invalid encoding: \(charset)", sqlState: nil, detail: nil)
+    private static let supportedCollations: [String] = ["CASE_SENSITIVE", "CASE_INSENSITIVE"]
+
+    func createDatabaseFormSpec() async throws -> PluginCreateDatabaseFormSpec? {
+        let options = Self.supportedCollations.map {
+            PluginCreateDatabaseFormSpec.Option(value: $0, label: $0)
+        }
+        let field = PluginCreateDatabaseFormSpec.Field(
+            id: "collate",
+            label: String(localized: "Collation"),
+            kind: .picker(options: options, defaultValue: "CASE_SENSITIVE")
+        )
+        return PluginCreateDatabaseFormSpec(fields: [field])
+    }
+
+    func createDatabase(_ request: PluginCreateDatabaseRequest) async throws {
+        guard let collate = request.values["collate"] else {
+            throw LibPQPluginError(
+                message: String(localized: "Collation is required"),
+                sqlState: nil,
+                detail: nil
+            )
+        }
+        guard Self.supportedCollations.contains(collate) else {
+            throw LibPQPluginError(
+                message: String(format: String(localized: "Invalid collation: %@"), collate),
+                sqlState: nil,
+                detail: nil
+            )
         }
 
-        var query = "CREATE DATABASE \"\(escapedName)\" ENCODING '\(normalizedCharset)'"
-        if let collation = collation {
-            let allowedCollationChars = CharacterSet(
-                charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
-            )
-            let isValidCollation = collation.unicodeScalars.allSatisfy { allowedCollationChars.contains($0) }
-            guard isValidCollation else {
-                throw LibPQPluginError(message: "Invalid collation", sqlState: nil, detail: nil)
-            }
-            let escapedCollation = collation.replacingOccurrences(of: "'", with: "''")
-            query += " LC_COLLATE '\(escapedCollation)'"
-        }
-        _ = try await execute(query: query)
+        let quotedName = request.name.replacingOccurrences(of: "\"", with: "\"\"")
+        let sql = "CREATE DATABASE \"\(quotedName)\" COLLATE \(collate)"
+        _ = try await execute(query: sql)
+    }
+
+    func dropDatabase(name: String) async throws {
+        let escapedName = name.replacingOccurrences(of: "\"", with: "\"\"")
+        _ = try await execute(query: "DROP DATABASE \"\(escapedName)\"")
     }
 
     // MARK: - All Tables Metadata
@@ -662,18 +673,4 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         """
     }
 
-    // MARK: - Helpers
-
-    private func stripLimitOffset(from query: String) -> String {
-        var result = query
-        if let regex = Self.limitRegex {
-            result = regex.stringByReplacingMatches(
-                in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
-        }
-        if let regex = Self.offsetRegex {
-            result = regex.stringByReplacingMatches(
-                in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
-        }
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
 }

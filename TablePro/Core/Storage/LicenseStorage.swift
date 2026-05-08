@@ -26,22 +26,30 @@ final class LicenseStorage {
 
     // MARK: - License Key (Keychain)
 
-    /// Save license key to Keychain
     func saveLicenseKey(_ key: String) {
-        KeychainHelper.shared.saveString(key, forKey: Keys.keychainLicenseKey)
+        KeychainHelper.shared.writeString(key, forKey: Keys.keychainLicenseKey)
     }
 
-    /// Load license key from Keychain
     func loadLicenseKey() -> String? {
-        KeychainHelper.shared.loadString(forKey: Keys.keychainLicenseKey)
+        switch KeychainHelper.shared.readStringResult(forKey: Keys.keychainLicenseKey) {
+        case .found(let value):
+            return value
+        case .locked:
+            Self.logger.warning("License key unavailable — Keychain locked")
+            return nil
+        case .notFound:
+            return nil
+        }
     }
 
-    /// Delete license key from Keychain
     func deleteLicenseKey() {
-        KeychainHelper.shared.delete(key: Keys.keychainLicenseKey)
+        KeychainHelper.shared.delete(forKey: Keys.keychainLicenseKey)
     }
 
     // MARK: - Signed Payload (UserDefaults)
+    // Note: The signed license payload (email, expiry) is stored in UserDefaults rather than
+    // Keychain because it is a verifiable signed blob — the RSA-SHA256 signature is re-verified
+    // on every cold start (LicenseManager). The license key itself is in Keychain.
 
     /// Save cached license (including signed payload) to UserDefaults
     func saveLicense(_ license: License) {
@@ -81,7 +89,11 @@ final class LicenseStorage {
 
     /// Hardware UUID from IOKit, SHA256-hashed for privacy.
     /// Stable across OS reinstalls (tied to hardware).
-    var machineId: String {
+    private lazy var _machineId: String = Self.computeMachineId(defaults: defaults)
+
+    var machineId: String { _machineId }
+
+    private static func computeMachineId(defaults: UserDefaults) -> String {
         let platformExpert = IOServiceGetMatchingService(
             kIOMainPortDefault,
             IOServiceMatching("IOPlatformExpertDevice")
@@ -107,6 +119,11 @@ final class LicenseStorage {
         }
 
         return uuidCF.sha256
+    }
+
+    /// Hardware UUID from IOKit, SHA256-hashed for privacy (uncached, for migration).
+    static func currentMachineId() -> String {
+        computeMachineId(defaults: UserDefaults.standard)
     }
 
     /// Human-readable machine name (e.g., "John's MacBook Pro")

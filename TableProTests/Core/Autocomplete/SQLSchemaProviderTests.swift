@@ -40,9 +40,7 @@ private final class MockDatabaseDriver: DatabaseDriver, @unchecked Sendable {
         QueryResult(columns: [], columnTypes: [], rows: [], rowsAffected: 0, executionTime: 0, error: nil)
     }
 
-    func fetchRowCount(query: String) async throws -> Int { 0 }
-
-    func fetchRows(query: String, offset: Int, limit: Int) async throws -> QueryResult {
+    func executeUserQuery(query: String, rowCap: Int?, parameters: [Any?]?) async throws -> QueryResult {
         QueryResult(columns: [], columnTypes: [], rows: [], rowsAffected: 0, executionTime: 0, error: nil)
     }
 
@@ -239,8 +237,8 @@ struct SQLSchemaProviderTests {
         #expect(driver.fetchColumnsCallCount == countBeforeBC + 2)
     }
 
-    @Test("invalidateCache clears tables, columns, and LRU tracking")
-    func invalidateCacheClearsEverything() async {
+    @Test("resetForDatabase clears columns, updates tables, and sets driver")
+    func resetForDatabaseClearsAndUpdates() async {
         let driver = MockDatabaseDriver()
         driver.tablesToReturn = [TestFixtures.makeTableInfo(name: "users")]
         driver.columnsToReturn = [
@@ -251,13 +249,18 @@ struct SQLSchemaProviderTests {
         await provider.loadSchema(using: driver, connection: TestFixtures.makeConnection())
         _ = await provider.getColumns(for: "users")
 
-        await provider.invalidateCache()
+        let newTables = [TestFixtures.makeTableInfo(name: "orders")]
+        let newDriver = MockDatabaseDriver()
+        await provider.resetForDatabase("new_db", tables: newTables, driver: newDriver)
 
         let tables = await provider.getTables()
-        #expect(tables.isEmpty)
+        #expect(tables.count == 1)
+        #expect(tables.first?.name == "orders")
 
-        let columns = await provider.getColumns(for: "users")
-        #expect(columns.isEmpty)
+        // Column cache should be cleared (requires re-fetch)
+        newDriver.columnsToReturn = ["orders": [TestFixtures.makeColumnInfo(name: "order_id")]]
+        let columns = await provider.getColumns(for: "orders")
+        #expect(columns.first?.name == "order_id")
     }
 
     @Test("getColumns returns empty when driver is not available")

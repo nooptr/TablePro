@@ -11,32 +11,43 @@ import CLibSSH2
 internal struct AgentAuthenticator: SSHAuthenticator {
     private static let logger = Logger(subsystem: "com.TablePro", category: "AgentAuthenticator")
 
-    /// Protects setenv/unsetenv of SSH_AUTH_SOCK across concurrent tunnel setups
-    private static let agentSocketLock = NSLock()
-
     let socketPath: String?
 
-    func authenticate(session: OpaquePointer, username: String) throws {
-        // Save original SSH_AUTH_SOCK so we can restore it
-        let originalSocketPath = ProcessInfo.processInfo.environment["SSH_AUTH_SOCK"]
-        let needsSocketOverride = socketPath != nil
-
-        if let overridePath = socketPath.map(SSHPathUtilities.expandTilde), needsSocketOverride {
-            Self.agentSocketLock.lock()
-            Self.logger.debug("Using custom SSH agent socket: \(overridePath, privacy: .private)")
-            setenv("SSH_AUTH_SOCK", overridePath, 1)
-        }
-
-        defer {
-            if needsSocketOverride {
-                // Restore original SSH_AUTH_SOCK
-                if let originalSocketPath {
-                    setenv("SSH_AUTH_SOCK", originalSocketPath, 1)
-                } else {
-                    unsetenv("SSH_AUTH_SOCK")
-                }
-                Self.agentSocketLock.unlock()
+    /// Resolve SSH_AUTH_SOCK via launchctl for GUI apps that don't inherit shell env.
+    private static func resolveSocketViaLaunchctl() -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = ["getenv", "SSH_AUTH_SOCK"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let path, !path.isEmpty {
+                logger.debug("Resolved SSH_AUTH_SOCK via launchctl: \(path, privacy: .private)")
+                return path
             }
+        } catch {
+            logger.warning("Failed to resolve SSH_AUTH_SOCK via launchctl: \(error.localizedDescription)")
+        }
+        return nil
+    }
+
+    func authenticate(session: OpaquePointer, username: String) throws {
+        // Resolve the effective socket path:
+        // - Custom path: use it directly
+        // - System default (nil): use process env, or fall back to launchctl
+        //   (GUI apps launched from Finder may not inherit SSH_AUTH_SOCK)
+        let effectivePath: String?
+        if let customPath = socketPath {
+            effectivePath = SSHPathUtilities.expandTilde(customPath)
+        } else if ProcessInfo.processInfo.environment["SSH_AUTH_SOCK"] != nil {
+            effectivePath = nil // already set in process env
+        } else {
+            effectivePath = Self.resolveSocketViaLaunchctl()
         }
 
         guard let agent = libssh2_agent_init(session) else {
@@ -46,6 +57,15 @@ internal struct AgentAuthenticator: SSHAuthenticator {
         defer {
             libssh2_agent_disconnect(agent)
             libssh2_agent_free(agent)
+        }
+
+        // Use libssh2's API to set the socket path directly — avoids mutating
+        // the process-global SSH_AUTH_SOCK environment variable.
+        if let path = effectivePath {
+            Self.logger.debug("Setting agent socket path: \(path, privacy: .private)")
+            path.withCString { cPath in
+                libssh2_agent_set_identity_path(agent, cPath)
+            }
         }
 
         var rc = libssh2_agent_connect(agent)
@@ -90,6 +110,6 @@ internal struct AgentAuthenticator: SSHAuthenticator {
         }
 
         Self.logger.error("SSH agent authentication failed: no identity accepted")
-        throw SSHTunnelError.authenticationFailed
+        throw SSHTunnelError.authenticationFailed(reason: .agentRejected)
     }
 }

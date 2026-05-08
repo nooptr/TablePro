@@ -1,54 +1,34 @@
-//
-//  QueryHistoryManager.swift
-//  TablePro
-//
-//  Thread-safe coordinator for query history
-//
-
 import Foundation
 
-/// Thread-safe manager for query history
-/// NOT an ObservableObject - uses NotificationCenter for UI communication
 final class QueryHistoryManager {
     static let shared = QueryHistoryManager()
 
     private let storage: QueryHistoryStorage
 
-    /// Creates an isolated manager with its own storage. For testing only.
-    init(isolatedStorage: QueryHistoryStorage) {
-        self.storage = isolatedStorage
+    init(storage: QueryHistoryStorage = .shared) {
+        self.storage = storage
     }
 
-    private init() {
-        self.storage = QueryHistoryStorage.shared
-    }
-
-    /// Perform cleanup if auto-cleanup is enabled in settings
-    /// Should be called from app startup (MainActor context)
     @MainActor
-    func performStartupCleanup() {
-        // Check if auto cleanup is enabled
+    func performStartupCleanup() async {
         guard AppSettingsManager.shared.history.autoCleanup else { return }
 
-        // Update the settings cache before cleanup
-        storage.updateSettingsCache()
-
-        // Perform cleanup
-        storage.cleanup()
+        let settings = AppSettingsManager.shared.history
+        await storage.updateSettingsCache(maxEntries: settings.maxEntries, maxDays: settings.maxDays)
+        await storage.cleanup()
     }
 
-    /// Apply settings changes directly (called by AppSettingsManager)
     @MainActor
-    func applySettingsChange() {
-        storage.updateSettingsCache()
+    func applySettingsChange() async {
+        let settings = AppSettingsManager.shared.history
+        await storage.updateSettingsCache(maxEntries: settings.maxEntries, maxDays: settings.maxDays)
         if AppSettingsManager.shared.history.autoCleanup {
-            storage.cleanup()
+            await storage.cleanup()
         }
     }
 
     // MARK: - History Capture
 
-    /// Record a query execution (fire-and-forget background write)
     func recordQuery(
         query: String,
         connectionId: UUID,
@@ -56,8 +36,14 @@ final class QueryHistoryManager {
         executionTime: TimeInterval,
         rowCount: Int,
         wasSuccessful: Bool,
-        errorMessage: String? = nil
+        errorMessage: String? = nil,
+        parameterValues: [QueryParameter]? = nil
     ) {
+        var encodedParams: String?
+        if let parameterValues, !parameterValues.isEmpty {
+            encodedParams = try? String(data: JSONEncoder().encode(parameterValues), encoding: .utf8)
+        }
+
         let entry = QueryHistoryEntry(
             query: query,
             connectionId: connectionId,
@@ -65,7 +51,8 @@ final class QueryHistoryManager {
             executionTime: executionTime,
             rowCount: rowCount,
             wasSuccessful: wasSuccessful,
-            errorMessage: errorMessage
+            errorMessage: errorMessage,
+            parameterValues: encodedParams
         )
 
         Task {
@@ -83,7 +70,6 @@ final class QueryHistoryManager {
 
     // MARK: - History Retrieval
 
-    /// Fetch history entries asynchronously
     func fetchHistory(
         limit: Int = 100,
         offset: Int = 0,
@@ -100,7 +86,6 @@ final class QueryHistoryManager {
         )
     }
 
-    /// Search queries using FTS5 full-text search
     func searchQueries(_ text: String) async -> [QueryHistoryEntry] {
         if text.trimmingCharacters(in: .whitespaces).isEmpty {
             return await fetchHistory()
@@ -108,7 +93,6 @@ final class QueryHistoryManager {
         return await storage.fetchHistory(searchText: text)
     }
 
-    /// Delete a history entry asynchronously
     func deleteHistory(id: UUID) async -> Bool {
         let success = await storage.deleteHistory(id: id)
         if success {
@@ -119,12 +103,10 @@ final class QueryHistoryManager {
         return success
     }
 
-    /// Get total history count asynchronously
     func getHistoryCount() async -> Int {
         await storage.getHistoryCount()
     }
 
-    /// Clear all history entries asynchronously
     func clearAllHistory() async -> Bool {
         let success = await storage.clearAllHistory()
         if success {
@@ -137,12 +119,10 @@ final class QueryHistoryManager {
 
     // MARK: - Cleanup
 
-    /// Manually trigger cleanup (normally runs automatically)
-    /// Must be called from MainActor context
     @MainActor
-    func cleanup() {
-        // Update settings cache before cleanup
-        storage.updateSettingsCache()
-        storage.cleanup()
+    func cleanup() async {
+        let settings = AppSettingsManager.shared.history
+        await storage.updateSettingsCache(maxEntries: settings.maxEntries, maxDays: settings.maxDays)
+        await storage.cleanup()
     }
 }

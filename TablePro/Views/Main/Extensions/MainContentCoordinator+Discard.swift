@@ -7,6 +7,9 @@
 
 import AppKit
 import Foundation
+import os
+
+private let discardLogger = Logger(subsystem: "com.TablePro", category: "MainContentCoordinator+Discard")
 
 extension MainContentCoordinator {
     // MARK: - Table Creation
@@ -32,7 +35,11 @@ extension MainContentCoordinator {
             throw DatabaseError.notConnected
         }
 
-        try await driver.beginTransaction()
+        let useTransaction = driver.supportsTransactions
+
+        if useTransaction {
+            try await driver.beginTransaction()
+        }
 
         do {
             for stmt in statements {
@@ -42,9 +49,17 @@ extension MainContentCoordinator {
                     _ = try await driver.executeParameterized(query: stmt.sql, parameters: stmt.parameters)
                 }
             }
-            try await driver.commitTransaction()
+            if useTransaction {
+                try await driver.commitTransaction()
+            }
         } catch {
-            try? await driver.rollbackTransaction()
+            if useTransaction {
+                do {
+                    try await driver.rollbackTransaction()
+                } catch {
+                    discardLogger.error("Rollback failed: \(error.localizedDescription, privacy: .public)")
+                }
+            }
             throw error
         }
     }
@@ -56,30 +71,61 @@ extension MainContentCoordinator {
         pendingDeletes: inout Set<String>
     ) {
         let originalValues = changeManager.getOriginalValues()
-        if let index = tabManager.selectedTabIndex {
-            for (rowIndex, columnIndex, originalValue) in originalValues {
-                if rowIndex < tabManager.tabs[index].resultRows.count,
-                   columnIndex < tabManager.tabs[index].resultRows[rowIndex].count {
-                    tabManager.tabs[index].resultRows[rowIndex][columnIndex] = originalValue
+        var deltas: [Delta] = []
+        if let (tab, _) = tabManager.selectedTabAndIndex {
+            let tabId = tab.id
+            let insertedIDs = collectInsertedRowIDs(
+                tabId: tabId,
+                indices: changeManager.insertedRowIndices
+            )
+            let edits = originalValues.map { (row: $0.0, column: $0.1, value: $0.2) }
+            if !edits.isEmpty {
+                let editDelta = mutateActiveTableRows(for: tabId) { rows in
+                    rows.editMany(edits)
+                }
+                if editDelta != .none {
+                    deltas.append(editDelta)
                 }
             }
+            if !insertedIDs.isEmpty {
+                let removeDelta = mutateActiveTableRows(for: tabId) { rows in
+                    rows.remove(rowIDs: insertedIDs)
+                }
+                if removeDelta != .none {
+                    deltas.append(removeDelta)
+                }
+            }
+        }
 
-            let insertedIndices = changeManager.insertedRowIndices.sorted(by: >)
-            for rowIndex in insertedIndices {
-                if rowIndex < tabManager.tabs[index].resultRows.count {
-                    tabManager.tabs[index].resultRows.remove(at: rowIndex)
-                }
-            }
+        for delta in deltas {
+            dataTabDelegate?.tableViewCoordinator?.applyDelta(delta)
+        }
+
+        if let tableName = tabManager.selectedTab?.tableContext.tableName {
+            saveLastFilters(for: tableName)
         }
 
         pendingTruncates.removeAll()
         pendingDeletes.removeAll()
         changeManager.clearChangesAndUndoHistory()
 
-        if let index = tabManager.selectedTabIndex {
-            tabManager.tabs[index].pendingChanges = TabPendingChanges()
+        if let (_, index) = tabManager.selectedTabAndIndex {
+            tabManager.tabs[index].pendingChanges = TabChangeSnapshot()
         }
 
-        reloadSidebar()
+        Task { await refreshTables() }
+    }
+
+    private func collectInsertedRowIDs(tabId: UUID, indices: Set<Int>) -> Set<RowID> {
+        guard !indices.isEmpty else { return [] }
+        guard let tableRows = tabSessionRegistry.existingTableRows(for: tabId) else { return [] }
+        var ids = Set<RowID>()
+        for index in indices where index >= 0 && index < tableRows.rows.count {
+            let id = tableRows.rows[index].id
+            if id.isInserted {
+                ids.insert(id)
+            }
+        }
+        return ids
     }
 }

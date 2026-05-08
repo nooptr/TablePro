@@ -14,7 +14,7 @@ final class AppSettingsStorage {
     static let shared = AppSettingsStorage()
     private static let logger = Logger(subsystem: "com.TablePro", category: "AppSettingsStorage")
 
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
 
@@ -30,11 +30,16 @@ final class AppSettingsStorage {
         static let keyboard = "com.TablePro.settings.keyboard"
         static let ai = "com.TablePro.settings.ai"
         static let sync = "com.TablePro.settings.sync"
+        static let terminal = "com.TablePro.settings.terminal"
+        static let mcp = "com.TablePro.settings.mcp"
         static let lastConnectionId = "com.TablePro.settings.lastConnectionId"
+        static let lastOpenConnectionIds = "com.TablePro.settings.lastOpenConnectionIds"
         static let hasCompletedOnboarding = "com.TablePro.settings.hasCompletedOnboarding"
     }
 
-    private init() {}
+    init(userDefaults: UserDefaults = .standard) {
+        self.defaults = userDefaults
+    }
 
     // MARK: - General Settings
 
@@ -127,6 +132,26 @@ final class AppSettingsStorage {
         save(settings, key: Keys.sync)
     }
 
+    // MARK: - Terminal Settings
+
+    func loadTerminal() -> TerminalSettings {
+        load(key: Keys.terminal, default: .default)
+    }
+
+    func saveTerminal(_ settings: TerminalSettings) {
+        save(settings, key: Keys.terminal)
+    }
+
+    // MARK: - MCP Settings
+
+    func loadMCP() -> MCPSettings {
+        load(key: Keys.mcp, default: .default)
+    }
+
+    func saveMCP(_ settings: MCPSettings) {
+        save(settings, key: Keys.mcp)
+    }
+
     // MARK: - Last Connection (for Reopen Last Session)
 
     /// Load the last used connection ID
@@ -143,6 +168,25 @@ final class AppSettingsStorage {
             defaults.set(connectionId.uuidString, forKey: Keys.lastConnectionId)
         } else {
             defaults.removeObject(forKey: Keys.lastConnectionId)
+        }
+    }
+
+    // MARK: - Last Open Connections (for multi-session restore)
+
+    /// Load all connection IDs that were open when the app last quit
+    func loadLastOpenConnectionIds() -> [UUID] {
+        guard let strings = defaults.stringArray(forKey: Keys.lastOpenConnectionIds) else {
+            return []
+        }
+        return strings.compactMap { UUID(uuidString: $0) }
+    }
+
+    /// Save all currently open connection IDs for restoration on next launch
+    func saveLastOpenConnectionIds(_ connectionIds: [UUID]) {
+        if connectionIds.isEmpty {
+            defaults.removeObject(forKey: Keys.lastOpenConnectionIds)
+        } else {
+            defaults.set(connectionIds.map(\.uuidString), forKey: Keys.lastOpenConnectionIds)
         }
     }
 
@@ -199,6 +243,8 @@ final class AppSettingsStorage {
         saveKeyboard(.default)
         saveAI(.default)
         saveSync(.default)
+        saveTerminal(.default)
+        saveMCP(.default)
     }
 
     // MARK: - Helpers

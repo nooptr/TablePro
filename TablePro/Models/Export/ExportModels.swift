@@ -11,7 +11,8 @@ import TableProPluginKit
 /// Defines the export mode: either exporting database tables or in-memory query results.
 enum ExportMode {
     case tables(connection: DatabaseConnection, preselectedTables: Set<String>)
-    case queryResults(connection: DatabaseConnection, rowBuffer: RowBuffer, suggestedFileName: String)
+    case queryResults(connection: DatabaseConnection, tableRows: TableRows, suggestedFileName: String)
+    case streamingQuery(connection: DatabaseConnection, query: String, suggestedFileName: String)
 }
 
 // MARK: - Export Configuration
@@ -22,14 +23,14 @@ struct ExportConfiguration {
     var fileName: String = "export"
 
     var fullFileName: String {
-        guard let plugin = PluginManager.shared.exportPlugins[formatId] else {
+        guard let plugin = PluginManager.shared.exportPlugin(forFormat: formatId) else {
             return "\(fileName).\(formatId)"
         }
         return "\(fileName).\(plugin.currentFileExtension)"
     }
 
     var fileExtension: String {
-        guard let plugin = PluginManager.shared.exportPlugins[formatId] else {
+        guard let plugin = PluginManager.shared.exportPlugin(forFormat: formatId) else {
             return formatId
         }
         return plugin.currentFileExtension

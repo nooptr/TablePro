@@ -51,11 +51,13 @@ protocol DatabaseDriver: AnyObject {
     /// - Returns: Query result
     func executeParameterized(query: String, parameters: [Any?]) async throws -> QueryResult
 
-    /// Fetch total row count for a query (wraps with COUNT(*))
-    func fetchRowCount(query: String) async throws -> Int
-
-    /// Fetch rows with LIMIT/OFFSET pagination
-    func fetchRows(query: String, offset: Int, limit: Int) async throws -> QueryResult
+    /// Execute user-supplied SQL with optional row cap and parameters.
+    /// - Parameters:
+    ///   - query: SQL passed through unchanged
+    ///   - rowCap: Maximum rows to return; nil means no cap
+    ///   - parameters: Optional parameter list; nil means no parameter binding
+    /// - Returns: Query result with `isTruncated` set when the cap clipped rows
+    func executeUserQuery(query: String, rowCap: Int?, parameters: [Any?]?) async throws -> QueryResult
 
     // MARK: - Schema Operations
 
@@ -64,6 +66,9 @@ protocol DatabaseDriver: AnyObject {
 
     /// Fetch columns for a specific table
     func fetchColumns(table: String) async throws -> [ColumnInfo]
+
+    /// Fetch columns for a table in a specific schema (for cross-schema FK lookups)
+    func fetchColumns(table: String, schema: String?) async throws -> [ColumnInfo]
 
     /// Fetch columns for ALL tables in a single batch query (avoids N+1).
     /// Returns a dictionary keyed by table name.
@@ -118,8 +123,20 @@ protocol DatabaseDriver: AnyObject {
     /// Default implementation falls back to per-database calls.
     func fetchAllDatabaseMetadata() async throws -> [DatabaseMetadata]
 
-    /// Create a new database
-    func createDatabase(name: String, charset: String, collation: String?) async throws
+    func createDatabaseFormSpec() async throws -> CreateDatabaseFormSpec?
+
+    func createDatabase(_ request: CreateDatabaseRequest) async throws
+
+    func dropDatabase(name: String) async throws
+
+    // MARK: - Maintenance
+
+    /// Returns the list of supported maintenance operations (e.g. "VACUUM", "ANALYZE").
+    /// Returns nil if maintenance is not supported.
+    func supportedMaintenanceOperations() -> [String]?
+
+    /// Generates SQL statements for a maintenance operation.
+    func maintenanceStatements(operation: String, table: String?, options: [String: String]) -> [String]?
 
     // MARK: - Query Cancellation
 
@@ -128,6 +145,9 @@ protocol DatabaseDriver: AnyObject {
     func cancelQuery() throws
 
     // MARK: - Transaction Management
+
+    /// Whether this driver supports transactions (e.g., Cloudflare D1, ClickHouse do not)
+    var supportsTransactions: Bool { get }
 
     /// Begin a transaction
     func beginTransaction() async throws
@@ -202,10 +222,29 @@ extension DatabaseDriver {
     func generateIndexDefinitionSQL(index: PluginIndexDefinition, tableName: String?) -> String? { nil }
     func generateForeignKeyDefinitionSQL(fk: PluginForeignKeyDefinition) -> String? { nil }
 
+    func fetchColumns(table: String, schema: String?) async throws -> [ColumnInfo] {
+        try await fetchColumns(table: table)
+    }
+
     func testConnection() async throws -> Bool {
         try await connect()
         disconnect()
         return true
+    }
+
+    func dropDatabase(name: String) async throws {
+        throw NSError(domain: "DatabaseDriver", code: -1,
+                      userInfo: [NSLocalizedDescriptionKey: "Drop database is not supported by this driver"])
+    }
+
+    func createDatabaseFormSpec() async throws -> CreateDatabaseFormSpec? { nil }
+
+    func createDatabase(_ request: CreateDatabaseRequest) async throws {
+        throw NSError(
+            domain: "DatabaseDriver",
+            code: -1,
+            userInfo: [NSLocalizedDescriptionKey: "Create database is not supported by this driver"]
+        )
     }
 
     /// Default fetchAllDatabaseMetadata: falls back to per-database calls (N+1).
@@ -269,7 +308,8 @@ extension DatabaseDriver {
                 let columns = try await fetchColumns(table: table.name)
                 result[table.name] = columns
             } catch {
-                // Skip tables whose columns can't be fetched
+                Logger(subsystem: "com.TablePro", category: "DatabaseDriver")
+                    .debug("Skipping columns for table '\(table.name)': \(error.localizedDescription)")
             }
         }
         return result
@@ -305,10 +345,14 @@ extension DatabaseDriver {
 
     func fetchApproximateRowCount(table: String) async throws -> Int? { nil }
 
+    func supportedMaintenanceOperations() -> [String]? { nil }
+    func maintenanceStatements(operation: String, table: String?, options: [String: String]) -> [String]? { nil }
+
     /// Default: no schema support (MySQL/SQLite don't use schemas in the same way)
     func fetchSchemas() async throws -> [String] { [] }
 
-    /// Default no-op implementation for drivers that don't support query cancellation
+    var supportsTransactions: Bool { true }
+
     func cancelQuery() throws {
         // No-op by default
     }
@@ -326,19 +370,28 @@ extension DatabaseDriver {
 enum DatabaseDriverFactory {
     private static let logger = Logger(subsystem: "com.TablePro", category: "DatabaseDriverFactory")
 
+    /// Async variant that awaits background plugin loading instead of blocking the main thread.
+    /// Preferred for all call sites that are already in an async context.
     static func createDriver(
+        for connection: DatabaseConnection,
+        passwordOverride: String? = nil,
+        awaitPlugins: Bool
+    ) async throws -> DatabaseDriver {
+        let pluginId = connection.type.pluginTypeId
+        if PluginManager.shared.driverPlugin(for: connection.type) == nil,
+           !PluginManager.shared.hasFinishedInitialLoad {
+            logger.info("Plugin '\(pluginId)' not loaded yet — waiting for background load")
+            await PluginManager.shared.waitForInitialLoad()
+        }
+        return try createDriverFromPlugin(for: connection, passwordOverride: passwordOverride)
+    }
+
+    private static func createDriverFromPlugin(
         for connection: DatabaseConnection,
         passwordOverride: String? = nil
     ) throws -> DatabaseDriver {
         let pluginId = connection.type.pluginTypeId
-        // If the plugin isn't registered yet and background loading hasn't finished,
-        // fall back to synchronous loading for this critical code path.
-        if PluginManager.shared.driverPlugins[pluginId] == nil,
-           !PluginManager.shared.hasFinishedInitialLoad {
-            logger.warning("Plugin '\(pluginId)' not loaded yet — performing synchronous load")
-            PluginManager.shared.loadPendingPlugins()
-        }
-        guard let plugin = PluginManager.shared.driverPlugins[pluginId] else {
+        guard let plugin = PluginManager.shared.driverPlugin(for: connection.type) else {
             if connection.type.isDownloadablePlugin {
                 throw PluginError.pluginNotInstalled(connection.type.rawValue)
             }

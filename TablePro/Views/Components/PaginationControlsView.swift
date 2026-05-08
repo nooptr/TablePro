@@ -31,11 +31,11 @@ struct PaginationControlsView: View {
 
             // Settings button (gear icon) - opens popover
             Button(action: { showSettings.toggle() }) {
-                Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 12))
+                Image(systemName: "gearshape")
+                    .frame(width: 24, height: 24)
             }
             .buttonStyle(.borderless)
-            .help("Pagination Settings")
+            .help(String(localized: "Pagination Settings"))
             .popover(isPresented: $showSettings, arrowEdge: .top) {
                 settingsPopover
             }
@@ -59,12 +59,13 @@ struct PaginationControlsView: View {
             // Previous page button
             Button(action: onPrevious) {
                 Image(systemName: "chevron.left")
-                    .font(.system(size: 11))
+                    .imageScale(.small)
+                    .frame(width: 24, height: 24)
             }
             .buttonStyle(.borderless)
             .disabled(!pagination.hasPreviousPage || pagination.isLoading)
-            .help("Previous Page (⌘[)")
-            .keyboardShortcut("[", modifiers: .command)
+            .help(String(localized: "Previous Page (⌘[)"))
+            .optionalKeyboardShortcut(AppSettingsManager.shared.keyboard.keyboardShortcut(for: .previousPage))
 
             // Page indicator: "1 of 25"
             Text("\(pagination.currentPage) of \(pagination.totalPages)")
@@ -80,61 +81,54 @@ struct PaginationControlsView: View {
             // Next page button
             Button(action: onNext) {
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 11))
+                    .imageScale(.small)
+                    .frame(width: 24, height: 24)
             }
             .buttonStyle(.borderless)
             .disabled(!pagination.hasNextPage || pagination.isLoading)
-            .help("Next Page (⌘])")
-            .keyboardShortcut("]", modifiers: .command)
+            .help(String(localized: "Next Page (⌘])"))
+            .optionalKeyboardShortcut(AppSettingsManager.shared.keyboard.keyboardShortcut(for: .nextPage))
         }
     }
 
     // MARK: - Settings Popover
 
     private var settingsPopover: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // Limit field
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Limit")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                TextField("Limit", text: $limitText)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 120)
-                    .focused($isLimitFocused)
-                    .onSubmit {
-                        applyLimitChange()
+        VStack(spacing: 0) {
+            Form {
+                Section {
+                    LabeledContent(String(localized: "Limit")) {
+                        TextField("", text: $limitText)
+                            .multilineTextAlignment(.trailing)
+                            .focused($isLimitFocused)
+                            .onSubmit { applyLimitChange() }
                     }
-            }
-
-            // Offset field
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Offset")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                TextField("Offset", text: $offsetText)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 120)
-                    .focused($isOffsetFocused)
-                    .onSubmit {
-                        applyOffsetChange()
+                    LabeledContent(String(localized: "Offset")) {
+                        TextField("", text: $offsetText)
+                            .multilineTextAlignment(.trailing)
+                            .focused($isOffsetFocused)
+                            .onSubmit { applyOffsetChange() }
                     }
+                }
             }
+            .formStyle(.grouped)
+            .scrollContentBackground(.hidden)
 
-            // Go button
-            Button(action: {
+            Divider()
+
+            Button {
                 applyLimitChange()
                 applyOffsetChange()
                 showSettings = false
-            }) {
-                Text("Go")
-                    .frame(maxWidth: .infinity)
+            } label: {
+                Text("Go").frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .controlSize(.small)
+            .controlSize(.regular)
+            .keyboardShortcut(.defaultAction)
+            .padding(12)
         }
-        .padding(12)
-        .frame(width: 160)
+        .frame(width: 220)
     }
 
     // MARK: - Helpers

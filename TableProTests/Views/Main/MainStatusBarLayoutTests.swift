@@ -5,33 +5,33 @@
 
 import Foundation
 import SwiftUI
-import Testing
-
 @testable import TablePro
+import Testing
 
 @Suite("MainStatusBarView Layout")
 @MainActor
 struct MainStatusBarLayoutTests {
-    @Test("Status bar can be instantiated with nil tab")
-    func instantiateWithNilTab() {
-        let filterManager = FilterStateManager()
-        let colVisManager = ColumnVisibilityManager()
+    @Test("Status bar can be instantiated with empty snapshot")
+    func instantiateWithEmptySnapshot() {
         let view = MainStatusBarView(
-            tab: nil,
-            filterStateManager: filterManager,
-            columnVisibilityManager: colVisManager,
+            snapshot: StatusBarSnapshot(tab: nil, tableRows: nil),
+            filterState: TabFilterState(),
+            hiddenColumns: [],
             allColumns: [],
             selectedRowIndices: [],
-            showStructure: .constant(false),
+            viewMode: .constant(.data),
             onFirstPage: {},
             onPreviousPage: {},
             onNextPage: {},
             onLastPage: {},
             onLimitChange: { _ in },
             onOffsetChange: { _ in },
-            onPaginationGo: {}
+            onPaginationGo: {},
+            onToggleColumn: { _ in },
+            onShowAllColumns: {},
+            onHideAllColumns: { _ in },
+            onToggleFilters: {}
         )
-        // Smoke test: view constructs without error
         #expect(type(of: view.body) != Never.self)
     }
 }

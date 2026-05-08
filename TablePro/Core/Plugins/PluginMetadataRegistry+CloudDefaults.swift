@@ -31,7 +31,8 @@ extension PluginMetadataRegistry {
                     supportsForeignKeyDisable: false,
                     supportsReadOnlyMode: true,
                     supportsQueryProgress: false,
-                    requiresReconnectForDatabaseSwitch: false
+                    requiresReconnectForDatabaseSwitch: false,
+                    supportsDropDatabase: false
                 ),
                 schema: PluginMetadataSnapshot.SchemaInfo(
                     defaultSchemaName: "",
@@ -145,7 +146,9 @@ extension PluginMetadataRegistry {
                             placeholder: "http://localhost:8000 (DynamoDB Local)",
                             section: .authentication
                         ),
-                    ]
+                    ],
+                    category: .cloud,
+                    tagline: String(localized: "AWS managed key-value/document store")
                 )
             )),
             ("BigQuery", PluginMetadataSnapshot(
@@ -156,7 +159,8 @@ extension PluginMetadataRegistry {
                     ExplainVariant(id: "dryrun", label: "Dry Run (Cost)", sqlPrefix: "EXPLAIN")
                 ],
                 pathFieldRole: .database,
-                supportsHealthMonitor: true, urlSchemes: [], postConnectActions: [],
+                supportsHealthMonitor: true, urlSchemes: [],
+                postConnectActions: [.selectSchemaFromLastSession],
                 brandColorHex: "#4285F4",
                 queryLanguageName: "SQL", editorLanguage: .sql,
                 connectionMode: .apiOnly, supportsDatabaseSwitching: false,
@@ -171,7 +175,8 @@ extension PluginMetadataRegistry {
                     supportsForeignKeyDisable: false,
                     supportsReadOnlyMode: true,
                     supportsQueryProgress: false,
-                    requiresReconnectForDatabaseSwitch: false
+                    requiresReconnectForDatabaseSwitch: false,
+                    supportsDropDatabase: true
                 ),
                 schema: PluginMetadataSnapshot.SchemaInfo(
                     defaultSchemaName: "",
@@ -330,7 +335,9 @@ extension PluginMetadataRegistry {
                             fieldType: .number,
                             section: .advanced
                         )
-                    ]
+                    ],
+                    category: .analytical,
+                    tagline: String(localized: "Google Cloud serverless data warehouse")
                 )
             ))
         ]

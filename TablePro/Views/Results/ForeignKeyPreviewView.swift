@@ -24,6 +24,13 @@ struct ForeignKeyPreviewView: View {
 
     private static let logger = Logger(subsystem: "com.TablePro", category: "FKPreview")
 
+    private var referencedTableDisplay: String {
+        if let schema = fkInfo.referencedSchema {
+            return "\(schema).\(fkInfo.referencedTable)"
+        }
+        return fkInfo.referencedTable
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -41,9 +48,11 @@ struct ForeignKeyPreviewView: View {
 
     private var header: some View {
         HStack {
-            Text("\(fkInfo.column) → \(fkInfo.referencedTable).\(fkInfo.referencedColumn)")
-                .font(.system(size: 11, design: .monospaced))
+            Text("\(fkInfo.column) → \(referencedTableDisplay).\(fkInfo.referencedColumn)")
+                .font(.system(.subheadline, design: .monospaced))
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
             Spacer()
         }
         .padding(.horizontal, 10)
@@ -57,7 +66,7 @@ struct ForeignKeyPreviewView: View {
         if cellValue == nil {
             Text("NULL — no referenced row")
                 .foregroundStyle(.secondary)
-                .font(.system(size: 12))
+                .font(.callout)
                 .frame(maxWidth: .infinity, alignment: .center)
                 .frame(height: 60)
         } else if isLoading {
@@ -66,13 +75,13 @@ struct ForeignKeyPreviewView: View {
                 .frame(height: 60)
         } else if let errorMessage {
             Text(errorMessage)
-                .foregroundStyle(.red)
-                .font(.system(size: 12))
+                .foregroundStyle(Color(nsColor: .systemRed))
+                .font(.callout)
                 .padding(10)
         } else if values.isEmpty {
             Text("Referenced row not found")
                 .foregroundStyle(.secondary)
-                .font(.system(size: 12))
+                .font(.callout)
                 .frame(maxWidth: .infinity, alignment: .center)
                 .frame(height: 60)
         } else {
@@ -82,20 +91,20 @@ struct ForeignKeyPreviewView: View {
                         let (col, value) = pair
                         HStack(alignment: .top, spacing: 8) {
                             Text(col)
-                                .font(.system(size: 11, design: .monospaced))
+                                .font(.system(.subheadline, design: .monospaced))
                                 .foregroundStyle(.secondary)
                                 .frame(width: 120, alignment: .trailing)
                                 .lineLimit(1)
 
                             if let val = value {
                                 Text(val)
-                                    .font(.system(size: 12, design: .monospaced))
+                                    .font(.system(.callout, design: .monospaced))
                                     .foregroundStyle(.primary)
                                     .lineLimit(3)
                                     .textSelection(.enabled)
                             } else {
                                 Text("NULL")
-                                    .font(.system(size: 12, design: .monospaced))
+                                    .font(.system(.callout, design: .monospaced))
                                     .foregroundStyle(.tertiary)
                                     .italic()
                             }
@@ -118,7 +127,7 @@ struct ForeignKeyPreviewView: View {
                 onNavigate()
             } label: {
                 Label(
-                    String(format: String(localized: "Open %@"), fkInfo.referencedTable),
+                    String(format: String(localized: "Open %@"), referencedTableDisplay),
                     systemImage: "arrow.right"
                 )
             }
@@ -145,7 +154,12 @@ struct ForeignKeyPreviewView: View {
             return
         }
 
-        let quotedTable = driver.quoteIdentifier(fkInfo.referencedTable)
+        let quotedTable: String
+        if let schema = fkInfo.referencedSchema {
+            quotedTable = "\(driver.quoteIdentifier(schema)).\(driver.quoteIdentifier(fkInfo.referencedTable))"
+        } else {
+            quotedTable = driver.quoteIdentifier(fkInfo.referencedTable)
+        }
         let quotedColumn = driver.quoteIdentifier(fkInfo.referencedColumn)
         let escapedValue = driver.escapeStringLiteral(value)
 

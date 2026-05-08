@@ -24,16 +24,6 @@ Write and run SQL with tree-sitter-powered syntax highlighting, schema-aware aut
 
 ## Writing Queries
 
-### Single Query
-
-Write and execute a single query:
-
-```sql
-SELECT * FROM users WHERE active = true;
-```
-
-Press `Cmd+Enter` to execute.
-
 ### Multiple Queries
 
 Separate multiple queries with semicolons:
@@ -54,8 +44,6 @@ Select text and press `Cmd+Enter` to run only the selection. Multiple statements
 - The error identifies which statement failed (e.g., "Statement 3/5 failed: ...")
 - The last `SELECT` result appears in the data grid
 - Each statement is recorded individually in query history
-
-Good for running migrations or batches of related statements:
 
 ```sql
 DROP TABLE IF EXISTS users;
@@ -80,7 +68,7 @@ SELECT * FROM users;
 
 ## Autocomplete
 
-Autocomplete appears as you type. Use arrow keys to navigate, `Enter`/`Tab` to accept, `Escape` to dismiss.
+Autocomplete appears as you type. See [Autocomplete](/features/autocomplete) for details.
 
 {/* Screenshot: Autocomplete popup showing table and column suggestions */}
 <Frame caption="SQL autocomplete">
@@ -116,6 +104,16 @@ Keywords are context-sensitive:
 - After `FROM`: `JOIN`, `LEFT JOIN`, `INNER JOIN`, `WHERE`
 - After `WHERE`: `AND`, `OR`, `NOT`, `IN`, `LIKE`, `BETWEEN`
 
+## Query Parameters
+
+Use `:name` placeholders instead of hardcoding values. Press `Cmd+Enter`, fill in the parameter panel, execute again. Values are bound via prepared statements.
+
+```sql
+SELECT * FROM users WHERE id = :user_id AND status = :status;
+```
+
+See [Query Parameters](/features/query-parameters) for details.
+
 ## Query Execution
 
 ### Running Queries
@@ -123,8 +121,9 @@ Keywords are context-sensitive:
 | Action | Shortcut | Description |
 |--------|----------|-------------|
 | Execute query | `Cmd+Enter` | Runs query at cursor, or all selected statements |
+| Cancel query | `Cmd+.` | Stops the running query |
 | Explain query | `Option+Cmd+E` | Show the execution plan for the query at cursor |
-| Format query | `Option+Cmd+F` | Format the current query for readability |
+| Format query | `Cmd+Shift+L` | Format the current query for readability |
 
 ### Query Results
 
@@ -174,14 +173,28 @@ Run Explain before expensive queries to verify index usage.
 
 ## SQL Formatting
 
-Press `Option+Cmd+F` to format the current query. You can also click **Format** in the toolbar or use **Query** > **Format Query**.
+Press `Cmd+Shift+L` to format the current query. You can also click **Format** in the toolbar or use **Query** > **Format Query**. The shortcut is rebindable in **Settings** > **Keyboard**.
 
-The formatter:
-- Uppercases SQL keywords (`select` becomes `SELECT`)
+TablePro ships a token-based formatter (rewritten in v0.34.0). It parses the query into tokens before reflowing, so it handles:
+
+- JOINs (INNER, LEFT, RIGHT, FULL, CROSS, LATERAL)
+- Subqueries and derived tables
+- CASE expressions
+- Common Table Expressions (CTEs), including recursive
+- Window functions (`OVER (...)`)
+- 15+ other SQL constructs (UNION, INTERSECT, EXCEPT, GROUP BY, HAVING, etc.)
+
+The formatter also:
+
 - Adds line breaks per clause (`SELECT`, `FROM`, `WHERE`, `JOIN`)
 - Indents logically with consistent spacing
 - Preserves comments, string literals, and cursor position
 - Detects your database dialect and preserves backtick (MySQL) or double-quote (PostgreSQL) identifiers
+- Preserves the original keyword case by default. Toggle uppercase/lowercase keyword output in **Settings** > **Editor**
+
+### Limitations
+
+The formatter handles pure SQL only. Procedural extensions (PL/pgSQL `DO` blocks, MySQL stored procedures, T-SQL `BEGIN`/`END` blocks) are passed through with minimal changes.
 
 ### Example
 
@@ -218,24 +231,6 @@ ORDER BY order_count DESC;
   />
 </Frame>
 
-### Error Handling
-
-Errors appear below the editor with the error message and relevant line number.
-
-{/* Screenshot: Query error message display */}
-<Frame caption="Query error message">
-  <img
-    className="block dark:hidden"
-    src="/images/query-error.png"
-    alt="Query error"
-  />
-  <img
-    className="hidden dark:block"
-    src="/images/query-error-dark.png"
-    alt="Query error"
-  />
-</Frame>
-
 ## Vim Mode
 
 Enable Vim keybindings in **Settings** > **Editor** > **Vim mode**. Supports Normal, Insert, Visual, and Command-line modes.
@@ -264,7 +259,7 @@ Key mappings:
 Standard motions (`h/j/k/l`, `w/b/e`, `0/$`, `gg/G`), operators (`d`, `c`, `y`), and count prefixes (`3dd`, `5j`) all work as expected. Text objects like `ciw` (change inner word) and `di"` (delete inside quotes) are supported.
 
 <Tip>
-Use `:w` as a quick way to execute queries without switching to the mouse.
+Use `:w` to execute queries.
 </Tip>
 
 ## Editor Settings
@@ -273,7 +268,7 @@ Customize font, line numbers, word wrap, Vim mode, and indentation in **Settings
 
 ## AI Assistance
 
-Use **Explain with AI** (`Cmd+L`) to understand queries, **Optimize with AI** (`Cmd+Option+L`) for performance suggestions, or click "Ask AI to Fix" in error dialogs. See [AI Chat](/features/ai-chat) for configuration.
+Use **Explain with AI** (`Cmd+L`) to understand queries, **Optimize with AI** (`Cmd+Option+L`) for performance suggestions, or click "Ask AI to Fix" in error dialogs. See [AI Assistant](/features/ai-assistant) for configuration.
 
 ## SQL Files
 
@@ -298,4 +293,18 @@ The title bar shows the filename for file-backed tabs. A dot appears on the clos
 <Note>
 When a tab has both unsaved file changes and pending data grid edits, `Cmd+S` saves the data grid changes first. Save the file after the grid save completes.
 </Note>
+
+### External modifications
+
+If a file changes on disk while it's open in TablePro (a `git pull`, an edit in VS Code, etc.), a yellow banner appears above the editor with a one-click **Reload from Disk**. Reload pulls the new content in and discards your tab edits.
+
+If you save (`Cmd+S`) while the file has changed externally, TablePro shows a side-by-side diff sheet with line-level highlighting and three actions:
+
+- **Keep My Changes** writes your tab content back, overwriting the external edits.
+- **Reload from Disk** drops your edits and loads the external version.
+- **Cancel** closes the sheet without saving so you can copy parts out manually.
+
+### Linked folders
+
+For watching a whole folder of `.sql` files (e.g., a Git repo of team queries), use [Linked SQL Folders](/features/sql-favorites#linked-sql-folders) instead of opening each file by hand. Linked folders update the sidebar within a second of any on-disk change.
 

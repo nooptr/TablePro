@@ -55,15 +55,20 @@ final class LicenseAPIClient {
     /// List all activations for a license key
     func listActivations(licenseKey: String, machineId: String) async throws -> ListActivationsResponse {
         let url = baseURL.appendingPathComponent("activations")
-        let body = LicenseValidationRequest(licenseKey: licenseKey, machineId: machineId)
+        let body = LicenseValidationRequest(
+            licenseKey: licenseKey,
+            machineId: machineId,
+            machineName: LicenseStorage.shared.machineName,
+            appVersion: Bundle.main.appVersion,
+            osVersion: ProcessInfo.processInfo.operatingSystemVersionString
+        )
         return try await post(url: url, body: body)
     }
 
     /// Deactivate a license key from this machine
     func deactivate(request: LicenseDeactivationRequest) async throws {
         let url = baseURL.appendingPathComponent("deactivate")
-        let _: SignedLicensePayload? = try? await post(url: url, body: request)
-        // Deactivation succeeds as long as we don't get an error
+        let _: DeactivateResponse = try await post(url: url, body: request)
     }
 
     // MARK: - Private

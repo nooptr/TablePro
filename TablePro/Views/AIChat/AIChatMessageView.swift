@@ -11,31 +11,59 @@ import SwiftUI
 
 /// Displays a single AI chat message with appropriate styling
 struct AIChatMessageView: View {
-    let message: AIChatMessage
+    let message: ChatTurn
     var onRetry: (() -> Void)?
     var onRegenerate: (() -> Void)?
+    var onEdit: (() -> Void)?
+
+    private var attachedContextItems: [ContextItem] {
+        message.blocks.compactMap { block in
+            if case .attachment(let item) = block { return item }
+            return nil
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             if message.role == .user {
-                // User: timestamp header, then message text
-                HStack(spacing: 4) {
-                    Spacer()
-                    Text("You")
-                        .fontWeight(.medium)
-                    Text("·")
-                    Text(message.timestamp, style: .time)
-                }
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 8)
+                // User: timestamp header, then message text in tinted bubble
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 4) {
+                        Spacer()
+                        Text("You")
+                            .fontWeight(.medium)
+                        Text("·")
+                        Text(message.timestamp, style: .time)
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
 
-                Markdown(message.content)
-                    .markdownTheme(.tableProChat)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
+                    if !attachedContextItems.isEmpty {
+                        AIChatContextChipStrip(items: attachedContextItems)
+                            .padding(.bottom, 2)
+                    }
+
+                    Markdown(message.plainText)
+                        .markdownTheme(.tableProChat)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    if let onEdit {
+                        HStack {
+                            Spacer()
+                            Button { onEdit() } label: {
+                                Image(systemName: "pencil")
+                                    .font(.caption2)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.tertiary)
+                            .help(String(localized: "Edit message"))
+                        }
+                    }
+                }
+                .padding(8)
+                .background(Color.accentColor.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
             } else {
                 // Assistant: role header above content
                 roleHeader
@@ -52,6 +80,13 @@ struct AIChatMessageView: View {
                         }
                         .buttonStyle(.plain)
                         .foregroundStyle(.secondary)
+                    }
+                    if let modelId = message.modelId, !modelId.isEmpty {
+                        Text(modelId)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
                     Spacer()
                     if let usage = message.usage {
@@ -84,7 +119,6 @@ struct AIChatMessageView: View {
                 .padding(.horizontal, 8)
             }
         }
-        .fixedSize(horizontal: false, vertical: true)
     }
 
     private var roleHeader: some View {
@@ -101,17 +135,51 @@ struct AIChatMessageView: View {
 
     @ViewBuilder
     private var messageContent: some View {
-        if message.content.isEmpty {
+        let renderable = renderableBlocks
+        if renderable.isEmpty {
             TypingIndicatorView()
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
         } else {
-            Markdown(message.content)
-                .markdownTheme(.tableProChat)
-                .textSelection(.enabled)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(renderable.enumerated()), id: \.offset) { _, block in
+                    switch block {
+                    case .text(let text):
+                        Markdown(text)
+                            .markdownTheme(.tableProChat)
+                            .textSelection(.enabled)
+                            .padding(.horizontal, 8)
+                    case .toolUse(let useBlock):
+                        AIChatToolUseBlockView(block: useBlock)
+                    case .toolResult(let resultBlock):
+                        AIChatToolResultBlockView(block: resultBlock)
+                    case .attachment:
+                        EmptyView()
+                    }
+                }
+            }
+            .padding(.vertical, 6)
         }
+    }
+
+    private var renderableBlocks: [ChatContentBlock] {
+        var result: [ChatContentBlock] = []
+        for block in message.blocks {
+            switch block {
+            case .text(let text):
+                if text.isEmpty { continue }
+                if case .text(let existing) = result.last {
+                    result[result.count - 1] = .text(existing + text)
+                } else {
+                    result.append(.text(text))
+                }
+            case .toolUse, .toolResult:
+                result.append(block)
+            case .attachment:
+                continue
+            }
+        }
+        return result
     }
 }
 
@@ -181,7 +249,7 @@ private struct TypingIndicatorView: View {
     @State private var animating = false
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 4) {
             ForEach(0..<3, id: \.self) { index in
                 Circle()
                     .fill(Color(nsColor: .tertiaryLabelColor))

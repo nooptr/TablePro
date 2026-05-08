@@ -11,30 +11,23 @@ import Foundation
 /// This provider blocks the calling thread while the alert is displayed on the main thread.
 /// It is intended for interactive SSH sessions where no TOTP secret is configured.
 internal final class PromptTOTPProvider: TOTPProvider, @unchecked Sendable {
-    func provideCode() throws -> String {
+    func provideCode(attempt: Int) throws -> String {
         if Thread.isMainThread {
-            return try handleResult(showAlert())
+            return try handleResult(showAlert(attempt: attempt))
         }
-
-        let semaphore = DispatchSemaphore(value: 0)
-        var code: String?
-        DispatchQueue.main.async {
-            code = self.showAlert()
-            semaphore.signal()
-        }
-        let result = semaphore.wait(timeout: .now() + 120)
-        guard result == .success else {
-            throw SSHTunnelError.connectionTimeout
-        }
-        return try handleResult(code)
+        return try handleResult(DispatchQueue.main.sync { showAlert(attempt: attempt) })
     }
 
-    private func showAlert() -> String? {
+    // Note: runModal() is intentional here. This method runs on the main thread
+    // (via DispatchQueue.main.sync from provideCode), so beginSheetModal + semaphore would deadlock.
+    private func showAlert(attempt: Int) -> String? {
         let alert = NSAlert()
-        alert.messageText = String(localized: "Verification Code Required")
-        alert.informativeText = String(
-            localized: "Enter the TOTP verification code for SSH authentication."
-        )
+        alert.messageText = attempt == 0
+            ? String(localized: "Verification Code Required")
+            : String(localized: "Verification Code Rejected")
+        alert.informativeText = attempt == 0
+            ? String(localized: "Enter the TOTP verification code for SSH authentication.")
+            : String(localized: "The previous code wasn't accepted. Wait for your authenticator to refresh, then enter the new code.")
         alert.alertStyle = .informational
         alert.addButton(withTitle: String(localized: "Connect"))
         alert.addButton(withTitle: String(localized: "Cancel"))
@@ -45,15 +38,12 @@ internal final class PromptTOTPProvider: TOTPProvider, @unchecked Sendable {
         alert.window.initialFirstResponder = textField
 
         let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            return textField.stringValue
-        }
-        return nil
+        return response == .alertFirstButtonReturn ? textField.stringValue : nil
     }
 
     private func handleResult(_ code: String?) throws -> String {
         guard let totpCode = code, !totpCode.isEmpty else {
-            throw SSHTunnelError.authenticationFailed
+            throw SSHTunnelError.authenticationFailed(reason: .verificationCode)
         }
         return totpCode
     }

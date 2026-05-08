@@ -35,9 +35,7 @@ struct EnumPopoverContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            TextField("Search...", text: $searchText)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 13))
+            NativeSearchField(text: $searchText, placeholder: String(localized: "Search..."))
                 .padding(.horizontal, 8)
                 .padding(.vertical, 8)
 
@@ -45,13 +43,14 @@ struct EnumPopoverContentView: View {
 
             List {
                 ForEach(filteredValues, id: \.self) { value in
-                    rowLabel(for: value)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                        .onTapGesture { commitValue(value) }
-                        .listRowInsets(EdgeInsets(
-                            top: 2, leading: 6, bottom: 2, trailing: 6
-                        ))
+                    Button { commitValue(value) } label: {
+                        rowLabel(for: value)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+                    .listRowInsets(EdgeInsets(
+                        top: 2, leading: 6, bottom: 2, trailing: 6
+                    ))
                 }
             }
             .listStyle(.plain)
@@ -70,19 +69,19 @@ struct EnumPopoverContentView: View {
     private func rowLabel(for value: String) -> some View {
         if value == enumNullMarker {
             Text(value)
-                .font(.system(size: 12, design: .monospaced).italic())
+                .font(.system(.callout, design: .monospaced).italic())
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
         } else if value == currentValue {
             Text(value)
-                .font(.system(size: 12, design: .monospaced))
+                .font(.system(.callout, design: .monospaced))
                 .foregroundStyle(.tint)
                 .lineLimit(1)
                 .truncationMode(.tail)
         } else {
             Text(value)
-                .font(.system(size: 12, design: .monospaced))
+                .font(.system(.callout, design: .monospaced))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.tail)

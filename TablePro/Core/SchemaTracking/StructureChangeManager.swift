@@ -11,14 +11,12 @@ import Observation
 
 /// Manager for tracking and applying schema changes
 @MainActor @Observable
-final class StructureChangeManager {
+final class StructureChangeManager: ChangeManaging {
     private(set) var pendingChanges: [SchemaChangeIdentifier: SchemaChange] = [:]
+    @ObservationIgnored private var changeOrder: [SchemaChangeIdentifier] = []
     private(set) var validationErrors: [SchemaChangeIdentifier: String] = [:]
-    var hasChanges: Bool = false
-    var reloadVersion: Int = 0  // Incremented to trigger table reload
-
-    // Track which rows changed since last reload for granular updates
-    private(set) var changedRowIndices: Set<Int> = []
+    var hasChanges: Bool { !pendingChanges.isEmpty }
+    var reloadVersion: Int = 0
 
     // Current state (loaded from database)
     private(set) var currentColumns: [EditableColumnDefinition] = []
@@ -37,18 +35,15 @@ final class StructureChangeManager {
 
     // MARK: - Undo/Redo Support
 
-    private let undoManager = StructureUndoManager()
-    private var visualStateCache: [Int: RowVisualState] = [:]
+    private let undoManager: UndoManager = {
+        let manager = UndoManager()
+        manager.levelsOfUndo = 100
+        return manager
+    }()
+    private var visualStateCache: [VisualStateCacheKey: RowVisualState] = [:]
 
     var canUndo: Bool { undoManager.canUndo }
     var canRedo: Bool { undoManager.canRedo }
-
-    /// Consume and clear changed row indices (for granular table reloads)
-    func consumeChangedRowIndices() -> Set<Int> {
-        let indices = changedRowIndices
-        changedRowIndices.removeAll()
-        return indices
-    }
 
     // MARK: - Load Schema
 
@@ -83,6 +78,7 @@ final class StructureChangeManager {
                 columns: fkInfos.map { $0.column },
                 referencedTable: first.referencedTable,
                 referencedColumns: fkInfos.map { $0.referencedColumn },
+                referencedSchema: first.referencedSchema,
                 onDelete: EditableForeignKeyDefinition.ReferentialAction(rawValue: first.onDelete.uppercased()) ?? .noAction,
                 onUpdate: EditableForeignKeyDefinition.ReferentialAction(rawValue: first.onUpdate.uppercased()) ?? .noAction
             )
@@ -92,10 +88,10 @@ final class StructureChangeManager {
         // Reset working state
         resetWorkingState()
 
-        // Clear changes
         pendingChanges.removeAll()
+        changeOrder.removeAll()
         validationErrors.removeAll()
-        hasChanges = false
+        undoManager.removeAllActions()
 
         // Increment reloadVersion to trigger DataGridView column width recalculation
         // This ensures columns auto-size based on actual cell content after initial load
@@ -109,17 +105,29 @@ final class StructureChangeManager {
         workingPrimaryKey = currentPrimaryKey
     }
 
+    private func trackChangeKey(_ key: SchemaChangeIdentifier) {
+        if !changeOrder.contains(key) {
+            changeOrder.append(key)
+        }
+    }
+
+    private func untrackChangeKey(_ key: SchemaChangeIdentifier) {
+        changeOrder.removeAll { $0 == key }
+    }
+
     // MARK: - Add New Rows
 
     func addNewColumn() {
         let placeholder = EditableColumnDefinition.placeholder()
         workingColumns.append(placeholder)
-        // Mark as pending change so hasChanges = true (even though placeholder is invalid)
-        // This allows Cmd+R to show warning and Cmd+S to trigger validation
-        pendingChanges[.column(placeholder.id)] = .addColumn(placeholder)
-        undoManager.push(.columnAdd(column: placeholder))
+        let key = SchemaChangeIdentifier.column(placeholder.id)
+        pendingChanges[key] = .addColumn(placeholder)
+        trackChangeKey(key)
+        undoManager.registerUndo(withTarget: self) { target in
+            target.applySchemaUndo(.columnAdd(column: placeholder))
+        }
+        undoManager.setActionName(String(localized: "Add Column"))
         validate()
-        hasChanges = true
         reloadVersion += 1
         rebuildVisualStateCache()
     }
@@ -127,10 +135,14 @@ final class StructureChangeManager {
     func addNewIndex() {
         let placeholder = EditableIndexDefinition.placeholder()
         workingIndexes.append(placeholder)
-        pendingChanges[.index(placeholder.id)] = .addIndex(placeholder)
-        undoManager.push(.indexAdd(index: placeholder))
+        let key = SchemaChangeIdentifier.index(placeholder.id)
+        pendingChanges[key] = .addIndex(placeholder)
+        trackChangeKey(key)
+        undoManager.registerUndo(withTarget: self) { target in
+            target.applySchemaUndo(.indexAdd(index: placeholder))
+        }
+        undoManager.setActionName(String(localized: "Add Index"))
         validate()
-        hasChanges = true
         reloadVersion += 1
         rebuildVisualStateCache()
     }
@@ -138,10 +150,14 @@ final class StructureChangeManager {
     func addNewForeignKey() {
         let placeholder = EditableForeignKeyDefinition.placeholder()
         workingForeignKeys.append(placeholder)
-        pendingChanges[.foreignKey(placeholder.id)] = .addForeignKey(placeholder)
-        undoManager.push(.foreignKeyAdd(fk: placeholder))
+        let key = SchemaChangeIdentifier.foreignKey(placeholder.id)
+        pendingChanges[key] = .addForeignKey(placeholder)
+        trackChangeKey(key)
+        undoManager.registerUndo(withTarget: self) { target in
+            target.applySchemaUndo(.foreignKeyAdd(fk: placeholder))
+        }
+        undoManager.setActionName(String(localized: "Add Foreign Key"))
         validate()
-        hasChanges = true
         reloadVersion += 1
         rebuildVisualStateCache()
     }
@@ -150,27 +166,39 @@ final class StructureChangeManager {
 
     func addColumn(_ column: EditableColumnDefinition) {
         workingColumns.append(column)
-        pendingChanges[.column(column.id)] = .addColumn(column)
-        undoManager.push(.columnAdd(column: column))
-        hasChanges = true
+        let key = SchemaChangeIdentifier.column(column.id)
+        pendingChanges[key] = .addColumn(column)
+        trackChangeKey(key)
+        undoManager.registerUndo(withTarget: self) { target in
+            target.applySchemaUndo(.columnAdd(column: column))
+        }
+        undoManager.setActionName(String(localized: "Add Column"))
         reloadVersion += 1
         rebuildVisualStateCache()
     }
 
     func addIndex(_ index: EditableIndexDefinition) {
         workingIndexes.append(index)
-        pendingChanges[.index(index.id)] = .addIndex(index)
-        undoManager.push(.indexAdd(index: index))
-        hasChanges = true
+        let key = SchemaChangeIdentifier.index(index.id)
+        pendingChanges[key] = .addIndex(index)
+        trackChangeKey(key)
+        undoManager.registerUndo(withTarget: self) { target in
+            target.applySchemaUndo(.indexAdd(index: index))
+        }
+        undoManager.setActionName(String(localized: "Add Index"))
         reloadVersion += 1
         rebuildVisualStateCache()
     }
 
     func addForeignKey(_ foreignKey: EditableForeignKeyDefinition) {
         workingForeignKeys.append(foreignKey)
-        pendingChanges[.foreignKey(foreignKey.id)] = .addForeignKey(foreignKey)
-        undoManager.push(.foreignKeyAdd(fk: foreignKey))
-        hasChanges = true
+        let key = SchemaChangeIdentifier.foreignKey(foreignKey.id)
+        pendingChanges[key] = .addForeignKey(foreignKey)
+        trackChangeKey(key)
+        undoManager.registerUndo(withTarget: self) { target in
+            target.applySchemaUndo(.foreignKeyAdd(fk: foreignKey))
+        }
+        undoManager.setActionName(String(localized: "Add Foreign Key"))
         reloadVersion += 1
         rebuildVisualStateCache()
     }
@@ -182,61 +210,60 @@ final class StructureChangeManager {
         if let workingIndex = workingColumns.firstIndex(where: { $0.id == id }) {
             let oldWorking = workingColumns[workingIndex]
             if oldWorking != newColumn {
-                undoManager.push(.columnEdit(id: id, old: oldWorking, new: newColumn))
+                undoManager.registerUndo(withTarget: self) { target in
+                    target.applySchemaUndo(.columnEdit(id: id, old: oldWorking, new: newColumn))
+                }
+                undoManager.setActionName(String(localized: "Edit Column"))
             }
         }
 
-        // Find if it's existing or new
+        let key = SchemaChangeIdentifier.column(id)
         if let index = currentColumns.firstIndex(where: { $0.id == id }) {
             let oldColumn = currentColumns[index]
             if oldColumn != newColumn {
-                pendingChanges[.column(id)] = .modifyColumn(old: oldColumn, new: newColumn)
+                pendingChanges[key] = .modifyColumn(old: oldColumn, new: newColumn)
+                trackChangeKey(key)
             } else {
-                pendingChanges.removeValue(forKey: .column(id))
+                pendingChanges.removeValue(forKey: key)
+                untrackChangeKey(key)
             }
         } else {
-            // New column - allow saving even if invalid - let database validate
-            pendingChanges[.column(id)] = .addColumn(newColumn)
+            pendingChanges[key] = .addColumn(newColumn)
+            trackChangeKey(key)
         }
 
-        // Update working state
         if let index = workingColumns.firstIndex(where: { $0.id == id }) {
             workingColumns[index] = newColumn
         }
 
         validate()
-        hasChanges = !pendingChanges.isEmpty
-        reloadVersion += 1  // Trigger table reload to show visual changes
-        rebuildVisualStateCache()  // Rebuild cache to reflect updated state
+        reloadVersion += 1
+        rebuildVisualStateCache()
     }
 
     func deleteColumn(id: UUID) {
-        // Check if it's an existing column (from database) or a new column (not yet saved)
+        let key = SchemaChangeIdentifier.column(id)
         if let column = currentColumns.first(where: { $0.id == id }) {
-            // Existing column - mark as deleted (keep in workingColumns for visual feedback)
-            undoManager.push(.columnDelete(column: column))
-            pendingChanges[.column(id)] = .deleteColumn(column)
-            // Track changed row for reload
-            if let rowIndex = workingColumns.firstIndex(where: { $0.id == id }) {
-                changedRowIndices.insert(rowIndex)
+            undoManager.registerUndo(withTarget: self) { target in
+                target.applySchemaUndo(.columnDelete(column: column, at: nil))
             }
+            undoManager.setActionName(String(localized: "Delete Column"))
+            pendingChanges[key] = .deleteColumn(column)
+            trackChangeKey(key)
         } else {
-            // New column that hasn't been saved yet - remove from list
+            let rowIndex = workingColumns.firstIndex(where: { $0.id == id })
             if let column = workingColumns.first(where: { $0.id == id }) {
-                undoManager.push(.columnDelete(column: column))
-            }
-            if let rowIndex = workingColumns.firstIndex(where: { $0.id == id }) {
-                // Track ALL rows from this index onwards for reload (indices shift down)
-                for i in rowIndex..<workingColumns.count {
-                    changedRowIndices.insert(i)
+                undoManager.registerUndo(withTarget: self) { target in
+                    target.applySchemaUndo(.columnDelete(column: column, at: rowIndex))
                 }
+                undoManager.setActionName(String(localized: "Delete Column"))
             }
             workingColumns.removeAll { $0.id == id }
-            pendingChanges.removeValue(forKey: .column(id))
+            pendingChanges.removeValue(forKey: key)
+            untrackChangeKey(key)
         }
 
         validate()
-        hasChanges = !pendingChanges.isEmpty
         reloadVersion += 1
         rebuildVisualStateCache()
     }
@@ -248,20 +275,26 @@ final class StructureChangeManager {
         if let workingIdx = workingIndexes.firstIndex(where: { $0.id == id }) {
             let oldWorking = workingIndexes[workingIdx]
             if oldWorking != newIndex {
-                undoManager.push(.indexEdit(id: id, old: oldWorking, new: newIndex))
+                undoManager.registerUndo(withTarget: self) { target in
+                    target.applySchemaUndo(.indexEdit(id: id, old: oldWorking, new: newIndex))
+                }
+                undoManager.setActionName(String(localized: "Edit Index"))
             }
         }
 
+        let key = SchemaChangeIdentifier.index(id)
         if let index = currentIndexes.firstIndex(where: { $0.id == id }) {
             let oldIndex = currentIndexes[index]
             if oldIndex != newIndex {
-                pendingChanges[.index(id)] = .modifyIndex(old: oldIndex, new: newIndex)
+                pendingChanges[key] = .modifyIndex(old: oldIndex, new: newIndex)
+                trackChangeKey(key)
             } else {
-                pendingChanges.removeValue(forKey: .index(id))
+                pendingChanges.removeValue(forKey: key)
+                untrackChangeKey(key)
             }
         } else {
-            // Allow saving even if invalid - let database validate
-            pendingChanges[.index(id)] = .addIndex(newIndex)
+            pendingChanges[key] = .addIndex(newIndex)
+            trackChangeKey(key)
         }
 
         if let index = workingIndexes.firstIndex(where: { $0.id == id }) {
@@ -269,38 +302,33 @@ final class StructureChangeManager {
         }
 
         validate()
-        hasChanges = !pendingChanges.isEmpty
-        reloadVersion += 1  // Trigger table reload to show visual changes
-        rebuildVisualStateCache()  // Rebuild cache to reflect updated state
+        reloadVersion += 1
+        rebuildVisualStateCache()
     }
 
     func deleteIndex(id: UUID) {
-        // Check if it's an existing index or a new index
+        let key = SchemaChangeIdentifier.index(id)
         if let index = currentIndexes.first(where: { $0.id == id }) {
-            // Existing index - mark as deleted (keep in workingIndexes for visual feedback)
-            undoManager.push(.indexDelete(index: index))
-            pendingChanges[.index(id)] = .deleteIndex(index)
-            // Track changed row for reload
-            if let rowIndex = workingIndexes.firstIndex(where: { $0.id == id }) {
-                changedRowIndices.insert(rowIndex)
+            undoManager.registerUndo(withTarget: self) { target in
+                target.applySchemaUndo(.indexDelete(index: index, at: nil))
             }
+            undoManager.setActionName(String(localized: "Delete Index"))
+            pendingChanges[key] = .deleteIndex(index)
+            trackChangeKey(key)
         } else {
-            // New index that hasn't been saved yet - remove from list
+            let rowIndex = workingIndexes.firstIndex(where: { $0.id == id })
             if let index = workingIndexes.first(where: { $0.id == id }) {
-                undoManager.push(.indexDelete(index: index))
-            }
-            if let rowIndex = workingIndexes.firstIndex(where: { $0.id == id }) {
-                // Track ALL rows from this index onwards for reload (indices shift down)
-                for i in rowIndex..<workingIndexes.count {
-                    changedRowIndices.insert(i)
+                undoManager.registerUndo(withTarget: self) { target in
+                    target.applySchemaUndo(.indexDelete(index: index, at: rowIndex))
                 }
+                undoManager.setActionName(String(localized: "Delete Index"))
             }
             workingIndexes.removeAll { $0.id == id }
-            pendingChanges.removeValue(forKey: .index(id))
+            pendingChanges.removeValue(forKey: key)
+            untrackChangeKey(key)
         }
 
         validate()
-        hasChanges = !pendingChanges.isEmpty
         reloadVersion += 1
         rebuildVisualStateCache()
     }
@@ -312,20 +340,26 @@ final class StructureChangeManager {
         if let workingIdx = workingForeignKeys.firstIndex(where: { $0.id == id }) {
             let oldWorking = workingForeignKeys[workingIdx]
             if oldWorking != newFK {
-                undoManager.push(.foreignKeyEdit(id: id, old: oldWorking, new: newFK))
+                undoManager.registerUndo(withTarget: self) { target in
+                    target.applySchemaUndo(.foreignKeyEdit(id: id, old: oldWorking, new: newFK))
+                }
+                undoManager.setActionName(String(localized: "Edit Foreign Key"))
             }
         }
 
+        let key = SchemaChangeIdentifier.foreignKey(id)
         if let index = currentForeignKeys.firstIndex(where: { $0.id == id }) {
             let oldFK = currentForeignKeys[index]
             if oldFK != newFK {
-                pendingChanges[.foreignKey(id)] = .modifyForeignKey(old: oldFK, new: newFK)
+                pendingChanges[key] = .modifyForeignKey(old: oldFK, new: newFK)
+                trackChangeKey(key)
             } else {
-                pendingChanges.removeValue(forKey: .foreignKey(id))
+                pendingChanges.removeValue(forKey: key)
+                untrackChangeKey(key)
             }
         } else {
-            // Allow saving even if invalid - let database validate
-            pendingChanges[.foreignKey(id)] = .addForeignKey(newFK)
+            pendingChanges[key] = .addForeignKey(newFK)
+            trackChangeKey(key)
         }
 
         if let index = workingForeignKeys.firstIndex(where: { $0.id == id }) {
@@ -333,38 +367,33 @@ final class StructureChangeManager {
         }
 
         validate()
-        hasChanges = !pendingChanges.isEmpty
-        reloadVersion += 1  // Trigger table reload to show visual changes
-        rebuildVisualStateCache()  // Rebuild cache to reflect updated state
+        reloadVersion += 1
+        rebuildVisualStateCache()
     }
 
     func deleteForeignKey(id: UUID) {
-        // Check if it's an existing foreign key or a new foreign key
+        let key = SchemaChangeIdentifier.foreignKey(id)
         if let fk = currentForeignKeys.first(where: { $0.id == id }) {
-            // Existing FK - mark as deleted (keep in workingForeignKeys for visual feedback)
-            undoManager.push(.foreignKeyDelete(fk: fk))
-            pendingChanges[.foreignKey(id)] = .deleteForeignKey(fk)
-            // Track changed row for reload
-            if let rowIndex = workingForeignKeys.firstIndex(where: { $0.id == id }) {
-                changedRowIndices.insert(rowIndex)
+            undoManager.registerUndo(withTarget: self) { target in
+                target.applySchemaUndo(.foreignKeyDelete(fk: fk, at: nil))
             }
+            undoManager.setActionName(String(localized: "Delete Foreign Key"))
+            pendingChanges[key] = .deleteForeignKey(fk)
+            trackChangeKey(key)
         } else {
-            // New FK that hasn't been saved yet - remove from list
+            let rowIndex = workingForeignKeys.firstIndex(where: { $0.id == id })
             if let fk = workingForeignKeys.first(where: { $0.id == id }) {
-                undoManager.push(.foreignKeyDelete(fk: fk))
-            }
-            if let rowIndex = workingForeignKeys.firstIndex(where: { $0.id == id }) {
-                // Track ALL rows from this index onwards for reload (indices shift down)
-                for i in rowIndex..<workingForeignKeys.count {
-                    changedRowIndices.insert(i)
+                undoManager.registerUndo(withTarget: self) { target in
+                    target.applySchemaUndo(.foreignKeyDelete(fk: fk, at: rowIndex))
                 }
+                undoManager.setActionName(String(localized: "Delete Foreign Key"))
             }
             workingForeignKeys.removeAll { $0.id == id }
-            pendingChanges.removeValue(forKey: .foreignKey(id))
+            pendingChanges.removeValue(forKey: key)
+            untrackChangeKey(key)
         }
 
         validate()
-        hasChanges = !pendingChanges.isEmpty
         reloadVersion += 1
         rebuildVisualStateCache()
     }
@@ -374,18 +403,24 @@ final class StructureChangeManager {
     func updatePrimaryKey(_ columns: [String]) {
         // Push undo action before modifying
         if columns != workingPrimaryKey {
-            undoManager.push(.primaryKeyChange(old: workingPrimaryKey, new: columns))
+            let oldPK = workingPrimaryKey
+            undoManager.registerUndo(withTarget: self) { target in
+                target.applySchemaUndo(.primaryKeyChange(old: oldPK, new: columns))
+            }
+            undoManager.setActionName(String(localized: "Change Primary Key"))
         }
 
+        let key = SchemaChangeIdentifier.primaryKey
         if columns != currentPrimaryKey {
-            pendingChanges[.primaryKey] = .modifyPrimaryKey(old: currentPrimaryKey, new: columns)
+            pendingChanges[key] = .modifyPrimaryKey(old: currentPrimaryKey, new: columns)
+            trackChangeKey(key)
         } else {
-            pendingChanges.removeValue(forKey: .primaryKey)
+            pendingChanges.removeValue(forKey: key)
+            untrackChangeKey(key)
         }
 
         workingPrimaryKey = columns
         validate()
-        hasChanges = !pendingChanges.isEmpty
     }
 
     // MARK: - Validation
@@ -409,7 +444,7 @@ final class StructureChangeManager {
             .map { $0.key }
 
         for duplicate in duplicateColumns {
-            if let column = workingColumns.first(where: { $0.name == duplicate }) {
+            for column in workingColumns.filter({ $0.name == duplicate && !isColumnPendingDeletion($0.id) }) {
                 validationErrors[.column(column.id)] = "Duplicate column name: \(duplicate)"
             }
         }
@@ -435,7 +470,7 @@ final class StructureChangeManager {
             .map { $0.key }
 
         for duplicate in duplicateIndexes {
-            if let index = workingIndexes.first(where: { $0.name == duplicate }) {
+            for index in workingIndexes.filter({ $0.name == duplicate }) {
                 validationErrors[.index(index.id)] = "Duplicate index name: \(duplicate)"
             }
         }
@@ -481,189 +516,267 @@ final class StructureChangeManager {
 
     func discardChanges() {
         pendingChanges.removeAll()
+        changeOrder.removeAll()
         validationErrors.removeAll()
-        changedRowIndices.removeAll()  // Clear changed row tracking
-        hasChanges = false
         resetWorkingState()
         reloadVersion += 1
         rebuildVisualStateCache()
-        undoManager.clearAll()
+        undoManager.removeAllActions()
     }
 
     func getChangesArray() -> [SchemaChange] {
-        Array(pendingChanges.values)
+        changeOrder.compactMap { pendingChanges[$0] }
     }
 
     // MARK: - Undo/Redo Operations
 
     func undo() {
-        guard let action = undoManager.undo() else { return }
-        applyUndoAction(action, isRedo: false)
+        guard undoManager.canUndo else { return }
+        undoManager.undo()
     }
 
     func redo() {
-        guard let action = undoManager.redo() else { return }
-        applyUndoAction(action, isRedo: true)
+        guard undoManager.canRedo else { return }
+        undoManager.redo()
     }
 
-    private func applyUndoAction(_ action: SchemaUndoAction, isRedo: Bool) {
+    private func applySchemaUndo(_ action: SchemaUndoAction) {
         switch action {
         case .columnEdit(let id, let old, let new):
-            let column = isRedo ? new : old
-            if let index = workingColumns.firstIndex(where: { $0.id == id }) {
-                workingColumns[index] = column
-                if let currentIndex = currentColumns.firstIndex(where: { $0.id == id }) {
-                    let current = currentColumns[currentIndex]
-                    if column != current {
-                        pendingChanges[.column(id)] = .modifyColumn(old: current, new: column)
-                    } else {
-                        pendingChanges.removeValue(forKey: .column(id))
-                    }
-                }
-            }
-
+            applyColumnEditUndo(id: id, old: old, new: new)
         case .columnAdd(let column):
-            if isRedo {
-                workingColumns.append(column)
-                pendingChanges[.column(column.id)] = .addColumn(column)
-            } else {
-                workingColumns.removeAll { $0.id == column.id }
-                pendingChanges.removeValue(forKey: .column(column.id))
-            }
-
-        case .columnDelete(let column):
-            if isRedo {
-                // For existing columns, keep in workingColumns for strikethrough; for new columns, remove
-                if currentColumns.contains(where: { $0.id == column.id }) {
-                    pendingChanges[.column(column.id)] = .deleteColumn(column)
-                } else {
-                    workingColumns.removeAll { $0.id == column.id }
-                    pendingChanges.removeValue(forKey: .column(column.id))
-                }
-            } else {
-                // Undo delete: if column is still in workingColumns (existing, kept for strikethrough),
-                // just clear pending change. If physically removed (new column), re-add it.
-                if workingColumns.contains(where: { $0.id == column.id }) {
-                    pendingChanges.removeValue(forKey: .column(column.id))
-                } else {
-                    workingColumns.append(column)
-                    pendingChanges[.column(column.id)] = .addColumn(column)
-                }
-            }
-
+            applyColumnAddUndo(column: column)
+        case .columnDelete(let column, let at):
+            applyColumnDeleteUndo(column: column, at: at)
         case .indexEdit(let id, let old, let new):
-            let index = isRedo ? new : old
-            if let idx = workingIndexes.firstIndex(where: { $0.id == id }) {
-                workingIndexes[idx] = index
-                if let currentIdx = currentIndexes.firstIndex(where: { $0.id == id }) {
-                    let current = currentIndexes[currentIdx]
-                    if index != current {
-                        pendingChanges[.index(id)] = .modifyIndex(old: current, new: index)
-                    } else {
-                        pendingChanges.removeValue(forKey: .index(id))
-                    }
-                }
-            }
-
+            applyIndexEditUndo(id: id, old: old, new: new)
         case .indexAdd(let index):
-            if isRedo {
-                workingIndexes.append(index)
-                pendingChanges[.index(index.id)] = .addIndex(index)
-            } else {
-                workingIndexes.removeAll { $0.id == index.id }
-                pendingChanges.removeValue(forKey: .index(index.id))
-            }
-
-        case .indexDelete(let index):
-            if isRedo {
-                // For existing indexes, keep in workingIndexes for strikethrough; for new indexes, remove
-                if currentIndexes.contains(where: { $0.id == index.id }) {
-                    pendingChanges[.index(index.id)] = .deleteIndex(index)
-                } else {
-                    workingIndexes.removeAll { $0.id == index.id }
-                    pendingChanges.removeValue(forKey: .index(index.id))
-                }
-            } else {
-                // Undo delete: if index is still in workingIndexes (existing, kept for strikethrough),
-                // just clear pending change. If physically removed (new index), re-add it.
-                if workingIndexes.contains(where: { $0.id == index.id }) {
-                    pendingChanges.removeValue(forKey: .index(index.id))
-                } else {
-                    workingIndexes.append(index)
-                    pendingChanges[.index(index.id)] = .addIndex(index)
-                }
-            }
-
+            applyIndexAddUndo(index: index)
+        case .indexDelete(let index, let at):
+            applyIndexDeleteUndo(index: index, at: at)
         case .foreignKeyEdit(let id, let old, let new):
-            let fk = isRedo ? new : old
-            if let idx = workingForeignKeys.firstIndex(where: { $0.id == id }) {
-                workingForeignKeys[idx] = fk
-                if let currentIdx = currentForeignKeys.firstIndex(where: { $0.id == id }) {
-                    let current = currentForeignKeys[currentIdx]
-                    if fk != current {
-                        pendingChanges[.foreignKey(id)] = .modifyForeignKey(old: current, new: fk)
-                    } else {
-                        pendingChanges.removeValue(forKey: .foreignKey(id))
-                    }
-                }
-            }
-
+            applyForeignKeyEditUndo(id: id, old: old, new: new)
         case .foreignKeyAdd(let fk):
-            if isRedo {
-                workingForeignKeys.append(fk)
-                pendingChanges[.foreignKey(fk.id)] = .addForeignKey(fk)
-            } else {
-                workingForeignKeys.removeAll { $0.id == fk.id }
-                pendingChanges.removeValue(forKey: .foreignKey(fk.id))
-            }
-
-        case .foreignKeyDelete(let fk):
-            if isRedo {
-                // For existing FKs, keep in workingForeignKeys for strikethrough; for new FKs, remove
-                if currentForeignKeys.contains(where: { $0.id == fk.id }) {
-                    pendingChanges[.foreignKey(fk.id)] = .deleteForeignKey(fk)
-                } else {
-                    workingForeignKeys.removeAll { $0.id == fk.id }
-                    pendingChanges.removeValue(forKey: .foreignKey(fk.id))
-                }
-            } else {
-                // Undo delete: if FK is still in workingForeignKeys (existing, kept for strikethrough),
-                // just clear pending change. If physically removed (new FK), re-add it.
-                if workingForeignKeys.contains(where: { $0.id == fk.id }) {
-                    pendingChanges.removeValue(forKey: .foreignKey(fk.id))
-                } else {
-                    workingForeignKeys.append(fk)
-                    pendingChanges[.foreignKey(fk.id)] = .addForeignKey(fk)
-                }
-            }
-
-        case .primaryKeyChange(let old, let new):
-            workingPrimaryKey = isRedo ? new : old
-            if workingPrimaryKey != currentPrimaryKey {
-                pendingChanges[.primaryKey] = .modifyPrimaryKey(old: currentPrimaryKey, new: workingPrimaryKey)
-            } else {
-                pendingChanges.removeValue(forKey: .primaryKey)
-            }
+            applyForeignKeyAddUndo(fk: fk)
+        case .foreignKeyDelete(let fk, let at):
+            applyForeignKeyDeleteUndo(fk: fk, at: at)
+        case .primaryKeyChange(let old, _):
+            applyPrimaryKeyChangeUndo(old: old)
         }
 
-        hasChanges = !pendingChanges.isEmpty
+        validate()
         reloadVersion += 1
         rebuildVisualStateCache()
+    }
+
+    private func applyColumnEditUndo(id: UUID, old: EditableColumnDefinition, new: EditableColumnDefinition) {
+        undoManager.registerUndo(withTarget: self) { target in
+            target.applySchemaUndo(.columnEdit(id: id, old: new, new: old))
+        }
+        undoManager.setActionName(String(localized: "Edit Column"))
+        let colKey = SchemaChangeIdentifier.column(id)
+        if let index = workingColumns.firstIndex(where: { $0.id == id }) {
+            workingColumns[index] = old
+            if let currentIndex = currentColumns.firstIndex(where: { $0.id == id }) {
+                let current = currentColumns[currentIndex]
+                if old != current {
+                    pendingChanges[colKey] = .modifyColumn(old: current, new: old)
+                    trackChangeKey(colKey)
+                } else {
+                    pendingChanges.removeValue(forKey: colKey)
+                    untrackChangeKey(colKey)
+                }
+            } else {
+                pendingChanges[colKey] = .addColumn(old)
+                trackChangeKey(colKey)
+            }
+        }
+    }
+
+    private func applyColumnAddUndo(column: EditableColumnDefinition) {
+        let removedIndex = workingColumns.firstIndex(where: { $0.id == column.id })
+        undoManager.registerUndo(withTarget: self) { target in
+            target.applySchemaUndo(.columnDelete(column: column, at: removedIndex))
+        }
+        undoManager.setActionName(String(localized: "Add Column"))
+        let addColKey = SchemaChangeIdentifier.column(column.id)
+        if currentColumns.contains(where: { $0.id == column.id }) {
+            pendingChanges[addColKey] = .deleteColumn(column)
+            trackChangeKey(addColKey)
+        } else {
+            workingColumns.removeAll { $0.id == column.id }
+            pendingChanges.removeValue(forKey: addColKey)
+            untrackChangeKey(addColKey)
+        }
+    }
+
+    private func applyColumnDeleteUndo(column: EditableColumnDefinition, at: Int?) {
+        undoManager.registerUndo(withTarget: self) { target in
+            target.applySchemaUndo(.columnAdd(column: column))
+        }
+        undoManager.setActionName(String(localized: "Delete Column"))
+        let delColKey = SchemaChangeIdentifier.column(column.id)
+        if currentColumns.contains(where: { $0.id == column.id }) {
+            pendingChanges.removeValue(forKey: delColKey)
+            untrackChangeKey(delColKey)
+        } else {
+            if let at, at < workingColumns.count {
+                workingColumns.insert(column, at: at)
+            } else {
+                workingColumns.append(column)
+            }
+            pendingChanges[delColKey] = .addColumn(column)
+            trackChangeKey(delColKey)
+        }
+    }
+
+    private func applyIndexEditUndo(id: UUID, old: EditableIndexDefinition, new: EditableIndexDefinition) {
+        undoManager.registerUndo(withTarget: self) { target in
+            target.applySchemaUndo(.indexEdit(id: id, old: new, new: old))
+        }
+        undoManager.setActionName(String(localized: "Edit Index"))
+        let idxEditKey = SchemaChangeIdentifier.index(id)
+        if let idx = workingIndexes.firstIndex(where: { $0.id == id }) {
+            workingIndexes[idx] = old
+            if let currentIdx = currentIndexes.firstIndex(where: { $0.id == id }) {
+                let current = currentIndexes[currentIdx]
+                if old != current {
+                    pendingChanges[idxEditKey] = .modifyIndex(old: current, new: old)
+                    trackChangeKey(idxEditKey)
+                } else {
+                    pendingChanges.removeValue(forKey: idxEditKey)
+                    untrackChangeKey(idxEditKey)
+                }
+            } else {
+                pendingChanges[idxEditKey] = .addIndex(old)
+                trackChangeKey(idxEditKey)
+            }
+        }
+    }
+
+    private func applyIndexAddUndo(index: EditableIndexDefinition) {
+        let removedIndex = workingIndexes.firstIndex(where: { $0.id == index.id })
+        undoManager.registerUndo(withTarget: self) { target in
+            target.applySchemaUndo(.indexDelete(index: index, at: removedIndex))
+        }
+        undoManager.setActionName(String(localized: "Add Index"))
+        let idxAddKey = SchemaChangeIdentifier.index(index.id)
+        if currentIndexes.contains(where: { $0.id == index.id }) {
+            pendingChanges[idxAddKey] = .deleteIndex(index)
+            trackChangeKey(idxAddKey)
+        } else {
+            workingIndexes.removeAll { $0.id == index.id }
+            pendingChanges.removeValue(forKey: idxAddKey)
+            untrackChangeKey(idxAddKey)
+        }
+    }
+
+    private func applyIndexDeleteUndo(index: EditableIndexDefinition, at: Int?) {
+        undoManager.registerUndo(withTarget: self) { target in
+            target.applySchemaUndo(.indexAdd(index: index))
+        }
+        undoManager.setActionName(String(localized: "Delete Index"))
+        let idxDelKey = SchemaChangeIdentifier.index(index.id)
+        if currentIndexes.contains(where: { $0.id == index.id }) {
+            pendingChanges.removeValue(forKey: idxDelKey)
+            untrackChangeKey(idxDelKey)
+        } else {
+            if let at, at < workingIndexes.count {
+                workingIndexes.insert(index, at: at)
+            } else {
+                workingIndexes.append(index)
+            }
+            pendingChanges[idxDelKey] = .addIndex(index)
+            trackChangeKey(idxDelKey)
+        }
+    }
+
+    private func applyForeignKeyEditUndo(
+        id: UUID,
+        old: EditableForeignKeyDefinition,
+        new: EditableForeignKeyDefinition
+    ) {
+        undoManager.registerUndo(withTarget: self) { target in
+            target.applySchemaUndo(.foreignKeyEdit(id: id, old: new, new: old))
+        }
+        undoManager.setActionName(String(localized: "Edit Foreign Key"))
+        let fkEditKey = SchemaChangeIdentifier.foreignKey(id)
+        if let idx = workingForeignKeys.firstIndex(where: { $0.id == id }) {
+            workingForeignKeys[idx] = old
+            if let currentIdx = currentForeignKeys.firstIndex(where: { $0.id == id }) {
+                let current = currentForeignKeys[currentIdx]
+                if old != current {
+                    pendingChanges[fkEditKey] = .modifyForeignKey(old: current, new: old)
+                    trackChangeKey(fkEditKey)
+                } else {
+                    pendingChanges.removeValue(forKey: fkEditKey)
+                    untrackChangeKey(fkEditKey)
+                }
+            } else {
+                pendingChanges[fkEditKey] = .addForeignKey(old)
+                trackChangeKey(fkEditKey)
+            }
+        }
+    }
+
+    private func applyForeignKeyAddUndo(fk: EditableForeignKeyDefinition) {
+        let removedIndex = workingForeignKeys.firstIndex(where: { $0.id == fk.id })
+        undoManager.registerUndo(withTarget: self) { target in
+            target.applySchemaUndo(.foreignKeyDelete(fk: fk, at: removedIndex))
+        }
+        undoManager.setActionName(String(localized: "Add Foreign Key"))
+        let fkAddKey = SchemaChangeIdentifier.foreignKey(fk.id)
+        if currentForeignKeys.contains(where: { $0.id == fk.id }) {
+            pendingChanges[fkAddKey] = .deleteForeignKey(fk)
+            trackChangeKey(fkAddKey)
+        } else {
+            workingForeignKeys.removeAll { $0.id == fk.id }
+            pendingChanges.removeValue(forKey: fkAddKey)
+            untrackChangeKey(fkAddKey)
+        }
+    }
+
+    private func applyForeignKeyDeleteUndo(fk: EditableForeignKeyDefinition, at: Int?) {
+        undoManager.registerUndo(withTarget: self) { target in
+            target.applySchemaUndo(.foreignKeyAdd(fk: fk))
+        }
+        undoManager.setActionName(String(localized: "Delete Foreign Key"))
+        let fkDelKey = SchemaChangeIdentifier.foreignKey(fk.id)
+        if currentForeignKeys.contains(where: { $0.id == fk.id }) {
+            pendingChanges.removeValue(forKey: fkDelKey)
+            untrackChangeKey(fkDelKey)
+        } else {
+            if let at, at < workingForeignKeys.count {
+                workingForeignKeys.insert(fk, at: at)
+            } else {
+                workingForeignKeys.append(fk)
+            }
+            pendingChanges[fkDelKey] = .addForeignKey(fk)
+            trackChangeKey(fkDelKey)
+        }
+    }
+
+    private func applyPrimaryKeyChangeUndo(old: [String]) {
+        let current = workingPrimaryKey
+        undoManager.registerUndo(withTarget: self) { target in
+            target.applySchemaUndo(.primaryKeyChange(old: current, new: old))
+        }
+        undoManager.setActionName(String(localized: "Change Primary Key"))
+        workingPrimaryKey = old
+        let pkKey = SchemaChangeIdentifier.primaryKey
+        if workingPrimaryKey != currentPrimaryKey {
+            pendingChanges[pkKey] = .modifyPrimaryKey(old: currentPrimaryKey, new: workingPrimaryKey)
+            trackChangeKey(pkKey)
+        } else {
+            pendingChanges.removeValue(forKey: pkKey)
+            untrackChangeKey(pkKey)
+        }
     }
 
     // MARK: - Visual State Management
 
     func getVisualState(for row: Int, tab: StructureTab) -> RowVisualState {
-        // Check cache first
-        let tabIndex: Int
-        switch tab {
-        case .columns: tabIndex = 0
-        case .indexes: tabIndex = 1
-        case .foreignKeys: tabIndex = 2
-        case .ddl: tabIndex = 3
-        case .parts: tabIndex = 4
-        }
-        let cacheKey = tabIndex * 10_000 + row
+        let cacheKey = VisualStateCacheKey(tab: tab, row: row)
         if let cached = visualStateCache[cacheKey] {
             return cached
         }
@@ -698,7 +811,7 @@ final class StructureChangeManager {
             state = RowVisualState(
                 isDeleted: isDeleted,
                 isInserted: isInserted,
-                modifiedColumns: isModified ? Set(0..<4) : []
+                modifiedColumns: isModified ? Set(0..<5) : []
             )
 
         case .foreignKeys:
@@ -713,7 +826,7 @@ final class StructureChangeManager {
             state = RowVisualState(
                 isDeleted: isDeleted,
                 isInserted: isInserted,
-                modifiedColumns: isModified ? Set(0..<6) : []
+                modifiedColumns: isModified ? Set(0..<7) : []
             )
 
         case .ddl:
@@ -729,4 +842,45 @@ final class StructureChangeManager {
     func rebuildVisualStateCache() {
         visualStateCache.removeAll()
     }
+
+    private struct VisualStateCacheKey: Hashable {
+        let tab: StructureTab
+        let row: Int
+    }
+
+    // MARK: - ChangeManaging Conformance (Data-Specific No-Ops)
+
+    var rowChanges: [RowChange] { [] }
+
+    var insertedRowIndices: Set<Int> { [] }
+
+    func isRowDeleted(_ rowIndex: Int) -> Bool { false }
+
+    func recordCellChange(
+        rowIndex: Int,
+        columnIndex: Int,
+        columnName: String,
+        oldValue: String?,
+        newValue: String?,
+        originalRow: [String?]?
+    ) {}
+
+    func undoRowDeletion(rowIndex: Int) {}
+
+    func undoRowInsertion(rowIndex: Int) {}
+}
+
+// MARK: - Schema Undo Action
+
+enum SchemaUndoAction {
+    case columnEdit(id: UUID, old: EditableColumnDefinition, new: EditableColumnDefinition)
+    case columnAdd(column: EditableColumnDefinition)
+    case columnDelete(column: EditableColumnDefinition, at: Int?)
+    case indexEdit(id: UUID, old: EditableIndexDefinition, new: EditableIndexDefinition)
+    case indexAdd(index: EditableIndexDefinition)
+    case indexDelete(index: EditableIndexDefinition, at: Int?)
+    case foreignKeyEdit(id: UUID, old: EditableForeignKeyDefinition, new: EditableForeignKeyDefinition)
+    case foreignKeyAdd(fk: EditableForeignKeyDefinition)
+    case foreignKeyDelete(fk: EditableForeignKeyDefinition, at: Int?)
+    case primaryKeyChange(old: [String], new: [String])
 }

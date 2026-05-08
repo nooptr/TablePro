@@ -11,8 +11,8 @@ import SwiftUI
 enum TableRowLogic {
     static func accessibilityLabel(table: TableInfo, isPendingDelete: Bool, isPendingTruncate: Bool) -> String {
         var label = table.type == .view
-            ? String(localized: "View: \(table.name)")
-            : String(localized: "Table: \(table.name)")
+            ? String(format: String(localized: "View: %@"), table.name)
+            : String(format: String(localized: "Table: %@"), table.name)
         if isPendingDelete {
             label += ", " + String(localized: "pending delete")
         } else if isPendingTruncate {
@@ -22,14 +22,14 @@ enum TableRowLogic {
     }
 
     static func iconColor(table: TableInfo, isPendingDelete: Bool, isPendingTruncate: Bool) -> Color {
-        if isPendingDelete { return .red }
-        if isPendingTruncate { return .orange }
-        return table.type == .view ? .purple : .blue
+        if isPendingDelete { return Color(nsColor: .systemRed) }
+        if isPendingTruncate { return Color(nsColor: .systemOrange) }
+        return table.type == .view ? Color(nsColor: .systemPurple) : Color(nsColor: .systemBlue)
     }
 
     static func textColor(isPendingDelete: Bool, isPendingTruncate: Bool) -> Color {
-        if isPendingDelete { return .red }
-        if isPendingTruncate { return .orange }
+        if isPendingDelete { return Color(nsColor: .systemRed) }
+        if isPendingTruncate { return Color(nsColor: .systemOrange) }
         return .primary
     }
 }
@@ -37,7 +37,6 @@ enum TableRowLogic {
 /// Row view for a single table
 struct TableRow: View {
     let table: TableInfo
-    let isActive: Bool
     let isPendingTruncate: Bool
     let isPendingDelete: Bool
 
@@ -47,28 +46,28 @@ struct TableRow: View {
             ZStack(alignment: .bottomTrailing) {
                 Image(systemName: table.type == .view ? "eye" : "tablecells")
                     .foregroundStyle(TableRowLogic.iconColor(table: table, isPendingDelete: isPendingDelete, isPendingTruncate: isPendingTruncate))
-                    .frame(width: ThemeEngine.shared.activeTheme.iconSizes.default)
+                    .frame(width: 14)
 
                 // Pending operation indicator
                 if isPendingDelete {
                     Image(systemName: "minus.circle.fill")
-                        .font(.system(size: ThemeEngine.shared.activeTheme.typography.caption))
-                        .foregroundStyle(.red)
+                        .font(.caption)
+                        .foregroundStyle(Color(nsColor: .systemRed))
                         .offset(x: 4, y: 4)
                 } else if isPendingTruncate {
                     Image(systemName: "exclamationmark.circle.fill")
-                        .font(.system(size: ThemeEngine.shared.activeTheme.typography.caption))
-                        .foregroundStyle(.orange)
+                        .font(.caption)
+                        .foregroundStyle(Color(nsColor: .systemOrange))
                         .offset(x: 4, y: 4)
                 }
             }
 
             Text(table.name)
-                .font(.system(size: ThemeEngine.shared.activeTheme.typography.medium, design: .monospaced))
+                .font(.system(.callout, design: .monospaced))
                 .lineLimit(1)
                 .foregroundStyle(TableRowLogic.textColor(isPendingDelete: isPendingDelete, isPendingTruncate: isPendingTruncate))
         }
-        .padding(.vertical, ThemeEngine.shared.activeTheme.spacing.xxs)
+        .padding(.vertical, 4)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(TableRowLogic.accessibilityLabel(table: table, isPendingDelete: isPendingDelete, isPendingTruncate: isPendingTruncate))
     }

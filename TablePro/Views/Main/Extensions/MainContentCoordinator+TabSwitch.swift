@@ -7,159 +7,153 @@
 //
 
 import Foundation
+import os
 
 extension MainContentCoordinator {
     func handleTabChange(
         from oldTabId: UUID?,
         to newTabId: UUID?,
-        selectedRowIndices: inout Set<Int>,
         tabs: [QueryTab]
     ) {
+        let start = Date()
+        Self.lifecycleLogger.debug(
+            "[switch] handleTabChange start from=\(oldTabId?.uuidString ?? "nil", privacy: .public) to=\(newTabId?.uuidString ?? "nil", privacy: .public) connId=\(self.connectionId, privacy: .public) tabsCount=\(self.tabManager.tabs.count)"
+        )
         isHandlingTabSwitch = true
-        defer { isHandlingTabSwitch = false }
+        defer {
+            isHandlingTabSwitch = false
+            Self.lifecycleLogger.debug(
+                "[switch] handleTabChange done to=\(newTabId?.uuidString ?? "nil", privacy: .public) elapsedMs=\(Int(Date().timeIntervalSince(start) * 1_000))"
+            )
+        }
 
-        // Persist the outgoing tab's unsaved changes and filter state so they survive the switch
+        let saveStart = Date()
         if let oldId = oldTabId,
            let oldIndex = tabManager.tabs.firstIndex(where: { $0.id == oldId })
         {
             if changeManager.hasChanges {
                 tabManager.tabs[oldIndex].pendingChanges = changeManager.saveState()
             }
-            tabManager.tabs[oldIndex].filterState = filterStateManager.saveToTabState()
-            if let tableName = tabManager.tabs[oldIndex].tableName {
-                filterStateManager.saveLastFilters(for: tableName)
+            if let tableName = tabManager.tabs[oldIndex].tableContext.tableName {
+                FilterSettingsStorage.shared.saveLastFilters(
+                    tabManager.tabs[oldIndex].filterState.appliedFilters,
+                    for: tableName
+                )
             }
-            saveColumnVisibilityToTab()
-            saveColumnLayoutForTable()
+            persistOutgoingTabHiddenColumns(oldIndex: oldIndex)
         }
+        let saveMs = Int(Date().timeIntervalSince(saveStart) * 1_000)
 
+        // Defer to the next run-loop tick so the synchronous switch path
+        // stays cheap; the sort + budget calculation is non-trivial on
+        // connections with many open tabs.
         if tabManager.tabs.count > 2 {
             let activeIds: Set<UUID> = Set([oldTabId, newTabId].compactMap { $0 })
-            evictInactiveTabs(excluding: activeIds)
+            Task { @MainActor [weak self] in
+                self?.evictInactiveTabs(excluding: activeIds)
+            }
         }
 
+        let restoreStart = Date()
         if let newId = newTabId,
            let newIndex = tabManager.tabs.firstIndex(where: { $0.id == newId }) {
             let newTab = tabManager.tabs[newIndex]
+            let newRows = tabSessionRegistry.tableRows(for: newId)
 
-            // Restore filter state for new tab
-            filterStateManager.restoreFromTabState(newTab.filterState)
-
-            // Restore column visibility for new tab
-            columnVisibilityManager.restoreFromColumnLayout(newTab.columnLayout.hiddenColumns)
-
-            selectedRowIndices = newTab.selectedRowIndices
-            AppState.shared.isCurrentTabEditable = newTab.isEditable && !newTab.isView && newTab.tableName != nil
+            selectionState.indices = newTab.selectedRowIndices
             toolbarState.isTableTab = newTab.tabType == .table
-            toolbarState.isResultsCollapsed = newTab.isResultsCollapsed
-            AppState.shared.isTableTab = newTab.tabType == .table
+            toolbarState.isResultsCollapsed = newTab.display.isResultsCollapsed
 
-            // Configure change manager without triggering reload yet — we'll fire a single
-            // reloadVersion bump below after everything is set up.
             let pendingState = newTab.pendingChanges
             if pendingState.hasChanges {
-                changeManager.restoreState(from: pendingState, tableName: newTab.tableName ?? "", databaseType: connection.type)
+                changeManager.restoreState(from: pendingState, tableName: newTab.tableContext.tableName ?? "", databaseType: connection.type)
             } else {
                 changeManager.configureForTable(
-                    tableName: newTab.tableName ?? "",
-                    columns: newTab.resultColumns,
-                    primaryKeyColumn: newTab.primaryKeyColumn ?? newTab.resultColumns.first,
+                    tableName: newTab.tableContext.tableName ?? "",
+                    columns: newRows.columns,
+                    primaryKeyColumns: newTab.tableContext.primaryKeyColumns.isEmpty
+                        ? newRows.columns.prefix(1).map { $0 }
+                        : newTab.tableContext.primaryKeyColumns,
                     databaseType: connection.type,
                     triggerReload: false
                 )
             }
 
-            // Defer reloadVersion bump — only needed when we won't run a query.
-            // When a query runs, executeQueryInternal Phase 1 sets new result data
-            // that triggers its own SwiftUI update; bumping beforehand causes a
-            // redundant re-evaluation that blocks the Task executor (15-40ms).
+            let restoreMs = Int(Date().timeIntervalSince(restoreStart) * 1_000)
+            Self.lifecycleLogger.debug(
+                "[switch] handleTabChange phases: saveOutgoing=\(saveMs)ms restoreIncoming=\(restoreMs)ms"
+            )
 
-            if !newTab.databaseName.isEmpty {
-                let currentDatabase: String
-                if let session = DatabaseManager.shared.session(for: connectionId) {
-                    currentDatabase = session.activeDatabase
-                } else {
-                    currentDatabase = connection.database
-                }
+            if !newTab.tableContext.databaseName.isEmpty {
+                let currentDatabase = activeDatabaseName
 
-                if newTab.databaseName != currentDatabase {
+                if newTab.tableContext.databaseName != currentDatabase {
+                    Self.lifecycleLogger.debug(
+                        "[switch] handleTabChange triggering switchDatabase from=\(currentDatabase, privacy: .public) to=\(newTab.tableContext.databaseName, privacy: .public)"
+                    )
                     changeManager.reloadVersion += 1
-                    Task { @MainActor in
-                        await switchDatabase(to: newTab.databaseName)
+                    Task {
+                        await switchDatabase(to: newTab.tableContext.databaseName)
                     }
                     return  // switchDatabase will re-execute the query
                 }
             }
 
-            // If the tab shows isExecuting but has no results, the previous query was
-            // likely cancelled when the user rapidly switched away. Force-clear the stale
-            // flag so the lazy-load check below can re-execute the query.
-            if newTab.isExecuting && newTab.resultRows.isEmpty && newTab.lastExecutedAt == nil {
-                let tabId = newId
-                Task { @MainActor [weak self] in
-                    guard let self,
-                          let idx = self.tabManager.tabs.firstIndex(where: { $0.id == tabId }),
-                          self.tabManager.tabs[idx].isExecuting else { return }
-                    self.tabManager.tabs[idx].isExecuting = false
-                }
-            }
-
-            let isEvicted = newTab.rowBuffer.isEvicted
-            let needsLazyQuery = newTab.tabType == .table
-                && (newTab.resultRows.isEmpty || isEvicted)
-                && (newTab.lastExecutedAt == nil || isEvicted)
-                && !newTab.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-
-            if needsLazyQuery {
-                if let session = DatabaseManager.shared.session(for: connectionId), session.isConnected {
-                    executeTableTabQueryDirectly()
-                } else {
-                    changeManager.reloadVersion += 1
-                    needsLazyLoad = true
-                }
-            } else {
-                changeManager.reloadVersion += 1
-            }
+            changeManager.reloadVersion += 1
         } else {
-            AppState.shared.isCurrentTabEditable = false
             toolbarState.isTableTab = false
             toolbarState.isResultsCollapsed = false
-            AppState.shared.isTableTab = false
-            filterStateManager.clearAll()
         }
     }
 
     private func evictInactiveTabs(excluding activeTabIds: Set<UUID>) {
-        let candidates = tabManager.tabs.filter {
-            !activeTabIds.contains($0.id)
-                && !$0.rowBuffer.isEvicted
-                && !$0.resultRows.isEmpty
-                && $0.lastExecutedAt != nil
-                && !$0.pendingChanges.hasChanges
+        let start = Date()
+        let candidates: [(tab: QueryTab, rows: TableRows)] = tabManager.tabs.compactMap { tab in
+            guard !activeTabIds.contains(tab.id),
+                  tab.execution.lastExecutedAt != nil,
+                  !tab.pendingChanges.hasChanges,
+                  let rows = tabSessionRegistry.existingTableRows(for: tab.id),
+                  !tabSessionRegistry.isEvicted(tab.id),
+                  !rows.rows.isEmpty
+            else { return nil }
+            return (tab, rows)
         }
 
-        // Sort by oldest first, breaking ties by largest estimated footprint first
         let sorted = candidates.sorted {
-            let t0 = $0.lastExecutedAt ?? .distantFuture
-            let t1 = $1.lastExecutedAt ?? .distantFuture
+            let t0 = $0.tab.execution.lastExecutedAt ?? .distantFuture
+            let t1 = $1.tab.execution.lastExecutedAt ?? .distantFuture
             if t0 != t1 { return t0 < t1 }
             let size0 = MemoryPressureAdvisor.estimatedFootprint(
-                rowCount: $0.rowBuffer.rows.count,
-                columnCount: $0.rowBuffer.columns.count
+                rowCount: $0.rows.rows.count,
+                columnCount: $0.rows.columns.count
             )
             let size1 = MemoryPressureAdvisor.estimatedFootprint(
-                rowCount: $1.rowBuffer.rows.count,
-                columnCount: $1.rowBuffer.columns.count
+                rowCount: $1.rows.rows.count,
+                columnCount: $1.rows.columns.count
             )
             return size0 > size1
         }
 
         let maxInactiveLoaded = MemoryPressureAdvisor.budgetForInactiveTabs()
-        guard sorted.count > maxInactiveLoaded else { return }
+        guard sorted.count > maxInactiveLoaded else {
+            Self.lifecycleLogger.debug(
+                "[switch] evictInactiveTabs no-op candidates=\(sorted.count) budget=\(maxInactiveLoaded) elapsedMs=\(Int(Date().timeIntervalSince(start) * 1_000))"
+            )
+            return
+        }
         let toEvict = sorted.dropLast(maxInactiveLoaded)
 
-        for tab in toEvict {
-            tab.rowBuffer.evict()
+        for entry in toEvict {
+            tabSessionRegistry.evict(for: entry.tab.id)
+            if let index = tabManager.tabs.firstIndex(where: { $0.id == entry.tab.id }) {
+                // Bump QueryTab.loadEpoch to invalidate the `.task(id:)` key in
+                // MainEditorContentView, so the next selection of this tab
+                // triggers lazy-load. The session-side bump is not observed.
+                tabManager.tabs[index].loadEpoch &+= 1
+            }
         }
+        Self.lifecycleLogger.debug(
+            "[switch] evictInactiveTabs evicted=\(toEvict.count) keptInactive=\(maxInactiveLoaded) elapsedMs=\(Int(Date().timeIntervalSince(start) * 1_000))"
+        )
     }
 }

@@ -8,6 +8,16 @@
 
 import Foundation
 
+/// Declares the intent behind creating a new window tab.
+internal enum TabIntent: String, Codable, Hashable {
+    /// Open a specific tab with content (table, query with SQL, create-table, etc.)
+    case openContent
+    /// Create a new empty query tab (Cmd+T, native "+" button, toolbar "+")
+    case newEmptyTab
+    /// First window for a connection — restore tabs from disk or create default
+    case restoreOrDefault
+}
+
 /// Payload passed to each native window tab to identify what content it should display.
 /// Each window-tab receives this at creation time via `openWindow(id:value:)`.
 internal struct EditorTabPayload: Codable, Hashable {
@@ -37,8 +47,21 @@ internal struct EditorTabPayload: Codable, Hashable {
     internal let initialFilterState: TabFilterState?
     /// Source file URL for .sql files opened from disk (used for deduplication)
     internal let sourceFileURL: URL?
-    /// Whether this is a Cmd+T new tab (creates default tab eagerly, skips disk restoration)
-    internal let isNewTab: Bool
+    /// Schema key for ER diagram tabs
+    internal let erDiagramSchemaKey: String?
+    /// Tab title (for restoring persisted tabs with their original names)
+    internal let tabTitle: String?
+    /// The intent behind creating this tab
+    internal let intent: TabIntent
+
+    private enum CodingKeys: String, CodingKey {
+        case id, connectionId, tabType, tableName, databaseName, schemaName
+        case initialQuery, isView, showStructure, skipAutoExecute, isPreview
+        case tabTitle
+        case initialFilterState, sourceFileURL, erDiagramSchemaKey, intent
+        // Legacy key for backward decoding only
+        case isNewTab
+    }
 
     internal init(
         id: UUID = UUID(),
@@ -54,7 +77,9 @@ internal struct EditorTabPayload: Codable, Hashable {
         isPreview: Bool = false,
         initialFilterState: TabFilterState? = nil,
         sourceFileURL: URL? = nil,
-        isNewTab: Bool = false
+        erDiagramSchemaKey: String? = nil,
+        tabTitle: String? = nil,
+        intent: TabIntent = .openContent
     ) {
         self.id = id
         self.connectionId = connectionId
@@ -69,7 +94,9 @@ internal struct EditorTabPayload: Codable, Hashable {
         self.isPreview = isPreview
         self.initialFilterState = initialFilterState
         self.sourceFileURL = sourceFileURL
-        self.isNewTab = isNewTab
+        self.erDiagramSchemaKey = erDiagramSchemaKey
+        self.tabTitle = tabTitle
+        self.intent = intent
     }
 
     internal init(from decoder: Decoder) throws {
@@ -87,14 +114,34 @@ internal struct EditorTabPayload: Codable, Hashable {
         isPreview = try container.decodeIfPresent(Bool.self, forKey: .isPreview) ?? false
         initialFilterState = try container.decodeIfPresent(TabFilterState.self, forKey: .initialFilterState)
         sourceFileURL = try container.decodeIfPresent(URL.self, forKey: .sourceFileURL)
-        isNewTab = try container.decodeIfPresent(Bool.self, forKey: .isNewTab) ?? false
+        erDiagramSchemaKey = try container.decodeIfPresent(String.self, forKey: .erDiagramSchemaKey)
+        tabTitle = try container.decodeIfPresent(String.self, forKey: .tabTitle)
+        if let decodedIntent = try container.decodeIfPresent(TabIntent.self, forKey: .intent) {
+            intent = decodedIntent
+        } else {
+            let legacyNewTab = try container.decodeIfPresent(Bool.self, forKey: .isNewTab) ?? false
+            intent = legacyNewTab ? .newEmptyTab : .openContent
+        }
     }
 
-    /// Whether this payload is a "connection-only" payload — just a connectionId
-    /// with no specific tab content. Used by MainContentView to decide whether
-    /// to create a default tab or restore tabs from storage.
-    internal var isConnectionOnly: Bool {
-        tabType == .query && tableName == nil && initialQuery == nil
+    internal func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(connectionId, forKey: .connectionId)
+        try container.encode(tabType, forKey: .tabType)
+        try container.encodeIfPresent(tableName, forKey: .tableName)
+        try container.encodeIfPresent(databaseName, forKey: .databaseName)
+        try container.encodeIfPresent(schemaName, forKey: .schemaName)
+        try container.encodeIfPresent(initialQuery, forKey: .initialQuery)
+        try container.encode(isView, forKey: .isView)
+        try container.encode(showStructure, forKey: .showStructure)
+        try container.encode(skipAutoExecute, forKey: .skipAutoExecute)
+        try container.encode(isPreview, forKey: .isPreview)
+        try container.encodeIfPresent(initialFilterState, forKey: .initialFilterState)
+        try container.encodeIfPresent(sourceFileURL, forKey: .sourceFileURL)
+        try container.encodeIfPresent(erDiagramSchemaKey, forKey: .erDiagramSchemaKey)
+        try container.encodeIfPresent(tabTitle, forKey: .tabTitle)
+        try container.encode(intent, forKey: .intent)
     }
 
     /// Create a payload from a persisted QueryTab for restoration
@@ -102,16 +149,18 @@ internal struct EditorTabPayload: Codable, Hashable {
         self.id = UUID()
         self.connectionId = connectionId
         self.tabType = tab.tabType
-        self.tableName = tab.tableName
-        self.databaseName = tab.databaseName
-        self.schemaName = tab.schemaName
-        self.initialQuery = tab.query
-        self.isView = tab.isView
-        self.showStructure = tab.showStructure
+        self.tableName = tab.tableContext.tableName
+        self.databaseName = tab.tableContext.databaseName
+        self.schemaName = tab.tableContext.schemaName
+        self.initialQuery = tab.content.query
+        self.isView = tab.tableContext.isView
+        self.showStructure = tab.display.resultsViewMode == .structure
         self.skipAutoExecute = skipAutoExecute
         self.isPreview = false
         self.initialFilterState = nil
-        self.sourceFileURL = tab.sourceFileURL
-        self.isNewTab = false
+        self.sourceFileURL = tab.content.sourceFileURL
+        self.erDiagramSchemaKey = tab.display.erDiagramSchemaKey
+        self.tabTitle = tab.title
+        self.intent = .openContent
     }
 }

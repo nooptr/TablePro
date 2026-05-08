@@ -66,46 +66,48 @@ internal struct RedisKeyTreeView: View {
     }
 
     private func namespaceLabel(name: String, keyCount: Int, fullPrefix: String) -> some View {
-        HStack {
-            Label(name, systemImage: "folder")
-                .foregroundStyle(.primary)
-            Spacer()
-            Text("\(keyCount)")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 1)
-                .background(.quaternary, in: Capsule())
-        }
-        .contentShape(Rectangle())
-        .onTapGesture {
+        Button {
             onSelectNamespace?(fullPrefix)
+        } label: {
+            HStack {
+                Label(name, systemImage: "folder")
+                    .foregroundStyle(.primary)
+                Spacer()
+                Text("\(keyCount)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(.quaternary, in: Capsule())
+            }
         }
+        .buttonStyle(.plain)
     }
 
     private func keyLabel(name: String, fullKey: String, keyType: String) -> some View {
-        HStack {
-            Label(name, systemImage: keyTypeIcon(keyType))
-                .foregroundStyle(.primary)
-            Spacer()
-            Text(keyType)
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-        }
-        .contentShape(Rectangle())
-        .onTapGesture {
+        Button {
             onSelectKey?(fullKey, keyType)
+        } label: {
+            HStack {
+                Label(name, systemImage: keyTypeIcon(keyType))
+                    .foregroundStyle(.primary)
+                Spacer()
+                Text(keyType)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
         }
+        .buttonStyle(.plain)
     }
 
     private func keyTypeIcon(_ type: String) -> String {
         switch type.lowercased() {
         case "string": return "textformat"
-        case "hash": return "number"
+        case "hash": return "square.grid.2x2"
         case "list": return "list.bullet"
         case "set": return "circle.grid.3x3"
         case "zset": return "chart.bar"
-        case "stream": return "arrow.right.circle"
+        case "stream": return "waveform"
         default: return "key"
         }
     }

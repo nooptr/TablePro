@@ -59,7 +59,7 @@ struct TabPersistenceCoordinatorTests {
         for (original, restored) in zip(tabs, result.tabs) {
             #expect(restored.id == original.id)
             #expect(restored.title == original.title)
-            #expect(restored.query == original.query)
+            #expect(restored.content.query == original.content.query)
             #expect(restored.tabType == original.tabType)
         }
 
@@ -103,61 +103,12 @@ struct TabPersistenceCoordinatorTests {
         await sleep()
     }
 
-    @Test("saveNow with pre-converted PersistedTab array round-trips")
-    func saveNowWithPersistedTabsRoundTrips() async {
-        let coordinator = makeCoordinator()
-        let persistedTabs = [
-            PersistedTab(id: UUID(), title: "P1", query: "SELECT 1", tabType: .query, tableName: nil),
-            PersistedTab(id: UUID(), title: "P2", query: "SELECT 2", tabType: .table, tableName: "users")
-        ]
-        let selectedId = persistedTabs[0].id
-
-        coordinator.saveNow(persistedTabs: persistedTabs, selectedTabId: selectedId)
-        await sleep()
-
-        let result = await coordinator.restoreFromDisk()
-
-        #expect(result.tabs.count == 2)
-        #expect(result.selectedTabId == selectedId)
-        #expect(result.tabs[0].title == "P1")
-        #expect(result.tabs[1].tableName == "users")
-        #expect(result.source == .disk)
-
-        coordinator.clearSavedState()
-        await sleep()
-    }
-
-    @Test("saveLastQuery + loadLastQuery round-trip")
-    func saveAndLoadLastQueryRoundTrip() async {
-        let coordinator = makeCoordinator()
-        let query = "SELECT * FROM products WHERE active = 1"
-
-        coordinator.saveLastQuery(query)
-        await sleep()
-
-        let loaded = await coordinator.loadLastQuery()
-
-        #expect(loaded == query)
-
-        coordinator.clearSavedState()
-        await sleep()
-    }
-
-    @Test("loadLastQuery returns nil when nothing saved")
-    func loadLastQueryReturnsNilWhenEmpty() async {
-        let coordinator = makeCoordinator()
-
-        let loaded = await coordinator.loadLastQuery()
-
-        #expect(loaded == nil)
-    }
-
     @Test("Large query over 500KB is truncated to empty string in persisted tab")
     func largeQueryIsTruncated() async {
         let coordinator = makeCoordinator()
         let largeQuery = String(repeating: "A", count: 600_000)
         var tab = QueryTab(id: UUID(), title: "Big", query: largeQuery, tabType: .query)
-        tab.query = largeQuery
+        tab.content.query = largeQuery
 
         coordinator.saveNow(tabs: [tab], selectedTabId: tab.id)
         await sleep()
@@ -165,7 +116,7 @@ struct TabPersistenceCoordinatorTests {
         let result = await coordinator.restoreFromDisk()
 
         #expect(result.tabs.count == 1)
-        #expect(result.tabs[0].query == "")
+        #expect(result.tabs[0].content.query == "")
         #expect(result.tabs[0].title == "Big")
 
         coordinator.clearSavedState()
@@ -234,13 +185,117 @@ struct TabPersistenceCoordinatorTests {
         #expect(afterClear.source == .none)
     }
 
+    @Test("Preview tabs are excluded from persistence")
+    func previewTabsExcludedFromPersistence() async {
+        let coordinator = makeCoordinator()
+        let normalTab = QueryTab(id: UUID(), title: "Normal", query: "SELECT 1", tabType: .query)
+        var previewTab = QueryTab(id: UUID(), title: "Preview", query: "SELECT 2", tabType: .table, tableName: "users")
+        previewTab.isPreview = true
+
+        coordinator.saveNow(tabs: [normalTab, previewTab], selectedTabId: normalTab.id)
+        await sleep()
+
+        let result = await coordinator.restoreFromDisk()
+
+        #expect(result.tabs.count == 1)
+        #expect(result.tabs[0].id == normalTab.id)
+        #expect(result.tabs[0].title == "Normal")
+
+        coordinator.clearSavedState()
+        await sleep()
+    }
+
+    @Test("All-preview tabs clears saved state")
+    func allPreviewTabsClearsSavedState() async {
+        let coordinator = makeCoordinator()
+        let normalTab = QueryTab(id: UUID(), title: "Normal", query: "SELECT 1", tabType: .query)
+
+        // First save a normal tab
+        coordinator.saveNow(tabs: [normalTab], selectedTabId: normalTab.id)
+        await sleep()
+
+        // Now save only preview tabs — should clear state
+        var previewTab = QueryTab(id: UUID(), title: "Preview", query: "SELECT 2", tabType: .table, tableName: "users")
+        previewTab.isPreview = true
+        coordinator.saveNow(tabs: [previewTab], selectedTabId: previewTab.id)
+        await sleep()
+
+        let result = await coordinator.restoreFromDisk()
+        #expect(result.tabs.isEmpty)
+        #expect(result.source == .none)
+    }
+
+    @Test("selectedTabId normalizes when selected tab is preview")
+    func selectedTabIdNormalizesWhenPreview() async {
+        let coordinator = makeCoordinator()
+        let normalTab = QueryTab(id: UUID(), title: "Normal", query: "SELECT 1", tabType: .query)
+        var previewTab = QueryTab(id: UUID(), title: "Preview", query: "SELECT 2", tabType: .table, tableName: "users")
+        previewTab.isPreview = true
+
+        // Select the preview tab — should normalize to first non-preview tab
+        coordinator.saveNow(tabs: [normalTab, previewTab], selectedTabId: previewTab.id)
+        await sleep()
+
+        let result = await coordinator.restoreFromDisk()
+        #expect(result.selectedTabId == normalTab.id)
+
+        coordinator.clearSavedState()
+        await sleep()
+    }
+
+    @Test("Linked-favorite tab with sourceFileURL round-trips through persistence")
+    func sourceFileURLRoundTrip() async {
+        let coordinator = makeCoordinator()
+        let url = URL(fileURLWithPath: "/Users/test/Documents/sample.sql")
+        var tab = QueryTab(id: UUID(), title: "sample", query: "SELECT 1", tabType: .query)
+        tab.content.sourceFileURL = url
+
+        coordinator.saveNow(tabs: [tab], selectedTabId: tab.id)
+        await sleep()
+
+        let result = await coordinator.restoreFromDisk()
+
+        #expect(result.tabs.count == 1)
+        #expect(result.tabs[0].content.sourceFileURL == url)
+        #expect(result.tabs[0].id == tab.id)
+
+        coordinator.clearSavedState()
+        await sleep()
+    }
+
+    @Test("Three linked-favorite tabs all round-trip with distinct sourceFileURLs")
+    func multipleLinkedFavoriteTabsRoundTrip() async {
+        let coordinator = makeCoordinator()
+        let urls = (0..<3).map { URL(fileURLWithPath: "/tmp/file-\($0).sql") }
+        let tabs: [QueryTab] = urls.enumerated().map { index, url in
+            var tab = QueryTab(id: UUID(), title: "file-\(index)", query: "SELECT \(index)", tabType: .query)
+            tab.content.sourceFileURL = url
+            return tab
+        }
+
+        coordinator.saveNow(tabs: tabs, selectedTabId: tabs[1].id)
+        await sleep()
+
+        let result = await coordinator.restoreFromDisk()
+
+        #expect(result.tabs.count == 3)
+        #expect(result.selectedTabId == tabs[1].id)
+        for (original, restored) in zip(tabs, result.tabs) {
+            #expect(restored.id == original.id)
+            #expect(restored.content.sourceFileURL == original.content.sourceFileURL)
+        }
+
+        coordinator.clearSavedState()
+        await sleep()
+    }
+
     @Test("Tab properties preserved: tableName, isView, databaseName")
     func tabPropertiesPreserved() async {
         let coordinator = makeCoordinator()
 
         var tab = QueryTab(id: UUID(), title: "users", query: "SELECT * FROM users", tabType: .table, tableName: "users")
-        tab.isView = true
-        tab.databaseName = "production"
+        tab.tableContext.isView = true
+        tab.tableContext.databaseName = "production"
 
         coordinator.saveNow(tabs: [tab], selectedTabId: tab.id)
         await sleep()
@@ -249,9 +304,9 @@ struct TabPersistenceCoordinatorTests {
 
         #expect(result.tabs.count == 1)
         let restored = result.tabs[0]
-        #expect(restored.tableName == "users")
-        #expect(restored.isView == true)
-        #expect(restored.databaseName == "production")
+        #expect(restored.tableContext.tableName == "users")
+        #expect(restored.tableContext.isView == true)
+        #expect(restored.tableContext.databaseName == "production")
         #expect(restored.id == tab.id)
         #expect(restored.tabType == .table)
 

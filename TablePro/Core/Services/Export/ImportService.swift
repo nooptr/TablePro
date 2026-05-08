@@ -17,6 +17,7 @@ struct ImportState {
     var isImporting: Bool = false
     var progress: Double = 0.0
     var processedStatements: Int = 0
+    var skippedStatements: Int = 0
     var estimatedTotalStatements: Int = 0
     var statusMessage: String = ""
     var errorMessage: String?
@@ -48,9 +49,12 @@ final class ImportService {
     func importFile(
         from url: URL,
         formatId: String,
-        encoding: String.Encoding
+        encoding: String.Encoding,
+        decompressedURL: URL? = nil,
+        ownsDecompressedFile: Bool = false,
+        knownStatementCount: Int? = nil
     ) async throws -> PluginImportResult {
-        guard let plugin = PluginManager.shared.importPlugins[formatId] else {
+        guard let plugin = PluginManager.shared.importPlugin(forFormat: formatId) else {
             throw PluginImportError.importFailed("Import format '\(formatId)' not found")
         }
 
@@ -67,32 +71,40 @@ final class ImportService {
 
         // Create adapter and source
         let sink = ImportDataSinkAdapter(driver: driver, databaseType: connection.type)
-        let source = SqlFileImportSource(url: url, encoding: encoding)
+        let source = SqlFileImportSource(url: url, encoding: encoding, decompressedURL: decompressedURL, ownsDecompressedFile: ownsDecompressedFile)
         defer { source.cleanup() }
 
         // Create progress tracker
-        let progress = PluginImportProgress()
+        let initialTotal = Int64(knownStatementCount ?? 0)
+        let nsProgress = Progress(totalUnitCount: initialTotal)
+        let progress = PluginImportProgress(progress: nsProgress)
+        if knownStatementCount != nil {
+            state.estimatedTotalStatements = Int(initialTotal)
+        }
         currentProgress = progress
 
-        // Wire progress to UI state via coalescer
-        let pendingUpdate = ProgressUpdateCoalescer()
-        progress.onUpdate = { [weak self] processed, total, status in
-            let shouldDispatch = pendingUpdate.markPending()
-            if shouldDispatch {
-                Task { @MainActor [weak self] in
-                    pendingUpdate.clearPending()
-                    guard let self else { return }
-                    self.state.processedStatements = processed
-                    self.state.estimatedTotalStatements = total
-                    if total > 0 {
-                        self.state.progress = min(1.0, Double(processed) / Double(total))
-                    }
-                    if !status.isEmpty {
-                        self.state.statusMessage = status
-                    }
+        let observation = nsProgress.observe(\.completedUnitCount) { [weak self] observed, _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let processed = Int(observed.completedUnitCount)
+                let total = Int(observed.totalUnitCount)
+                self.state.processedStatements = processed
+                self.state.estimatedTotalStatements = total
+                if total > 0 {
+                    self.state.progress = min(1.0, Double(processed) / Double(total))
                 }
             }
         }
+        defer { observation.invalidate() }
+
+        let statusObservation = nsProgress.observe(\.localizedAdditionalDescription) { [weak self] observed, _ in
+            let status = observed.localizedAdditionalDescription ?? ""
+            Task { @MainActor [weak self] in
+                guard let self, !status.isEmpty else { return }
+                self.state.statusMessage = status
+            }
+        }
+        defer { statusObservation.invalidate() }
 
         let result: PluginImportResult
         do {
@@ -108,7 +120,7 @@ final class ImportService {
             QueryHistoryManager.shared.recordQuery(
                 query: "-- Import from \(url.lastPathComponent) (\(progress.processedStatements) statements before failure)",
                 connectionId: connection.id,
-                databaseName: connection.database,
+                databaseName: DatabaseManager.shared.activeDatabaseName(for: connection),
                 executionTime: 0,
                 rowCount: progress.processedStatements,
                 wasSuccessful: false,
@@ -120,14 +132,15 @@ final class ImportService {
 
         // Update final state
         state.processedStatements = result.executedStatements
-        state.estimatedTotalStatements = result.executedStatements
+        state.skippedStatements = result.skippedStatements
+        state.estimatedTotalStatements = result.executedStatements + result.skippedStatements
         state.progress = 1.0
 
         // Record success history
         QueryHistoryManager.shared.recordQuery(
             query: "-- Import from \(url.lastPathComponent) (\(result.executedStatements) statements)",
             connectionId: connection.id,
-            databaseName: connection.database,
+            databaseName: DatabaseManager.shared.activeDatabaseName(for: connection),
             executionTime: result.executionTime,
             rowCount: result.executedStatements,
             wasSuccessful: true,

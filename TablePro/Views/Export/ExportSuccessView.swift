@@ -24,22 +24,27 @@ struct ExportSuccessView: View {
         VStack(spacing: 20) {
             // Success icon
             Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.green)
+                .font(.largeTitle)
+                .imageScale(.large)
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(Color(nsColor: .systemGreen))
 
             // Title and message
             VStack(spacing: 6) {
                 Text("Success")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.title3.weight(.semibold))
 
                 Text("Export completed successfully")
-                    .font(.system(size: 13))
+                    .font(.body)
                     .foregroundStyle(.secondary)
             }
 
             // Buttons
             VStack(spacing: 10) {
                 Button("Open containing folder") {
+                    if localDontShowAgain {
+                        dontShowAgain = true
+                    }
                     onOpenFolder()
                 }
                 .buttonStyle(.borderedProminent)
@@ -57,7 +62,7 @@ struct ExportSuccessView: View {
             // Don't show again checkbox
             Toggle("Don't show this again", isOn: $localDontShowAgain)
                 .toggleStyle(.checkbox)
-                .font(.system(size: 12))
+                .font(.callout)
                 .foregroundStyle(.secondary)
         }
         .padding(24)

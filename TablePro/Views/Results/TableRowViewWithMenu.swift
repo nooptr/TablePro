@@ -22,8 +22,9 @@ final class TableRowViewWithMenu: NSTableRowView {
         let locationInTable = tableView.convert(locationInRow, from: self)
         let clickedColumn = tableView.column(at: locationInTable)
 
-        // Adjust for row number column (index 0)
-        let dataColumnIndex = clickedColumn > 0 ? clickedColumn - 1 : -1
+        let dataColumnIndex: Int = clickedColumn > 0
+            ? DataGridView.dataColumnIndex(for: clickedColumn, in: tableView, schema: coordinator.identitySchema) ?? -1
+            : -1
 
         let menu = NSMenu()
 
@@ -36,8 +37,7 @@ final class TableRowViewWithMenu: NSTableRowView {
         if !coordinator.changeManager.isRowDeleted(rowIndex) {
             // Copy
             let copyItem = NSMenuItem(
-                title: String(localized: "Copy"), action: #selector(copySelectedOrCurrentRow), keyEquivalent: "c")
-            copyItem.keyEquivalentModifierMask = .command
+                title: String(localized: "Copy"), action: #selector(copySelectedOrCurrentRow), keyEquivalent: "")
             copyItem.target = self
             menu.addItem(copyItem)
 
@@ -56,8 +56,7 @@ final class TableRowViewWithMenu: NSTableRowView {
             let copyWithHeadersItem = NSMenuItem(
                 title: String(localized: "With Headers"),
                 action: #selector(copySelectedOrCurrentRowWithHeaders),
-                keyEquivalent: "c")
-            copyWithHeadersItem.keyEquivalentModifierMask = [.command, .shift]
+                keyEquivalent: "")
             copyWithHeadersItem.target = self
             copyAsMenu.addItem(copyWithHeadersItem)
 
@@ -95,17 +94,16 @@ final class TableRowViewWithMenu: NSTableRowView {
             // Paste
             if coordinator.isEditable {
                 let pasteItem = NSMenuItem(
-                    title: String(localized: "Paste"), action: #selector(pasteRows), keyEquivalent: "v")
-                pasteItem.keyEquivalentModifierMask = .command
+                    title: String(localized: "Paste"), action: #selector(pasteRows), keyEquivalent: "")
                 pasteItem.target = self
                 menu.addItem(pasteItem)
             }
 
-            // FK actions (only for FK columns with non-empty values)
-            if dataColumnIndex >= 0, dataColumnIndex < coordinator.rowProvider.columns.count {
-                let columnName = coordinator.rowProvider.columns[dataColumnIndex]
-                if let fkInfo = coordinator.rowProvider.columnForeignKeys[columnName],
-                   let cellValue = coordinator.rowProvider.value(atRow: rowIndex, column: dataColumnIndex),
+            let tableRows = coordinator.tableRowsProvider()
+            if dataColumnIndex >= 0, dataColumnIndex < tableRows.columns.count {
+                let columnName = tableRows.columns[dataColumnIndex]
+                if let fkInfo = tableRows.columnForeignKeys[columnName],
+                   let cellValue = coordinator.cellValue(at: rowIndex, column: dataColumnIndex),
                    !cellValue.isEmpty {
                     menu.addItem(NSMenuItem.separator())
 
@@ -133,7 +131,6 @@ final class TableRowViewWithMenu: NSTableRowView {
                 menu.addItem(NSMenuItem.separator())
             }
 
-            // Set Value (editable + column clicked)
             if coordinator.isEditable && dataColumnIndex >= 0 {
                 let setValueMenu = NSMenu()
 
@@ -143,17 +140,27 @@ final class TableRowViewWithMenu: NSTableRowView {
                 emptyItem.target = self
                 setValueMenu.addItem(emptyItem)
 
-                let nullItem = NSMenuItem(
-                    title: String(localized: "NULL"), action: #selector(setNullValue(_:)), keyEquivalent: "")
-                nullItem.representedObject = dataColumnIndex
-                nullItem.target = self
-                setValueMenu.addItem(nullItem)
+                let columnName = dataColumnIndex < tableRows.columns.count
+                    ? tableRows.columns[dataColumnIndex]
+                    : nil
 
-                let defaultItem = NSMenuItem(
-                    title: String(localized: "Default"), action: #selector(setDefaultValue(_:)), keyEquivalent: "")
-                defaultItem.representedObject = dataColumnIndex
-                defaultItem.target = self
-                setValueMenu.addItem(defaultItem)
+                let isNullable = columnName.flatMap { tableRows.columnNullable[$0] } ?? true
+                if isNullable {
+                    let nullItem = NSMenuItem(
+                        title: String(localized: "NULL"), action: #selector(setNullValue(_:)), keyEquivalent: "")
+                    nullItem.representedObject = dataColumnIndex
+                    nullItem.target = self
+                    setValueMenu.addItem(nullItem)
+                }
+
+                let hasDefault = columnName.flatMap({ tableRows.columnDefaults[$0] ?? nil }) != nil
+                if hasDefault {
+                    let defaultItem = NSMenuItem(
+                        title: String(localized: "Default"), action: #selector(setDefaultValue(_:)), keyEquivalent: "")
+                    defaultItem.representedObject = dataColumnIndex
+                    defaultItem.target = self
+                    setValueMenu.addItem(defaultItem)
+                }
 
                 let setValueItem = NSMenuItem(title: String(localized: "Set Value"), action: nil, keyEquivalent: "")
                 setValueItem.submenu = setValueMenu
@@ -174,17 +181,15 @@ final class TableRowViewWithMenu: NSTableRowView {
             // Duplicate & Delete
             if coordinator.isEditable {
                 let duplicateItem = NSMenuItem(
-                    title: String(localized: "Duplicate"), action: #selector(duplicateRow), keyEquivalent: "d")
-                duplicateItem.keyEquivalentModifierMask = .command
+                    title: String(localized: "Duplicate"), action: #selector(duplicateRow), keyEquivalent: "")
                 duplicateItem.target = self
                 menu.addItem(duplicateItem)
 
                 let deleteItem = NSMenuItem(
                     title: String(localized: "Delete"),
                     action: #selector(deleteRow),
-                    keyEquivalent: String(UnicodeScalar(NSBackspaceCharacter).map { Character($0) } ?? "\u{8}")
+                    keyEquivalent: ""
                 )
-                deleteItem.keyEquivalentModifierMask = []
                 deleteItem.target = self
                 menu.addItem(deleteItem)
             }
@@ -199,15 +204,11 @@ final class TableRowViewWithMenu: NSTableRowView {
         } else {
             [rowIndex]
         }
-        NotificationCenter.default.post(
-            name: .deleteSelectedRows,
-            object: nil,
-            userInfo: ["rowIndices": indices]
-        )
+        coordinator?.delegate?.dataGridDeleteRows(indices)
     }
 
     @objc private func duplicateRow() {
-        NotificationCenter.default.post(name: .duplicateRow, object: nil)
+        coordinator?.delegate?.dataGridDuplicateRow()
     }
 
     @objc private func undoDeleteRow() {
@@ -216,15 +217,6 @@ final class TableRowViewWithMenu: NSTableRowView {
 
     @objc private func undoInsertRow() {
         coordinator?.undoInsertRow(at: rowIndex)
-    }
-
-    @objc private func copyRow() {
-        coordinator?.copyRows(at: [rowIndex])
-    }
-
-    @objc private func copySelectedRows() {
-        guard let selectedIndices = coordinator?.selectedRowIndices else { return }
-        coordinator?.copyRows(at: selectedIndices)
     }
 
     @objc private func copySelectedOrCurrentRowWithHeaders() {
@@ -240,15 +232,11 @@ final class TableRowViewWithMenu: NSTableRowView {
         let indices: Set<Int> = !coordinator.selectedRowIndices.isEmpty
             ? coordinator.selectedRowIndices
             : [rowIndex]
-        if let callback = coordinator.onCopyRows {
-            callback(indices)
-        } else {
-            coordinator.copyRows(at: indices)
-        }
+        coordinator.delegate?.dataGridCopyRows(indices)
     }
 
     @objc private func pasteRows() {
-        NotificationCenter.default.post(name: .pasteRows, object: nil)
+        coordinator?.delegate?.dataGridPasteRows()
     }
 
     @objc private func copyCellValue(_ sender: NSMenuItem) {
@@ -301,18 +289,25 @@ final class TableRowViewWithMenu: NSTableRowView {
 
     @objc private func previewForeignKey(_ sender: NSMenuItem) {
         guard let columnIndex = sender.representedObject as? Int,
-              let coordinator, let tableView = coordinator.tableView else { return }
+              let coordinator, let tableView = coordinator.tableView,
+              let column = DataGridView.tableColumnIndex(
+                for: columnIndex,
+                in: tableView,
+                schema: coordinator.identitySchema
+              ) else { return }
         coordinator.showForeignKeyPreview(
-            tableView: tableView, row: rowIndex, column: columnIndex + 1, columnIndex: columnIndex
+            tableView: tableView, row: rowIndex, column: column, columnIndex: columnIndex
         )
     }
 
     @objc private func navigateToForeignKey(_ sender: NSMenuItem) {
         guard let columnIndex = sender.representedObject as? Int,
               let coordinator else { return }
-        let columnName = coordinator.rowProvider.columns[columnIndex]
-        guard let fkInfo = coordinator.rowProvider.columnForeignKeys[columnName],
-              let value = coordinator.rowProvider.value(atRow: rowIndex, column: columnIndex) else { return }
-        coordinator.onNavigateFK?(value, fkInfo)
+        let tableRows = coordinator.tableRowsProvider()
+        guard columnIndex >= 0, columnIndex < tableRows.columns.count else { return }
+        let columnName = tableRows.columns[columnIndex]
+        guard let fkInfo = tableRows.columnForeignKeys[columnName],
+              let value = coordinator.cellValue(at: rowIndex, column: columnIndex) else { return }
+        coordinator.delegate?.dataGridNavigateFK(value: value, fkInfo: fkInfo)
     }
 }

@@ -9,95 +9,6 @@ import AppKit
 import Foundation
 import SwiftUI
 
-// MARK: - General Settings
-
-/// Startup behavior when app launches
-enum StartupBehavior: String, Codable, CaseIterable, Identifiable {
-    case showWelcome = "showWelcome"
-    case reopenLast = "reopenLast"
-
-    var id: String { rawValue }
-
-    var displayName: String {
-        switch self {
-        case .showWelcome: return String(localized: "Show Welcome Screen")
-        case .reopenLast: return String(localized: "Reopen Last Session")
-        }
-    }
-}
-
-/// App language options
-enum AppLanguage: String, Codable, CaseIterable, Identifiable {
-    case system = "system"
-    case english = "en"
-    case vietnamese = "vi"
-    case chineseSimplified = "zh-Hans"
-    case turkish = "tr"
-
-    var id: String { rawValue }
-
-    var displayName: String {
-        switch self {
-        case .system: return String(localized: "System")
-        case .english: return "English"
-        case .vietnamese: return "Tiếng Việt"
-        case .chineseSimplified: return "简体中文"
-        case .turkish: return "Türkçe"
-        }
-    }
-
-    func apply() {
-        if self == .system {
-            UserDefaults.standard.removeObject(forKey: "AppleLanguages")
-        } else {
-            UserDefaults.standard.set([rawValue], forKey: "AppleLanguages")
-        }
-    }
-}
-
-/// General app settings
-struct GeneralSettings: Codable, Equatable {
-    var startupBehavior: StartupBehavior
-    var language: AppLanguage
-    var automaticallyCheckForUpdates: Bool
-
-    /// Query execution timeout in seconds (0 = no limit)
-    var queryTimeoutSeconds: Int
-
-    /// Whether to share anonymous usage analytics
-    var shareAnalytics: Bool
-
-    static let `default` = GeneralSettings(
-        startupBehavior: .showWelcome,
-        language: .system,
-        automaticallyCheckForUpdates: true,
-        queryTimeoutSeconds: 60,
-        shareAnalytics: true
-    )
-
-    init(
-        startupBehavior: StartupBehavior = .showWelcome,
-        language: AppLanguage = .system,
-        automaticallyCheckForUpdates: Bool = true,
-        queryTimeoutSeconds: Int = 60,
-        shareAnalytics: Bool = true
-    ) {
-        self.startupBehavior = startupBehavior
-        self.language = language
-        self.automaticallyCheckForUpdates = automaticallyCheckForUpdates
-        self.queryTimeoutSeconds = queryTimeoutSeconds
-        self.shareAnalytics = shareAnalytics
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        startupBehavior = try container.decode(StartupBehavior.self, forKey: .startupBehavior)
-        language = try container.decodeIfPresent(AppLanguage.self, forKey: .language) ?? .system
-        automaticallyCheckForUpdates = try container.decodeIfPresent(Bool.self, forKey: .automaticallyCheckForUpdates) ?? true
-        queryTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .queryTimeoutSeconds) ?? 60
-        shareAnalytics = try container.decodeIfPresent(Bool.self, forKey: .shareAnalytics) ?? true
-    }
-}
 
 // MARK: - Appearance Settings
 
@@ -154,107 +65,6 @@ struct AppearanceSettings: Codable, Equatable {
     }
 }
 
-// MARK: - Editor Settings
-
-/// Available monospace fonts for the SQL editor
-enum EditorFont: String, Codable, CaseIterable, Identifiable {
-    case systemMono = "System Mono"
-    case sfMono = "SF Mono"
-    case menlo = "Menlo"
-    case monaco = "Monaco"
-    case courierNew = "Courier New"
-
-    var id: String { rawValue }
-
-    var displayName: String { rawValue }
-
-    /// Get the actual NSFont for this option
-    func font(size: CGFloat) -> NSFont {
-        switch self {
-        case .systemMono:
-            return NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
-        case .sfMono:
-            return NSFont(name: "SFMono-Regular", size: size)
-                ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
-        case .menlo:
-            return NSFont(name: "Menlo", size: size)
-                ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
-        case .monaco:
-            return NSFont(name: "Monaco", size: size)
-                ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
-        case .courierNew:
-            return NSFont(name: "Courier New", size: size)
-                ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
-        }
-    }
-
-    /// Check if this font is available on the system
-    var isAvailable: Bool {
-        switch self {
-        case .systemMono:
-            return true
-        case .sfMono:
-            return NSFont(name: "SFMono-Regular", size: 12) != nil
-        case .menlo:
-            return NSFont(name: "Menlo", size: 12) != nil
-        case .monaco:
-            return NSFont(name: "Monaco", size: 12) != nil
-        case .courierNew:
-            return NSFont(name: "Courier New", size: 12) != nil
-        }
-    }
-}
-
-/// Editor settings
-struct EditorSettings: Codable, Equatable {
-    var showLineNumbers: Bool
-    var highlightCurrentLine: Bool
-    var tabWidth: Int // 2, 4, or 8 spaces
-    var autoIndent: Bool
-    var wordWrap: Bool
-    var vimModeEnabled: Bool
-
-    static let `default` = EditorSettings(
-        showLineNumbers: true,
-        highlightCurrentLine: true,
-        tabWidth: 4,
-        autoIndent: true,
-        wordWrap: false,
-        vimModeEnabled: false
-    )
-
-    init(
-        showLineNumbers: Bool = true,
-        highlightCurrentLine: Bool = true,
-        tabWidth: Int = 4,
-        autoIndent: Bool = true,
-        wordWrap: Bool = false,
-        vimModeEnabled: Bool = false
-    ) {
-        self.showLineNumbers = showLineNumbers
-        self.highlightCurrentLine = highlightCurrentLine
-        self.tabWidth = tabWidth
-        self.autoIndent = autoIndent
-        self.wordWrap = wordWrap
-        self.vimModeEnabled = vimModeEnabled
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        // Old fontFamily/fontSize keys are ignored (moved to ThemeFonts)
-        showLineNumbers = try container.decodeIfPresent(Bool.self, forKey: .showLineNumbers) ?? true
-        highlightCurrentLine = try container.decodeIfPresent(Bool.self, forKey: .highlightCurrentLine) ?? true
-        tabWidth = try container.decodeIfPresent(Int.self, forKey: .tabWidth) ?? 4
-        autoIndent = try container.decodeIfPresent(Bool.self, forKey: .autoIndent) ?? true
-        wordWrap = try container.decodeIfPresent(Bool.self, forKey: .wordWrap) ?? false
-        vimModeEnabled = try container.decodeIfPresent(Bool.self, forKey: .vimModeEnabled) ?? false
-    }
-
-    /// Clamped tab width (1-16)
-    var clampedTabWidth: Int {
-        min(max(tabWidth, 1), 16)
-    }
-}
 
 // MARK: - Data Grid Settings
 
@@ -311,6 +121,10 @@ struct DataGridSettings: Codable, Equatable {
     var showAlternateRows: Bool
     var showRowNumbers: Bool
     var autoShowInspector: Bool
+    var enableSmartValueDetection: Bool
+    var countRowsIfEstimateLessThan: Int
+    var queryResultRowCap: Int
+    var truncateQueryResults: Bool
 
     static let `default` = DataGridSettings(
         rowHeight: .normal,
@@ -319,7 +133,11 @@ struct DataGridSettings: Codable, Equatable {
         defaultPageSize: 1_000,
         showAlternateRows: true,
         showRowNumbers: true,
-        autoShowInspector: false
+        autoShowInspector: false,
+        enableSmartValueDetection: true,
+        countRowsIfEstimateLessThan: 100_000,
+        queryResultRowCap: 10_000,
+        truncateQueryResults: true
     )
 
     init(
@@ -329,7 +147,11 @@ struct DataGridSettings: Codable, Equatable {
         defaultPageSize: Int = 1_000,
         showAlternateRows: Bool = true,
         showRowNumbers: Bool = true,
-        autoShowInspector: Bool = false
+        autoShowInspector: Bool = false,
+        enableSmartValueDetection: Bool = true,
+        countRowsIfEstimateLessThan: Int = 100_000,
+        queryResultRowCap: Int = 10_000,
+        truncateQueryResults: Bool = true
     ) {
         self.rowHeight = rowHeight
         self.dateFormat = dateFormat
@@ -338,11 +160,14 @@ struct DataGridSettings: Codable, Equatable {
         self.showAlternateRows = showAlternateRows
         self.showRowNumbers = showRowNumbers
         self.autoShowInspector = autoShowInspector
+        self.enableSmartValueDetection = enableSmartValueDetection
+        self.countRowsIfEstimateLessThan = countRowsIfEstimateLessThan
+        self.queryResultRowCap = queryResultRowCap
+        self.truncateQueryResults = truncateQueryResults
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        // Old fontFamily/fontSize keys are ignored (moved to ThemeFonts)
         rowHeight = try container.decodeIfPresent(DataGridRowHeight.self, forKey: .rowHeight) ?? .normal
         dateFormat = try container.decodeIfPresent(DateFormatOption.self, forKey: .dateFormat) ?? .iso8601
         nullDisplay = try container.decodeIfPresent(String.self, forKey: .nullDisplay) ?? "NULL"
@@ -350,6 +175,10 @@ struct DataGridSettings: Codable, Equatable {
         showAlternateRows = try container.decodeIfPresent(Bool.self, forKey: .showAlternateRows) ?? true
         showRowNumbers = try container.decodeIfPresent(Bool.self, forKey: .showRowNumbers) ?? true
         autoShowInspector = try container.decodeIfPresent(Bool.self, forKey: .autoShowInspector) ?? false
+        enableSmartValueDetection = try container.decodeIfPresent(Bool.self, forKey: .enableSmartValueDetection) ?? true
+        countRowsIfEstimateLessThan = try container.decodeIfPresent(Int.self, forKey: .countRowsIfEstimateLessThan) ?? 100_000
+        queryResultRowCap = try container.decodeIfPresent(Int.self, forKey: .queryResultRowCap) ?? 10_000
+        truncateQueryResults = try container.decodeIfPresent(Bool.self, forKey: .truncateQueryResults) ?? true
     }
 
     // MARK: - Validated Properties
@@ -381,7 +210,7 @@ struct DataGridSettings: Codable, Equatable {
         if sanitized.isEmpty {
             return String(localized: "NULL display cannot be empty")
         } else if sanitized.count > maxLength {
-            return String(localized: "NULL display must be \(maxLength) characters or less")
+            return String(format: String(localized: "NULL display must be %d characters or less"), maxLength)
         } else if nullDisplay != sanitized {
             return String(localized: "NULL display contains invalid characters (newlines/tabs)")
         }
@@ -392,7 +221,26 @@ struct DataGridSettings: Codable, Equatable {
     var defaultPageSizeValidationError: String? {
         let range = SettingsValidationRules.defaultPageSizeRange
         if defaultPageSize < range.lowerBound || defaultPageSize > range.upperBound {
-            return String(localized: "Page size must be between \(range.lowerBound.formatted()) and \(range.upperBound.formatted())")
+            return String(format: String(localized: "Page size must be between %@ and %@"), range.lowerBound.formatted(), range.upperBound.formatted())
+        }
+        return nil
+    }
+
+    /// Validated queryResultRowCap (100 to 500,000; 0 means unlimited)
+    var validatedQueryResultRowCap: Int {
+        if queryResultRowCap == 0 { return 0 }
+        return queryResultRowCap.clamped(to: SettingsValidationRules.queryResultRowCapRange)
+    }
+
+    /// Validation error for queryResultRowCap (for UI feedback)
+    var queryResultRowCapValidationError: String? {
+        let range = SettingsValidationRules.queryResultRowCapRange
+        if queryResultRowCap != 0 && (queryResultRowCap < range.lowerBound || queryResultRowCap > range.upperBound) {
+            return String(
+                format: String(localized: "Query result row cap must be between %@ and %@"),
+                range.lowerBound.formatted(),
+                range.upperBound.formatted()
+            )
         }
         return nil
     }
@@ -471,5 +319,72 @@ struct TabSettings: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         enablePreviewTabs = try container.decodeIfPresent(Bool.self, forKey: .enablePreviewTabs) ?? true
         groupAllConnectionTabs = try container.decodeIfPresent(Bool.self, forKey: .groupAllConnectionTabs) ?? false
+    }
+}
+
+// MARK: - Terminal Settings
+
+enum TerminalCursorStyleOption: String, Codable, CaseIterable {
+    case block
+    case bar
+    case underline
+
+    var displayName: String {
+        switch self {
+        case .block: return String(localized: "Block")
+        case .bar: return String(localized: "Bar")
+        case .underline: return String(localized: "Underline")
+        }
+    }
+}
+
+struct TerminalSettings: Codable, Equatable {
+    var fontFamily: String = "Menlo"
+    var fontSize: Int = 13
+    var cursorStyle: TerminalCursorStyleOption = .block
+    var cursorBlink: Bool = true
+    var scrollbackLines: Int = 10_000
+    var optionAsMeta: Bool = true
+    var bellEnabled: Bool = true
+    var themeName: String = ""
+
+    /// Per-database CLI path overrides (empty = auto-detect)
+    var cliPaths: [String: String] = [:]
+
+    static let `default` = TerminalSettings()
+
+    init(
+        fontFamily: String = "Menlo",
+        fontSize: Int = 13,
+        cursorStyle: TerminalCursorStyleOption = .block,
+        cursorBlink: Bool = true,
+        scrollbackLines: Int = 10_000,
+        optionAsMeta: Bool = true,
+        bellEnabled: Bool = true,
+        themeName: String = "",
+        cliPaths: [String: String] = [:]
+    ) {
+        self.fontFamily = fontFamily
+        self.fontSize = fontSize
+        self.cursorStyle = cursorStyle
+        self.cursorBlink = cursorBlink
+        self.scrollbackLines = scrollbackLines
+        self.optionAsMeta = optionAsMeta
+        self.bellEnabled = bellEnabled
+        self.themeName = themeName
+        self.cliPaths = cliPaths
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        fontFamily = try container.decodeIfPresent(String.self, forKey: .fontFamily) ?? "Menlo"
+        fontSize = try container.decodeIfPresent(Int.self, forKey: .fontSize) ?? 13
+        cursorStyle = try container.decodeIfPresent(TerminalCursorStyleOption.self, forKey: .cursorStyle) ?? .block
+        cursorBlink = try container.decodeIfPresent(Bool.self, forKey: .cursorBlink) ?? true
+        scrollbackLines = try container.decodeIfPresent(Int.self, forKey: .scrollbackLines) ?? 10_000
+        optionAsMeta = try container.decodeIfPresent(Bool.self, forKey: .optionAsMeta) ?? true
+        bellEnabled = try container.decodeIfPresent(Bool.self, forKey: .bellEnabled) ?? true
+        themeName = try container.decodeIfPresent(String.self, forKey: .themeName) ?? ""
+        cliPaths = try container.decodeIfPresent([String: String].self, forKey: .cliPaths) ?? [:]
     }
 }

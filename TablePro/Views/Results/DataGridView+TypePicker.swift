@@ -17,7 +17,7 @@ extension TableViewCoordinator {
     ) {
         guard tableView.view(atColumn: column, row: row, makeIfNecessary: false) != nil else { return }
 
-        let currentValue = rowProvider.value(atRow: row, column: columnIndex) ?? ""
+        let currentValue = cellValue(at: row, column: columnIndex) ?? ""
         let dbType = databaseType ?? .mysql
 
         let cellRect = tableView.rect(ofRow: row).intersection(tableView.rect(ofColumn: column))
@@ -30,16 +30,7 @@ extension TableViewCoordinator {
                 currentValue: currentValue,
                 onCommit: { newValue in
                     guard let self else { return }
-                    let oldValue = self.rowProvider.value(atRow: row, column: columnIndex)
-                    guard oldValue != newValue else { return }
-
-                    self.rowProvider.updateValue(newValue, at: row, columnIndex: columnIndex)
-                    self.onCellEdit?(row, columnIndex, newValue)
-
-                    tableView.reloadData(
-                        forRowIndexes: IndexSet(integer: row),
-                        columnIndexes: IndexSet(integer: column)
-                    )
+                    self.commitPopoverEdit(row: row, columnIndex: columnIndex, newValue: newValue)
                 },
                 onDismiss: dismiss
             )

@@ -30,7 +30,7 @@ struct BrowsePluginsView: View {
             }
             await downloadCountService.fetchCounts(for: registryClient.manifest)
         }
-        .alert("Installation Failed", isPresented: $showErrorAlert) {
+        .alert(String(localized: "Installation Failed"), isPresented: $showErrorAlert) {
             Button("OK") {}
         } message: {
             Text(errorMessage)
@@ -57,8 +57,7 @@ struct BrowsePluginsView: View {
             HSplitView {
                 VStack(spacing: 0) {
                     HStack(spacing: 6) {
-                        TextField("Search...", text: $searchText)
-                            .textFieldStyle(.roundedBorder)
+                        NativeSearchField(text: $searchText, placeholder: String(localized: "Search..."))
                         Picker("", selection: $selectedCategory) {
                             Text("All").tag(RegistryCategory?.none)
                             ForEach(RegistryCategory.allCases) { category in
@@ -122,7 +121,7 @@ struct BrowsePluginsView: View {
                         .lineLimit(1)
                     if plugin.isVerified {
                         Image(systemName: "checkmark.seal.fill")
-                            .foregroundStyle(.blue)
+                            .foregroundStyle(Color(nsColor: .systemBlue))
                             .font(.caption2)
                     }
                 }
@@ -153,9 +152,34 @@ struct BrowsePluginsView: View {
     @ViewBuilder
     private func rowStatusBadge(for plugin: RegistryPlugin) -> some View {
         if isPluginInstalled(plugin.id) {
-            Text("Installed")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+            if hasUpdate(for: plugin) {
+                if let progress = installTracker.state(for: plugin.id) {
+                    switch progress.phase {
+                    case .downloading(let fraction):
+                        ProgressView(value: fraction)
+                            .frame(width: 40)
+                            .progressViewStyle(.linear)
+                    case .installing:
+                        ProgressView()
+                            .controlSize(.mini)
+                    case .completed:
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(Color(nsColor: .systemGreen))
+                            .font(.caption)
+                    case .failed:
+                        Button("Retry") { updatePlugin(plugin) }
+                            .controlSize(.mini)
+                    }
+                } else {
+                    Button(String(localized: "Update")) { updatePlugin(plugin) }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                }
+            } else {
+                Text("Installed")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         } else if let progress = installTracker.state(for: plugin.id) {
             switch progress.phase {
             case .downloading(let fraction):
@@ -167,7 +191,7 @@ struct BrowsePluginsView: View {
                     .controlSize(.mini)
             case .completed:
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
+                    .foregroundStyle(Color(nsColor: .systemGreen))
                     .font(.caption)
             case .failed:
                 Button("Retry") { installPlugin(plugin) }
@@ -195,14 +219,16 @@ struct BrowsePluginsView: View {
             RegistryPluginDetailView(
                 plugin: selectedPlugin,
                 isInstalled: isPluginInstalled(selectedPlugin.id),
+                hasUpdate: hasUpdate(for: selectedPlugin),
                 installProgress: installTracker.state(for: selectedPlugin.id),
                 downloadCount: downloadCountService.downloadCount(for: selectedPlugin.id),
-                onInstall: { installPlugin(selectedPlugin) }
+                onInstall: { installPlugin(selectedPlugin) },
+                onUpdate: { updatePlugin(selectedPlugin) }
             )
         } else {
             VStack(spacing: 8) {
                 Image(systemName: "puzzlepiece.extension")
-                    .font(.system(size: 32))
+                    .font(.title)
                     .foregroundStyle(.tertiary)
                 Text("Select a plugin to view details")
                     .font(.headline)
@@ -219,28 +245,47 @@ struct BrowsePluginsView: View {
             || ThemeRegistryInstaller.shared.isInstalled(pluginId)
     }
 
+    private func hasUpdate(for plugin: RegistryPlugin) -> Bool {
+        guard let installed = pluginManager.plugins.first(where: { $0.id == plugin.id }) else { return false }
+        return plugin.version.compare(installed.version, options: .numeric) == .orderedDescending
+    }
+
     private func installPlugin(_ plugin: RegistryPlugin) {
+        performTrackedOperation(pluginId: plugin.id) { progress in
+            if plugin.category == .theme {
+                try await ThemeRegistryInstaller.shared.install(plugin, progress: progress)
+            } else {
+                _ = try await pluginManager.installFromRegistry(plugin, progress: progress)
+            }
+        }
+    }
+
+    private func updatePlugin(_ plugin: RegistryPlugin) {
+        performTrackedOperation(pluginId: plugin.id) { progress in
+            if plugin.category == .theme {
+                try await ThemeRegistryInstaller.shared.update(plugin, progress: progress)
+            } else {
+                _ = try await pluginManager.updateFromRegistry(plugin, progress: progress)
+            }
+        }
+    }
+
+    private func performTrackedOperation(
+        pluginId: String,
+        operation: @escaping (@escaping @MainActor @Sendable (Double) -> Void) async throws -> Void
+    ) {
         Task {
-            installTracker.beginInstall(pluginId: plugin.id)
+            installTracker.beginInstall(pluginId: pluginId)
             do {
-                if plugin.category == .theme {
-                    try await ThemeRegistryInstaller.shared.install(plugin) { fraction in
-                        installTracker.updateProgress(pluginId: plugin.id, fraction: fraction)
-                        if fraction >= 1.0 {
-                            installTracker.markInstalling(pluginId: plugin.id)
-                        }
-                    }
-                } else {
-                    _ = try await pluginManager.installFromRegistry(plugin) { fraction in
-                        installTracker.updateProgress(pluginId: plugin.id, fraction: fraction)
-                        if fraction >= 1.0 {
-                            installTracker.markInstalling(pluginId: plugin.id)
-                        }
+                try await operation { fraction in
+                    self.installTracker.updateProgress(pluginId: pluginId, fraction: fraction)
+                    if fraction >= 1.0 {
+                        self.installTracker.markInstalling(pluginId: pluginId)
                     }
                 }
-                installTracker.completeInstall(pluginId: plugin.id)
+                installTracker.completeInstall(pluginId: pluginId)
             } catch {
-                installTracker.failInstall(pluginId: plugin.id, error: error.localizedDescription)
+                installTracker.failInstall(pluginId: pluginId, error: error.localizedDescription)
                 errorMessage = error.localizedDescription
                 showErrorAlert = true
             }

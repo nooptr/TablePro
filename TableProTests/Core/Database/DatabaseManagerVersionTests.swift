@@ -9,7 +9,7 @@ import Foundation
 import Testing
 @testable import TablePro
 
-@Suite("DatabaseManager Version Counters")
+@Suite("DatabaseManager Version Counters", .serialized)
 @MainActor
 struct DatabaseManagerVersionTests {
     private func makeSession(id: UUID = UUID()) -> (UUID, ConnectionSession) {
@@ -63,25 +63,6 @@ struct DatabaseManagerVersionTests {
 
         #expect(manager.connectionListVersion == listBefore)
         #expect(manager.connectionStatusVersion == statusBefore + 1)
-
-        manager.removeSession(for: id)
-    }
-
-    @Test("sessionVersion returns connectionStatusVersion for backward compatibility")
-    func sessionVersionBackwardCompat() {
-        let manager = DatabaseManager.shared
-        #expect(manager.sessionVersion == manager.connectionStatusVersion)
-
-        let (id, session) = makeSession()
-        manager.injectSession(session, for: id)
-
-        #expect(manager.sessionVersion == manager.connectionStatusVersion)
-
-        manager.updateSession(id) { session in
-            session.status = .connected
-        }
-
-        #expect(manager.sessionVersion == manager.connectionStatusVersion)
 
         manager.removeSession(for: id)
     }

@@ -5,32 +5,40 @@
 <h1 align="center">TablePro</h1>
 
 <p align="center">
-  A fast, native macOS database client with built-in AI assistant.
+  Native database client for Mac and iPhone. MySQL, PostgreSQL, SQLite, MongoDB, Redis, and 15+ more.<br>
+  Free and open-source.
 </p>
 
 <p align="center">
-  <a href="https://docs.tablepro.app">Documentation</a> ·
+  <a href="https://tablepro.app">Website</a> ·
+  <a href="https://docs.tablepro.app">Docs</a> ·
   <a href="https://github.com/TableProApp/TablePro/releases">Download</a> ·
-  <a href="https://github.com/TableProApp/TablePro/issues">Report Bug</a>
+  <a href="https://discord.gg/hCNmUUbnD4">Discord</a>
 </p>
 
 <p align="center">
+  <a href="https://github.com/TableProApp/TablePro/releases/latest"><img src="https://img.shields.io/github/v/release/TableProApp/TablePro" alt="Release"></a>
   <a href="https://www.gnu.org/licenses/agpl-3.0"><img src="https://img.shields.io/badge/License-AGPL_v3-blue.svg" alt="License: AGPL v3"></a>
 </p>
 
 <p align="center">
   <a href="README.vi.md">Tiếng Việt</a>
+  <a href="README.zh.md">简体中文</a>
 </p>
 
 ---
 
 <p align="center">
-  <img src=".github/assets/hero-dark.png" alt="TablePro Screenshot" width="800">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/app-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset=".github/assets/app-light.png">
+    <img alt="TablePro macOS database client with SQL editor and data grid" src=".github/assets/app-light.png" width="800">
+  </picture>
 </p>
 
 ## About
 
-TablePro is a native macOS database client. Connects to MySQL, MariaDB, PostgreSQL, SQLite, MongoDB, Redis, SQL Server, and Redshift. Includes a SQL editor with autocomplete, inline editing, and AI assistance.
+TablePro is a native macOS database client built with SwiftUI and AppKit. It connects to 18+ databases using native drivers (no JDBC, no Electron). Starts in under 1 second, uses about 80 MB of RAM.
 
 ## Install
 
@@ -40,9 +48,14 @@ brew install --cask tablepro
 
 Or download the DMG from [GitHub Releases](https://github.com/TableProApp/TablePro/releases).
 
+## System Requirements
+
+- macOS 14 Sonoma or later
+- Apple Silicon (arm64) or Intel (x86_64)
+
 ## Documentation
 
-Full documentation is available at [docs.tablepro.app](https://docs.tablepro.app).
+Full docs at [docs.tablepro.app](https://docs.tablepro.app).
 
 ## Support Development
 
@@ -52,7 +65,7 @@ TablePro is free and open source. If you find it useful, consider [purchasing a 
 
 Thanks to these amazing people for supporting TablePro:
 
-**[Dwarves Foundation](https://dwarves.foundation/?ref=tablepro)** · **[Nimbus](https://getnimbus.io?ref=tablepro)** · **[Visnalize](https://visnalize.com?ref=tablepro)** · **[Huy TQ](https://github.com/imhuytq)** · **[Unikorn](https://unikorn.vn?ref=tablepro)**
+**[SimpleLocalize](https://simplelocalize.io?ref=tablepro)** · **[Nimbus](https://getnimbus.io?ref=tablepro)** · **[Visnalize](https://visnalize.com?ref=tablepro)** · **[Dwarves Foundation](https://dwarves.foundation/?ref=tablepro)** · **[Huy TQ](https://github.com/imhuytq)** · **[Unikorn](https://unikorn.vn?ref=tablepro)**
 
 ## Star History
 

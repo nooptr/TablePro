@@ -224,16 +224,22 @@ final class LibPQPluginConnection: @unchecked Sendable {
                 throw error
             }
 
-            _ = "SET client_encoding TO 'UTF8'".withCString { cStr in
-                PQexec(connection, cStr)
+            "SET client_encoding TO 'UTF8'".withCString { cStr in
+                let result = PQexec(connection, cStr)
+                PQclear(result)
             }
 
             let version = PQserverVersion(connection)
             if version > 0 {
                 let major = version / 10_000
-                let minor = (version / 100) % 100
-                let revision = version % 100
-                self._cachedServerVersion = "\(major).\(minor).\(revision)"
+                if major >= 10 {
+                    let minor = version % 10_000
+                    self._cachedServerVersion = "\(major).\(minor)"
+                } else {
+                    let minor = (version / 100) % 100
+                    let revision = version % 100
+                    self._cachedServerVersion = "\(major).\(minor).\(revision)"
+                }
             }
 
             self.stateLock.lock()
@@ -433,6 +439,195 @@ final class LibPQPluginConnection: @unchecked Sendable {
         }
     }
 
+    // MARK: - Streaming Query
+
+    func streamQuery(_ query: String) -> AsyncThrowingStream<PluginStreamElement, Error> {
+        let queryToRun = String(query)
+        let queue = self.queue
+
+        final class StreamState: @unchecked Sendable {
+            var conn: OpaquePointer?
+            var drained = false
+            let lock = NSLock()
+        }
+        let streamState = StreamState()
+
+        stateLock.lock()
+        let connForStream = self.conn
+        stateLock.unlock()
+
+        streamState.lock.lock()
+        streamState.conn = connForStream
+        streamState.lock.unlock()
+
+        return AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
+            continuation.onTermination = { @Sendable _ in
+                queue.async {
+                    streamState.lock.lock()
+                    let conn = streamState.conn
+                    let alreadyDrained = streamState.drained
+                    streamState.drained = true
+                    streamState.lock.unlock()
+                    guard let conn, !alreadyDrained else { return }
+                    let cancelObj = PQgetCancel(conn)
+                    if let cancelObj {
+                        var errbuf = [CChar](repeating: 0, count: 256)
+                        PQcancel(cancelObj, &errbuf, Int32(errbuf.count))
+                        PQfreeCancel(cancelObj)
+                    }
+                    while let res = PQgetResult(conn) { PQclear(res) }
+                }
+            }
+
+            queue.async { [self] in
+                guard !isShuttingDown, let conn = connForStream else {
+                    continuation.finish(throwing: LibPQPluginError.notConnected)
+                    return
+                }
+
+                while let res = PQgetResult(conn) { PQclear(res) }
+
+                let sendOk = queryToRun.withCString { queryPtr in
+                    PQsendQuery(conn, queryPtr)
+                }
+
+                if sendOk == 0 {
+                    streamState.lock.lock()
+                    streamState.drained = true
+                    streamState.lock.unlock()
+                    continuation.finish(throwing: getError(from: conn))
+                    return
+                }
+
+                if PQsetSingleRowMode(conn) == 0 {
+                    while let res = PQgetResult(conn) { PQclear(res) }
+                    streamState.lock.lock()
+                    streamState.drained = true
+                    streamState.lock.unlock()
+                    continuation.finish(throwing: LibPQPluginError(
+                        message: "Failed to enter single-row mode", sqlState: nil, detail: nil))
+                    return
+                }
+
+                var headerSent = false
+                var columnOids: [UInt32] = []
+                let batchSize = 5_000
+                var batch: [PluginRow] = []
+                batch.reserveCapacity(batchSize)
+
+                while let result = PQgetResult(conn) {
+                    let status = PQresultStatus(result)
+
+                    if status == PGRES_SINGLE_TUPLE {
+                        if !headerSent {
+                            let numFields = Int(PQnfields(result))
+                            var columns: [String] = []
+                            var columnTypeNames: [String] = []
+                            columns.reserveCapacity(numFields)
+                            columnOids.reserveCapacity(numFields)
+                            columnTypeNames.reserveCapacity(numFields)
+
+                            for i in 0..<numFields {
+                                if let namePtr = PQfname(result, Int32(i)) {
+                                    columns.append(String(cString: namePtr))
+                                } else {
+                                    columns.append("column_\(i)")
+                                }
+                                let oid = UInt32(PQftype(result, Int32(i)))
+                                columnOids.append(oid)
+                                columnTypeNames.append(pgOidToTypeName(oid))
+                            }
+
+                            continuation.yield(.header(PluginStreamHeader(
+                                columns: columns,
+                                columnTypeNames: columnTypeNames,
+                                estimatedRowCount: nil
+                            )))
+                            headerSent = true
+                        }
+
+                        let numFields = Int(PQnfields(result))
+                        var row: [String?] = []
+                        row.reserveCapacity(numFields)
+
+                        for colIndex in 0..<numFields {
+                            if PQgetisnull(result, 0, Int32(colIndex)) == 1 {
+                                row.append(nil)
+                            } else if let valuePtr = PQgetvalue(result, 0, Int32(colIndex)) {
+                                let length = Int(PQgetlength(result, 0, Int32(colIndex)))
+                                let bufferPtr = UnsafeRawBufferPointer(start: valuePtr, count: length)
+
+                                if let str = String(bytes: bufferPtr, encoding: .utf8) {
+                                    if columnOids[colIndex] == 16 {
+                                        row.append(str == "t" ? "true" : "false")
+                                    } else {
+                                        row.append(str)
+                                    }
+                                } else {
+                                    row.append(String(bytes: bufferPtr, encoding: .isoLatin1) ?? "")
+                                }
+                            } else {
+                                row.append(nil)
+                            }
+                        }
+
+                        PQclear(result)
+                        batch.append(row)
+                        if batch.count >= batchSize {
+                            continuation.yield(.rows(batch))
+                            batch.removeAll(keepingCapacity: true)
+                        }
+
+                        if Task.isCancelled {
+                            if !batch.isEmpty {
+                                continuation.yield(.rows(batch))
+                            }
+                            let cancelObj = PQgetCancel(conn)
+                            if let cancelObj {
+                                var errbuf = [CChar](repeating: 0, count: 256)
+                                PQcancel(cancelObj, &errbuf, Int32(errbuf.count))
+                                PQfreeCancel(cancelObj)
+                            }
+                            while let res = PQgetResult(conn) { PQclear(res) }
+                            streamState.lock.lock()
+                            streamState.drained = true
+                            streamState.lock.unlock()
+                            continuation.finish(throwing: CancellationError())
+                            return
+                        }
+
+                    } else if status == PGRES_TUPLES_OK {
+                        PQclear(result)
+                        break
+
+                    } else if status == PGRES_COMMAND_OK {
+                        PQclear(result)
+                        break
+
+                    } else {
+                        let error = getResultError(from: result)
+                        PQclear(result)
+                        while let res = PQgetResult(conn) { PQclear(res) }
+                        streamState.lock.lock()
+                        streamState.drained = true
+                        streamState.lock.unlock()
+                        continuation.finish(throwing: error)
+                        return
+                    }
+                }
+
+                if !batch.isEmpty {
+                    continuation.yield(.rows(batch))
+                }
+
+                streamState.lock.lock()
+                streamState.drained = true
+                streamState.lock.unlock()
+                continuation.finish()
+            }
+        }
+    }
+
     // MARK: - Result Parsing
 
     private func fetchResults(from result: OpaquePointer) throws -> LibPQPluginQueryResult {
@@ -458,7 +653,7 @@ final class LibPQPluginConnection: @unchecked Sendable {
             columnTypeNames.append(pgOidToTypeName(UInt32(oid)))
         }
 
-        let maxRows = PluginRowLimits.defaultMax
+        let maxRows = PluginRowLimits.emergencyMax
         let effectiveRowCount = min(numRows, maxRows)
         let truncated = numRows > maxRows
 

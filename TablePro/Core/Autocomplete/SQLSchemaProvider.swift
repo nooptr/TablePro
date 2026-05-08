@@ -6,10 +6,12 @@
 //
 
 import Foundation
+import os
 import TableProPluginKit
 
 /// Provides cached database schema information for autocomplete
 actor SQLSchemaProvider {
+    private static let logger = Logger(subsystem: "com.TablePro", category: "SQLSchemaProvider")
     // MARK: - Properties
 
     private var tables: [TableInfo] = []
@@ -20,6 +22,8 @@ actor SQLSchemaProvider {
     private var lastLoadError: Error?
     private var lastRetryAttempt: Date?
     private let retryCooldown: TimeInterval = 30
+    private var loadTask: Task<Void, Never>?
+    private var eagerColumnTask: Task<Void, Never>?
 
     // Store a weak driver reference to avoid retaining it after disconnect (MEM-9)
     private weak var cachedDriver: (any DatabaseDriver)?
@@ -29,23 +33,53 @@ actor SQLSchemaProvider {
 
     // MARK: - Public API
 
-    /// Load schema from the database (driver should already be connected)
+    /// Load schema from the database (driver should already be connected).
+    /// Concurrent callers await the same in-flight Task instead of firing duplicate queries.
     func loadSchema(using driver: DatabaseDriver, connection: DatabaseConnection? = nil) async {
-        guard !isLoading else { return }
+        if let existing = loadTask {
+            Self.logger.debug("[schema] loadSchema awaiting existing in-flight task")
+            let t0 = Date()
+            if let connection { self.connectionInfo = connection }
+            await existing.value
+            Self.logger.debug("[schema] loadSchema coalesced — awaited existing task ms=\(Int(Date().timeIntervalSince(t0) * 1_000)) tableCount=\(self.tables.count)")
+            return
+        }
 
-        // Store driver reference for later column fetching
+        Self.logger.info("[schema] loadSchema starting new fetch")
+        let t0 = Date()
         self.cachedDriver = driver
-        self.connectionInfo = connection
+        if let connection { self.connectionInfo = connection }
         isLoading = true
         lastLoadError = nil
 
-        do {
-            tables = try await driver.fetchTables()
-            isLoading = false
-        } catch {
-            lastLoadError = error
-            isLoading = false
+        let task = Task<Void, Never> {
+            do {
+                let fetched = try await driver.fetchTables()
+                await self.setLoadedTables(fetched)
+            } catch {
+                await self.setLoadError(error)
+            }
         }
+        loadTask = task
+        await task.value
+        loadTask = nil
+        Self.logger.info("[schema] loadSchema done ms=\(Int(Date().timeIntervalSince(t0) * 1_000)) tableCount=\(self.tables.count) error=\(self.lastLoadError != nil)")
+    }
+
+    private func setLoadedTables(_ newTables: [TableInfo]) {
+        tables = newTables
+        isLoading = false
+        startEagerColumnLoad()
+    }
+
+    private func setLoadError(_ error: Error) {
+        lastLoadError = error
+        isLoading = false
+    }
+
+    /// Get the current connection info
+    func getConnectionInfo() -> DatabaseConnection? {
+        connectionInfo
     }
 
     /// Get all tables
@@ -74,6 +108,7 @@ actor SQLSchemaProvider {
             evictIfNeeded()
             return columns
         } catch {
+            Self.logger.debug("Column fetch failed for autocomplete: \(error.localizedDescription)")
             return []
         }
     }
@@ -104,27 +139,50 @@ actor SQLSchemaProvider {
         isLoading
     }
 
-    /// Invalidate cache and reload
-    func invalidateCache() {
-        tables.removeAll()
-        columnCache.removeAll()
-        columnAccessOrder.removeAll()
-        cachedDriver = nil
-    }
-
-    func invalidateTables() {
-        tables.removeAll()
-    }
-
     func updateTables(_ newTables: [TableInfo]) {
         tables = newTables
     }
 
-    func fetchFreshTables() async throws -> [TableInfo]? {
-        guard let driver = cachedDriver else { return nil }
-        let fresh = try await driver.fetchTables()
-        tables = fresh
-        return fresh
+    func resetForDatabase(_ database: String?, tables newTables: [TableInfo], driver: DatabaseDriver) {
+        eagerColumnTask?.cancel()
+        eagerColumnTask = nil
+        self.tables = newTables
+        self.columnCache.removeAll()
+        self.columnAccessOrder.removeAll()
+        self.cachedDriver = driver
+        self.isLoading = false
+        self.lastLoadError = nil
+        startEagerColumnLoad()
+    }
+
+    // MARK: - Eager Column Loading
+
+    private func startEagerColumnLoad() {
+        guard !tables.isEmpty, let driver = cachedDriver else { return }
+        eagerColumnTask?.cancel()
+        let tableCount = tables.count
+        eagerColumnTask = Task {
+            Self.logger.info("[schema] eager column load starting tableCount=\(tableCount)")
+            do {
+                let allColumns = try await driver.fetchAllColumns()
+                guard !Task.isCancelled else { return }
+                self.populateColumnCache(allColumns)
+                Self.logger.info("[schema] eager column load complete cachedCount=\(self.columnCache.count)")
+            } catch {
+                guard !Task.isCancelled else { return }
+                Self.logger.debug("[schema] eager column load failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func populateColumnCache(_ allColumns: [String: [ColumnInfo]]) {
+        for (tableName, columns) in allColumns {
+            let key = tableName.lowercased()
+            guard columnCache[key] == nil else { continue }
+            guard columnAccessOrder.count < maxCachedTables else { break }
+            columnCache[key] = columns
+            columnAccessOrder.append(key)
+        }
     }
 
     /// Find table name from alias
@@ -161,7 +219,8 @@ actor SQLSchemaProvider {
         guard !tables.isEmpty, let connection = connectionInfo else { return nil }
 
         var columnsByTable: [String: [ColumnInfo]] = [:]
-        for table in tables {
+        let tablesToFetch = Array(tables.prefix(settings.maxSchemaTables))
+        for table in tablesToFetch {
             let columns = await getColumns(for: table.name)
             if !columns.isEmpty {
                 columnsByTable[table.name.lowercased()] = columns
@@ -169,25 +228,29 @@ actor SQLSchemaProvider {
         }
 
         let dbType = connection.type
-        let dbName = connection.database
+        let capturedConnection = connection
         let capturedTables = tables
-        let idQuote = await MainActor.run {
-            PluginManager.shared.sqlDialect(for: dbType)?.identifierQuote ?? "\""
+        let (dbName, idQuote, editorLanguage, queryLanguageName) = await MainActor.run {
+            let resolvedName = DatabaseManager.shared.activeDatabaseName(for: capturedConnection)
+            let quote = PluginManager.shared.sqlDialect(for: dbType)?.identifierQuote ?? "\""
+            let lang = PluginManager.shared.editorLanguage(for: dbType)
+            let langName = PluginManager.shared.queryLanguageName(for: dbType)
+            return (resolvedName, quote, lang, langName)
         }
 
-        return await MainActor.run {
-            AISchemaContext.buildSystemPrompt(
-                databaseType: dbType,
-                databaseName: dbName,
-                tables: capturedTables,
-                columnsByTable: columnsByTable,
-                foreignKeys: [:],
-                currentQuery: nil,
-                queryResults: nil,
-                settings: settings,
-                identifierQuote: idQuote
-            )
-        }
+        return AISchemaContext.buildSystemPrompt(
+            databaseType: dbType,
+            databaseName: dbName,
+            tables: capturedTables,
+            columnsByTable: columnsByTable,
+            foreignKeys: [:],
+            currentQuery: nil,
+            queryResults: nil,
+            settings: settings,
+            identifierQuote: idQuote,
+            editorLanguage: editorLanguage,
+            queryLanguageName: queryLanguageName
+        )
     }
 
     // MARK: - Completion Items
@@ -254,6 +317,61 @@ actor SQLSchemaProvider {
                     isPrimaryKey: $0.isPK, isNullable: $0.isNullable,
                     defaultValue: $0.defaultValue, comment: $0.comment
                 )
+            }
+        }
+    }
+
+    /// Get completion items for all columns from cached tables (zero network).
+    /// Used as fallback when no table references exist in the current statement.
+    func allColumnsFromCachedTables() async -> [SQLCompletionItem] {
+        guard !columnCache.isEmpty else { return [] }
+
+        let canonicalNames = Dictionary(
+            tables.map { ($0.name.lowercased(), $0.name) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        var allEntries: [(table: String, col: ColumnInfo)] = []
+        var nameCount: [String: Int] = [:]
+
+        for (key, columns) in columnCache {
+            let tableName = canonicalNames[key] ?? key
+            for col in columns {
+                allEntries.append((table: tableName, col: col))
+                nameCount[col.name.lowercased(), default: 0] += 1
+            }
+        }
+
+        // swiftlint:disable:next large_tuple
+        var itemDataBuilder: [(
+            label: String, insertText: String, type: String, table: String,
+            isPK: Bool, isNullable: Bool, defaultValue: String?, comment: String?
+        )] = []
+
+        for entry in allEntries {
+            let isAmbiguous = (nameCount[entry.col.name.lowercased()] ?? 0) > 1
+            let label = isAmbiguous ? "\(entry.table).\(entry.col.name)" : entry.col.name
+            let insertText = isAmbiguous ? "\(entry.table).\(entry.col.name)" : entry.col.name
+
+            itemDataBuilder.append((
+                label: label, insertText: insertText, type: entry.col.dataType,
+                table: entry.table, isPK: entry.col.isPrimaryKey,
+                isNullable: entry.col.isNullable, defaultValue: entry.col.defaultValue,
+                comment: entry.col.comment
+            ))
+        }
+
+        let itemData = itemDataBuilder
+
+        return await MainActor.run {
+            itemData.map {
+                var item = SQLCompletionItem.column(
+                    $0.label, dataType: $0.type, tableName: $0.table,
+                    isPrimaryKey: $0.isPK, isNullable: $0.isNullable,
+                    defaultValue: $0.defaultValue, comment: $0.comment
+                )
+                item.sortPriority = 150
+                return item
             }
         }
     }

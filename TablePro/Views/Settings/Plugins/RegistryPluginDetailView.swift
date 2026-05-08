@@ -8,9 +8,11 @@ import SwiftUI
 struct RegistryPluginDetailView: View {
     let plugin: RegistryPlugin
     let isInstalled: Bool
+    var hasUpdate: Bool = false
     let installProgress: InstallProgress?
     let downloadCount: Int?
     let onInstall: () -> Void
+    var onUpdate: () -> Void = {}
 
     var body: some View {
         ScrollView {
@@ -77,7 +79,7 @@ struct RegistryPluginDetailView: View {
                             Text("Status")
                                 .foregroundStyle(.secondary)
                             Label("Verified", systemImage: "checkmark.seal.fill")
-                                .foregroundStyle(.blue)
+                                .foregroundStyle(Color(nsColor: .systemBlue))
                         }
                     }
                 }
@@ -86,10 +88,13 @@ struct RegistryPluginDetailView: View {
                 if !isInstalled {
                     Divider()
                     installActionView
-                } else if plugin.category == .theme {
+                } else if hasUpdate {
+                    Divider()
+                    updateActionView
+                } else {
                     Divider()
                     Label("Installed", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
+                        .foregroundStyle(Color(nsColor: .systemGreen))
                         .font(.callout)
                 }
             }
@@ -120,7 +125,7 @@ struct RegistryPluginDetailView: View {
                 }
             case .completed:
                 Label("Installed", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
+                    .foregroundStyle(Color(nsColor: .systemGreen))
                     .font(.callout)
             case .failed:
                 Button("Retry Install") { onInstall() }
@@ -133,19 +138,50 @@ struct RegistryPluginDetailView: View {
                 : String(localized: "Install Plugin")) { onInstall() }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.regular)
+                .disabled(installProgress != nil)
         }
     }
 
-    private static let decimalFormatter: NumberFormatter = {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-        return formatter
-    }()
+    @ViewBuilder
+    private var updateActionView: some View {
+        if let progress = installProgress {
+            switch progress.phase {
+            case .downloading(let fraction):
+                HStack(spacing: 8) {
+                    ProgressView(value: fraction)
+                    Text("\(Int(fraction * 100))%")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+            case .installing:
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Updating...")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            case .completed:
+                Label("Updated", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(Color(nsColor: .systemGreen))
+                    .font(.callout)
+            case .failed:
+                Button(String(localized: "Retry Update")) { onUpdate() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
+            }
+        } else {
+            Button(String(format: String(localized: "Update to v%@"), plugin.version)) { onUpdate() }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.regular)
+        }
+    }
 
     private func formattedCount(_ count: Int) -> String {
-        let formatted = Self.decimalFormatter.string(from: NSNumber(value: count)) ?? "\(count)"
+        let formatted = count.formatted(.number.grouping(.automatic))
         return count == 1
-            ? String(localized: "\(formatted) download")
-            : String(localized: "\(formatted) downloads")
+            ? String(format: String(localized: "%@ download"), formatted)
+            : String(format: String(localized: "%@ downloads"), formatted)
     }
 }

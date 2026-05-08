@@ -24,4 +24,12 @@ extension Notification.Name {
     /// Posted when the active theme changes (colors, fonts, or entire theme switch).
     /// Used by AppKit components that cannot observe @Observable directly.
     static let themeDidChange = Notification.Name("themeDidChange")
+
+    /// Posted when terminal settings change (font, theme, cursor, etc.)
+    /// Used by terminal views to live-update configuration.
+    static let terminalSettingsDidChange = Notification.Name("terminalSettingsDidChange")
+
+    /// Posted when AI settings change (active provider, inline suggestions toggle, etc.)
+    /// Used by editor coordinators to re-resolve inline suggestion sources.
+    static let aiSettingsDidChange = Notification.Name("aiSettingsDidChange")
 }

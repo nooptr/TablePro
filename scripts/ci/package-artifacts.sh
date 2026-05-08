@@ -9,13 +9,16 @@ if [[ "$ARCH" != "arm64" && "$ARCH" != "x86_64" ]]; then
   exit 1
 fi
 
-VERSION=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//') || { echo "❌ ERROR: Cannot determine version from git tags"; exit 1; }
+VERSION=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//') || VERSION="dev"
 
 # --- Create DMG ---
 echo "Creating DMG installer..."
 
-echo "📦 Installing create-dmg tool..."
-brew list create-dmg &>/dev/null || brew install create-dmg
+# create-dmg is pre-installed in CI dependencies step
+if ! command -v create-dmg &>/dev/null; then
+  echo "📦 Installing create-dmg tool..."
+  brew install create-dmg
+fi
 
 chmod +x scripts/create-dmg.sh
 

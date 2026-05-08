@@ -18,13 +18,15 @@ struct ExportProgressView: View {
     let statusMessage: String
     let onStop: () -> Void
 
+    @State private var showStopConfirmation = false
+
     var body: some View {
         VStack(spacing: 20) {
             // Title
             Text(totalTables > 1
                 ? String(localized: "Export multiple tables")
                 : String(localized: "Export table"))
-                .font(.system(size: 15, weight: .semibold))
+                .font(.title3.weight(.semibold))
 
             // Table info and row count
             VStack(spacing: 8) {
@@ -32,11 +34,11 @@ struct ExportProgressView: View {
                     // Show status message if set, otherwise show table name
                     if !statusMessage.isEmpty {
                         Text(statusMessage)
-                            .font(.system(size: 13))
+                            .font(.body)
                             .foregroundStyle(.secondary)
                     } else {
                         Text("\(tableName) (\(tableIndex)/\(totalTables))")
-                            .font(.system(size: 13))
+                            .font(.body)
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
@@ -45,7 +47,7 @@ struct ExportProgressView: View {
 
                     if statusMessage.isEmpty {
                         Text("\(processedRows.formatted())/\(totalRows.formatted()) rows")
-                            .font(.system(size: 13, design: .monospaced))
+                            .font(.system(.body, design: .monospaced))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -60,15 +62,20 @@ struct ExportProgressView: View {
                 }
             }
 
-            // Stop button
             Button("Stop") {
-                onStop()
+                showStopConfirmation = true
             }
             .frame(width: 80)
         }
         .padding(24)
         .frame(width: 400)
         .background(Color(nsColor: .windowBackgroundColor))
+        .alert(String(localized: "Stop Export?"), isPresented: $showStopConfirmation) {
+            Button(String(localized: "Continue"), role: .cancel) {}
+            Button(String(localized: "Stop"), role: .destructive) { onStop() }
+        } message: {
+            Text("Partial files may remain on disk.")
+        }
     }
 
     private var progressValue: Double {

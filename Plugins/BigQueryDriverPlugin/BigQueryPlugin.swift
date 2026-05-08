@@ -36,6 +36,7 @@ final class BigQueryPlugin: NSObject, TableProPlugin, DriverPlugin {
     static let supportsSchemaEditing = false
     static let supportsDatabaseSwitching = false
     static let supportsSchemaSwitching = true
+    static let postConnectActions: [PostConnectAction] = [.selectSchemaFromLastSession]
     static let supportsImport = false
     static let supportsExport = true
     static let supportsSSH = false
@@ -94,6 +95,13 @@ final class BigQueryPlugin: NSObject, TableProPlugin, DriverPlugin {
             id: "bqOAuthClientSecret",
             label: String(localized: "OAuth Client Secret"),
             placeholder: "Client secret from GCP Console",
+            fieldType: .secure,
+            section: .authentication,
+            visibleWhen: FieldVisibilityRule(fieldId: "bqAuthMethod", values: ["oauth"])
+        ),
+        ConnectionField(
+            id: "bqOAuthRefreshToken",
+            label: String(localized: "OAuth Refresh Token"),
             fieldType: .secure,
             section: .authentication,
             visibleWhen: FieldVisibilityRule(fieldId: "bqAuthMethod", values: ["oauth"])
@@ -200,6 +208,8 @@ final class BigQueryPlugin: NSObject, TableProPlugin, DriverPlugin {
             CompletionEntry(label: "APPROX_COUNT_DISTINCT", insertText: "APPROX_COUNT_DISTINCT")
         ]
     }
+
+    static let supportsDropDatabase = true
 
     func createDriver(config: DriverConnectionConfig) -> any PluginDatabaseDriver {
         BigQueryPluginDriver(config: config)

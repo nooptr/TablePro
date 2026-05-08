@@ -15,24 +15,26 @@ struct ExportTableTreeView: View {
     let formatId: String
 
     private var optionColumns: [PluginExportOptionColumn] {
-        guard let plugin = PluginManager.shared.exportPlugins[formatId] else { return [] }
+        guard let plugin = PluginManager.shared.exportPlugin(forFormat: formatId) else { return [] }
         return type(of: plugin).perTableOptionColumns
     }
 
     private var currentPlugin: (any ExportFormatPlugin)? {
-        PluginManager.shared.exportPlugins[formatId]
+        PluginManager.shared.exportPlugin(forFormat: formatId)
     }
 
     var body: some View {
         VStack(spacing: 0) {
             List {
-                ForEach($databaseItems) { $database in
-                    DisclosureGroup(isExpanded: $database.isExpanded) {
-                        ForEach($database.tables) { $table in
-                            tableRow(table: $table)
+                ForEach(databaseItems) { database in
+                    let databaseBinding = $databaseItems.element(database)
+                    DisclosureGroup(isExpanded: databaseBinding.isExpanded) {
+                        ForEach(database.tables) { table in
+                            let tableBinding = databaseBinding.tables.element(table)
+                            tableRow(table: tableBinding)
                         }
                     } label: {
-                        databaseLabel(database: database, allTables: $database.tables)
+                        databaseLabel(database: database, allTables: databaseBinding.tables)
                     }
                 }
             }
@@ -68,11 +70,11 @@ struct ExportTableTreeView: View {
             .frame(width: 18)
 
             Image(systemName: "cylinder")
-                .foregroundStyle(.blue)
-                .font(.system(size: 13))
+                .foregroundStyle(Color(nsColor: .systemBlue))
+                .font(.body)
 
             Text(database.name)
-                .font(.system(size: 13))
+                .font(.body)
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
@@ -105,10 +107,10 @@ struct ExportTableTreeView: View {
 
             Image(systemName: table.wrappedValue.type == .view ? "eye" : "tablecells")
                 .foregroundStyle(table.wrappedValue.type == .view ? .purple : .gray)
-                .font(.system(size: 13))
+                .font(.body)
 
             Text(table.wrappedValue.name)
-                .font(.system(size: 13))
+                .font(.body)
                 .lineLimit(1)
                 .truncationMode(.middle)
 

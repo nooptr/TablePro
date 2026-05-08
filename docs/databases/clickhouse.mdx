@@ -18,7 +18,7 @@ Click **New Connection**, select **ClickHouse**, enter host/port/credentials/dat
 | **Host** | `localhost` | |
 | **Port** | `8123` | HTTP port (not 9000 native TCP) |
 | **Username** | `default` | Set password in production |
-| **Database** | `default` | |
+| **Database** | `default` | Leave empty to browse all databases. Switch with **Cmd+K** |
 
 Uses HTTP API (HTTPS on port 8443 with SSL/TLS enabled). Cloud providers typically expose HTTP(S) only.
 
@@ -31,11 +31,19 @@ Uses HTTP API (HTTPS on port 8443 with SSL/TLS enabled). Cloud providers typical
 
 **SSL/TLS**: Enable in connection form for HTTPS (port 8443). Cloud requires HTTPS.
 
+## Connection URL
+
+```text
+clickhouse://user:password@host:8123/database
+```
+
+See [Connection URL Reference](/databases/connection-urls) for all parameters.
+
 ## Features
 
 ### Database Browsing
 
-After connecting, the sidebar lists all databases on the server. Expand a database to see its tables and views. Switch databases using the database switcher in the toolbar.
+After connecting, the sidebar lists all databases on the server. Expand a database to see its tables and views. Press **Cmd+K** or click the database name in the toolbar to switch.
 
 ### Table Browsing
 
@@ -44,7 +52,7 @@ For each table, TablePro shows:
 - **Structure**: Columns with ClickHouse data types, default expressions, and comments
 - **Indexes**: Data skipping indices (minmax, set, bloom_filter, etc.)
 - **DDL**: The full CREATE TABLE statement including engine and settings
-- **Parts**: Partition and part details from `system.parts` (rows, disk size, active status)
+- **Parts**: Partition and part details from `system.parts` (rows, disk size, active status). Actions: Optimize Table, Drop Partition, Detach Partition
 
 **Engines**:
 
@@ -210,5 +218,6 @@ ORDER BY sum(bytes_on_disk) DESC;
 
 - No foreign keys or multi-statement transactions
 - No auto-increment; primary key and sorting key are immutable after creation
+- Structure editing supports add, modify, and drop columns, plus data-skipping indexes. Foreign keys and primary key changes are not available.
 - UPDATE/DELETE run as asynchronous background mutations via `ALTER TABLE`. Check progress with `SELECT * FROM system.mutations WHERE is_done = 0`
 - Designed for batch inserts, not single-row writes

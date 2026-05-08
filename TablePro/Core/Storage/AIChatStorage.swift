@@ -9,7 +9,7 @@ import Foundation
 import os
 
 /// Manages persistent storage of AI chat conversations as individual JSON files
-final class AIChatStorage {
+actor AIChatStorage {
     static let shared = AIChatStorage()
 
     private static let logger = Logger(subsystem: "com.TablePro", category: "AIChatStorage")
@@ -40,22 +40,45 @@ final class AIChatStorage {
             Self.logger.error("Application Support directory unavailable, falling back to temporary directory")
             appSupport = FileManager.default.temporaryDirectory
         }
-        directory = appSupport
+        let dir = appSupport
             .appendingPathComponent("TablePro", isDirectory: true)
             .appendingPathComponent("ai_chats", isDirectory: true)
+        directory = dir
 
-        createDirectoryIfNeeded()
+        // Create directory inline since actor init is nonisolated
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try FileManager.default.setAttributes(
+                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                ofItemAtPath: dir.path
+            )
+        } catch {
+            Self.logger.error("Failed to create ai_chats directory: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Public Methods
+
+    /// Maximum encoded size for a single conversation file (500 KB)
+    private static let maxFileSize = 500_000
+
+    /// Maximum number of messages to keep after trimming
+    private static let trimmedMessageCount = 50
 
     /// Save a conversation to disk
     func save(_ conversation: AIConversation) {
         let fileURL = directory.appendingPathComponent("\(conversation.id.uuidString).json")
 
         do {
-            let data = try Self.encoder.encode(conversation)
-            try data.write(to: fileURL, options: .atomic)
+            var data = try Self.encoder.encode(conversation)
+
+            if data.count > Self.maxFileSize {
+                var trimmed = conversation
+                trimmed.messages = Array(trimmed.messages.suffix(Self.trimmedMessageCount))
+                data = try Self.encoder.encode(trimmed)
+            }
+
+            try data.write(to: fileURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         } catch {
             Self.logger.error("Failed to save conversation \(conversation.id): \(error.localizedDescription)")
         }
@@ -103,25 +126,16 @@ final class AIChatStorage {
     /// Delete all conversations
     func deleteAll() {
         do {
-            if FileManager.default.fileExists(atPath: directory.path) {
-                try FileManager.default.removeItem(at: directory)
-                createDirectoryIfNeeded()
+            let files = try FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: nil,
+                options: .skipsHiddenFiles
+            )
+            for file in files where file.pathExtension == "json" {
+                try FileManager.default.removeItem(at: file)
             }
         } catch {
             Self.logger.error("Failed to delete all conversations: \(error.localizedDescription)")
-        }
-    }
-
-    // MARK: - Private
-
-    private func createDirectoryIfNeeded() {
-        do {
-            try FileManager.default.createDirectory(
-                at: directory,
-                withIntermediateDirectories: true
-            )
-        } catch {
-            Self.logger.error("Failed to create ai_chats directory: \(error.localizedDescription)")
         }
     }
 }
