@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 // MARK: - Coordinator
@@ -91,8 +92,8 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
     let tableRowsController = TableRowsController()
     var overlayEditor: CellOverlayEditor?
 
-    var settingsObserver: NSObjectProtocol?
-    var themeObserver: NSObjectProtocol?
+    var settingsCancellable: AnyCancellable?
+    var themeCancellable: AnyCancellable?
     private var lastDataGridSettings: DataGridSettings
 
     @Binding var selectedRowIndices: Set<Int>
@@ -135,14 +136,9 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
 
         observeThemeChanges()
 
-        settingsObserver = NotificationCenter.default.addObserver(
-            forName: .dataGridSettingsDidChange,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-
-            Task { @MainActor [weak self] in
+        settingsCancellable = AppEvents.shared.dataGridSettingsChanged
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
                 guard let self, let tableView = self.tableView else { return }
                 let settings = AppSettingsManager.shared.dataGrid
                 let prev = self.lastDataGridSettings
@@ -175,20 +171,15 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
                     }
                 }
             }
-        }
     }
 
     func observeThemeChanges() {
-        themeObserver = NotificationCenter.default.addObserver(
-            forName: .themeDidChange,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
+        themeCancellable = AppEvents.shared.themeChanged
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
                 guard let self, let tableView = self.tableView else { return }
                 Self.updateVisibleCellFonts(tableView: tableView)
             }
-        }
     }
 
     func observeTeardown(connectionId: UUID) {
@@ -227,12 +218,6 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
     private(set) var teardownObserver: NSObjectProtocol?
 
     deinit {
-        if let observer = settingsObserver {
-            NotificationCenter.default.removeObserver(observer)
-        }
-        if let observer = themeObserver {
-            NotificationCenter.default.removeObserver(observer)
-        }
         if let observer = teardownObserver {
             NotificationCenter.default.removeObserver(observer)
         }
