@@ -7,6 +7,7 @@
 //
 
 import CodeEditSourceEditor
+import Combine
 import Foundation
 import Observation
 import os
@@ -73,16 +74,13 @@ final class MainContentCoordinator {
         return switchSeq
     }
 
-    /// Posted during teardown so DataGridView coordinators can release cell views.
-    /// Object is the connection UUID.
-    static let teardownNotification = Notification.Name("MainContentCoordinator.teardown")
-
     // MARK: - Dependencies
 
+    @ObservationIgnored let services: AppServices
     let connection: DatabaseConnection
     var connectionId: UUID { connection.id }
     var activeDatabaseName: String {
-        DatabaseManager.shared.activeDatabaseName(for: connection)
+        services.databaseManager.activeDatabaseName(for: connection)
     }
     var safeModeLevel: SafeModeLevel { toolbarState.safeModeLevel }
     let selectionState = GridSelectionState()
@@ -100,6 +98,9 @@ final class MainContentCoordinator {
     @ObservationIgnored internal lazy var rowOperationsManager: RowOperationsManager = {
         RowOperationsManager(changeManager: changeManager)
     }()
+
+    @ObservationIgnored private(set) var filterCoordinator: FilterCoordinator!
+    @ObservationIgnored private(set) var queryExecutionCoordinator: QueryExecutionCoordinator!
 
     /// Stable identifier for this coordinator's window (set by MainContentView on appear)
     var windowId: UUID?
@@ -162,8 +163,8 @@ final class MainContentCoordinator {
     @ObservationIgnored private var changeManagerUpdateTask: Task<Void, Never>?
     @ObservationIgnored private var activeSortTasks: [UUID: Task<Void, Never>] = [:]
     @ObservationIgnored private var terminationObserver: NSObjectProtocol?
-    @ObservationIgnored private var pluginDriverObserver: NSObjectProtocol?
-    @ObservationIgnored private var externalFileModObserver: NSObjectProtocol?
+    @ObservationIgnored private var pluginDriverCancellable: AnyCancellable?
+    @ObservationIgnored private var externalFileModCancellable: AnyCancellable?
 
     var fileConflictRequest: FileConflictRequest?
 
@@ -307,10 +308,7 @@ final class MainContentCoordinator {
         for (index, tab) in tabManager.tabs.enumerated()
         where tab.id != selectedId && !tab.pendingChanges.hasChanges {
             tabSessionRegistry.evict(for: tab.id)
-            // Mirror the session's epoch bump back to the QueryTab so the
-            // `.task(id:)` in MainEditorContentView re-fires lazy-load on
-            // re-selection. The session bump alone is not observed by SwiftUI.
-            tabManager.tabs[index].loadEpoch &+= 1
+            tabManager.mutate(at: index) { $0.loadEpoch &+= 1 }
         }
     }
 
@@ -336,9 +334,11 @@ final class MainContentCoordinator {
         changeManager: DataChangeManager,
         toolbarState: ConnectionToolbarState,
         tabSessionRegistry: TabSessionRegistry? = nil,
-        queryExecutor: QueryExecutor? = nil
+        queryExecutor: QueryExecutor? = nil,
+        services: AppServices = .live
     ) {
         let initStart = Date()
+        self.services = services
         self.connection = connection
         self.tabManager = tabManager
         self.changeManager = changeManager
@@ -347,7 +347,7 @@ final class MainContentCoordinator {
         self.tabSessionRegistry = resolvedRegistry
         tabManager.bindTabSessionRegistry(resolvedRegistry)
         self.queryExecutor = queryExecutor ?? QueryExecutor(connection: connection)
-        let dialect = PluginManager.shared.sqlDialect(for: connection.type)
+        let dialect = services.pluginManager.sqlDialect(for: connection.type)
         self.queryBuilder = TableQueryBuilder(
             databaseType: connection.type,
             dialect: dialect,
@@ -389,13 +389,14 @@ final class MainContentCoordinator {
 
         _ = Self.registerTerminationObserver
 
-        externalFileModObserver = NotificationCenter.default.addObserver(
-            forName: .linkedSQLFoldersDidUpdate, object: nil, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated {
+        externalFileModCancellable = AppEvents.shared.linkedSQLFoldersDidUpdate
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
                 self?.checkOpenTabsForExternalModification()
             }
-        }
+
+        self.filterCoordinator = FilterCoordinator(parent: self)
+        self.queryExecutionCoordinator = QueryExecutionCoordinator(parent: self)
 
         Self.lifecycleLogger.info(
             "[open] MainContentCoordinator.init done connId=\(connection.id, privacy: .public) elapsedMs=\(Int(Date().timeIntervalSince(initStart) * 1_000))"
@@ -411,7 +412,7 @@ final class MainContentCoordinator {
 
             let modified = currentMtime > loadMtime.addingTimeInterval(0.5)
             if modified != tabManager.tabs[index].content.externalModificationDetected {
-                tabManager.tabs[index].content.externalModificationDetected = modified
+                tabManager.mutate(at: index) { $0.content.externalModificationDetected = modified }
             }
         }
     }
@@ -424,13 +425,13 @@ final class MainContentCoordinator {
         startFileWatcherIfNeeded()
         // Retry when driver becomes available (connection may still be in progress)
         if changeManager.pluginDriver == nil {
-            pluginDriverObserver = NotificationCenter.default.addObserver(
-                forName: .databaseDidConnect, object: nil, queue: .main
-            ) { [weak self] _ in
-                Task {
-                    self?.setupPluginDriver()
+            pluginDriverCancellable = AppEvents.shared.databaseDidConnect
+                .receive(on: RunLoop.main)
+                .sink { [weak self] _ in
+                    Task {
+                        self?.setupPluginDriver()
+                    }
                 }
-            }
         }
         Self.lifecycleLogger.info(
             "[open] MainContentCoordinator.markActivated done connId=\(self.connection.id, privacy: .public) elapsedMs=\(Int(Date().timeIntervalSince(start) * 1_000))"
@@ -439,14 +440,14 @@ final class MainContentCoordinator {
 
     /// Start watching the database file for external changes (SQLite, DuckDB).
     private func startFileWatcherIfNeeded() {
-        guard PluginManager.shared.connectionMode(for: connection.type) == .fileBased else { return }
+        guard services.pluginManager.connectionMode(for: connection.type) == .fileBased else { return }
         let filePath = connection.database
         guard !filePath.isEmpty else { return }
 
         let watcher = DatabaseFileWatcher()
         watcher.watch(filePath: filePath, connectionId: connectionId) { [weak self] in
             guard let self else { return }
-            if case .loading = SchemaService.shared.state(for: self.connectionId) { return }
+            if case .loading = services.schemaService.state(for: self.connectionId) { return }
             Task { await self.refreshTables() }
         }
         fileWatcher = watcher
@@ -455,8 +456,8 @@ final class MainContentCoordinator {
     /// Refresh schema only if not recently refreshed (avoids redundant work
     /// when both the file watcher and window focus trigger close together).
     func refreshTablesIfStale() async {
-        guard let driver = DatabaseManager.shared.driver(for: connectionId) else { return }
-        await SchemaService.shared.reloadIfStale(
+        guard let driver = services.databaseManager.driver(for: connectionId) else { return }
+        await services.schemaService.reloadIfStale(
             connectionId: connectionId,
             driver: driver,
             connection: connection,
@@ -472,14 +473,12 @@ final class MainContentCoordinator {
 
     /// Set up the plugin driver for query building dispatch on the query builder and change manager.
     private func setupPluginDriver() {
-        guard let driver = DatabaseManager.shared.driver(for: connectionId) else { return }
+        guard let driver = services.databaseManager.driver(for: connectionId) else { return }
         let pluginDriver = driver.queryBuildingPluginDriver
         queryBuilder.setPluginDriver(pluginDriver)
         changeManager.pluginDriver = pluginDriver
-        // Remove observer once successfully set up
-        if pluginDriver != nil, let observer = pluginDriverObserver {
-            NotificationCenter.default.removeObserver(observer)
-            pluginDriverObserver = nil
+        if pluginDriver != nil {
+            pluginDriverCancellable = nil
         }
     }
 
@@ -492,8 +491,8 @@ final class MainContentCoordinator {
     }
 
     func refreshTables() async {
-        guard let driver = DatabaseManager.shared.driver(for: connectionId) else { return }
-        await SchemaService.shared.reload(
+        guard let driver = services.databaseManager.driver(for: connectionId) else { return }
+        await services.schemaService.reload(
             connectionId: connectionId,
             driver: driver,
             connection: connection
@@ -504,10 +503,10 @@ final class MainContentCoordinator {
     /// Push the SchemaService table list into the autocomplete provider and prune sidebar
     /// state for tables that no longer exist.
     private func reconcilePostSchemaLoad() async {
-        guard case .loaded(let tables) = SchemaService.shared.state(for: connectionId) else { return }
-        if let driver = DatabaseManager.shared.driver(for: connectionId),
+        guard case .loaded(let tables) = services.schemaService.state(for: connectionId) else { return }
+        if let driver = services.databaseManager.driver(for: connectionId),
            let provider = SchemaProviderRegistry.shared.provider(for: connectionId) {
-            let currentDb = DatabaseManager.shared.session(for: connectionId)?.activeDatabase
+            let currentDb = services.databaseManager.session(for: connectionId)?.activeDatabase
             await provider.resetForDatabase(currentDb, tables: tables, driver: driver)
         }
 
@@ -547,14 +546,8 @@ final class MainContentCoordinator {
             NotificationCenter.default.removeObserver(observer)
             terminationObserver = nil
         }
-        if let observer = pluginDriverObserver {
-            NotificationCenter.default.removeObserver(observer)
-            pluginDriverObserver = nil
-        }
-        if let observer = externalFileModObserver {
-            NotificationCenter.default.removeObserver(observer)
-            externalFileModObserver = nil
-        }
+        pluginDriverCancellable = nil
+        externalFileModCancellable = nil
         fileWatcher?.stopWatching(connectionId: connectionId)
         fileWatcher = nil
         currentQueryTask?.cancel()
@@ -566,9 +559,8 @@ final class MainContentCoordinator {
         for task in activeSortTasks.values { task.cancel() }
         activeSortTasks.removeAll()
 
-        NotificationCenter.default.post(
-            name: Self.teardownNotification,
-            object: connection.id
+        AppEvents.shared.mainCoordinatorTeardown.send(
+            MainCoordinatorTeardown(connectionId: connection.id)
         )
 
         tabSessionRegistry.removeAll()
@@ -637,12 +629,12 @@ final class MainContentCoordinator {
     func initializeToolbar() {
         toolbarState.update(from: connection)
 
-        if let session = DatabaseManager.shared.session(for: connectionId) {
+        if let session = services.databaseManager.session(for: connectionId) {
             toolbarState.connectionState = mapSessionStatus(session.status)
             if let driver = session.driver {
                 toolbarState.databaseVersion = driver.serverVersion
             }
-        } else if let driver = DatabaseManager.shared.driver(for: connectionId) {
+        } else if let driver = services.databaseManager.driver(for: connectionId) {
             toolbarState.connectionState = .connected
             toolbarState.databaseVersion = driver.serverVersion
         }
@@ -672,8 +664,8 @@ final class MainContentCoordinator {
     // MARK: - Schema Loading
 
     func loadSchema() async {
-        guard let driver = DatabaseManager.shared.driver(for: connectionId) else { return }
-        await SchemaService.shared.load(
+        guard let driver = services.databaseManager.driver(for: connectionId) else { return }
+        await services.schemaService.load(
             connectionId: connectionId,
             driver: driver,
             connection: connection
@@ -682,7 +674,7 @@ final class MainContentCoordinator {
     }
 
     func loadTableMetadata(tableName: String) async {
-        guard let driver = DatabaseManager.shared.driver(for: connectionId) else { return }
+        guard let driver = services.databaseManager.driver(for: connectionId) else { return }
 
         do {
             let metadata = try await driver.fetchTableMetadata(tableName: tableName)
@@ -724,7 +716,7 @@ final class MainContentCoordinator {
             return
         }
 
-        if AppSettingsManager.shared.editor.queryParametersEnabled {
+        if services.appSettings.editor.queryParametersEnabled {
             let paramStatements = SQLStatementScanner.allStatements(in: sql)
             guard !paramStatements.isEmpty else { return }
             let combinedSQL = paramStatements.joined(separator: "; ")
@@ -735,10 +727,10 @@ final class MainContentCoordinator {
                     sql: combinedSQL,
                     existing: tabManager.tabs[index].content.queryParameters
                 )
-                tabManager.tabs[index].content.queryParameters = reconciled
+                tabManager.mutate(at: index) { $0.content.queryParameters = reconciled }
 
                 if !tabManager.tabs[index].content.isParameterPanelVisible {
-                    tabManager.tabs[index].content.isParameterPanelVisible = true
+                    tabManager.mutate(at: index) { $0.content.isParameterPanelVisible = true }
                     return
                 }
 
@@ -790,9 +782,7 @@ final class MainContentCoordinator {
                 case .allowed:
                     executeQueryInternal(sql)
                 case .blocked(let reason):
-                    if index < tabManager.tabs.count {
-                        tabManager.tabs[index].execution.errorMessage = reason
-                    }
+                    tabManager.mutate(at: index) { $0.execution.errorMessage = reason }
                 }
             }
         } else {
@@ -805,8 +795,10 @@ final class MainContentCoordinator {
     func loadQueryIntoEditor(_ query: String) {
         if let (tab, tabIndex) = tabManager.selectedTabAndIndex,
            tab.tabType == .query {
-            tabManager.tabs[tabIndex].content.query = query
-            tabManager.tabs[tabIndex].hasUserInteraction = true
+            tabManager.mutate(at: tabIndex) {
+                $0.content.query = query
+                $0.hasUserInteraction = true
+            }
         } else {
             let payload = EditorTabPayload(
                 connectionId: connection.id,
@@ -821,12 +813,14 @@ final class MainContentCoordinator {
         if let (tab, tabIndex) = tabManager.selectedTabAndIndex,
            tab.tabType == .query {
             let existingQuery = tab.content.query
-            if existingQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                tabManager.tabs[tabIndex].content.query = query
-            } else {
-                tabManager.tabs[tabIndex].content.query = existingQuery + "\n\n" + query
+            tabManager.mutate(at: tabIndex) { mutTab in
+                if existingQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    mutTab.content.query = query
+                } else {
+                    mutTab.content.query = existingQuery + "\n\n" + query
+                }
+                mutTab.hasUserInteraction = true
             }
-            tabManager.tabs[tabIndex].hasUserInteraction = true
         } else if tabManager.tabs.isEmpty {
             tabManager.addTab(initialQuery: query, databaseName: activeDatabaseName)
         } else {
@@ -902,10 +896,12 @@ final class MainContentCoordinator {
             return
         }
 
-        guard let adapter = DatabaseManager.shared.driver(for: connectionId) as? PluginDriverAdapter,
+        guard let adapter = services.databaseManager.driver(for: connectionId) as? PluginDriverAdapter,
               let explainSQL = adapter.buildExplainQuery(stmt) else {
             if let (_, index) = tabManager.selectedTabAndIndex {
-                tabManager.tabs[index].execution.errorMessage = String(localized: "EXPLAIN is not supported for this database type.")
+                tabManager.mutate(at: index) {
+                    $0.execution.errorMessage = String(localized: "EXPLAIN is not supported for this database type.")
+                }
             }
             return
         }
@@ -941,7 +937,7 @@ final class MainContentCoordinator {
         if currentQueryTask != nil {
             currentQueryTask?.cancel()
             do {
-                try DatabaseManager.shared.driver(for: connectionId)?.cancelQuery()
+                try services.databaseManager.driver(for: connectionId)?.cancelQuery()
             } catch {
                 Self.logger.warning("cancelQuery failed: \(error.localizedDescription, privacy: .public)")
             }
@@ -950,16 +946,17 @@ final class MainContentCoordinator {
         queryGeneration += 1
         let capturedGeneration = queryGeneration
 
-        var tab = tabManager.tabs[index]
-        tab.execution.isExecuting = true
-        tab.execution.executionTime = nil
-        tab.execution.errorMessage = nil
-        tab.display.explainText = nil
-        tab.display.explainPlan = nil
-        tabManager.tabs[index] = tab
+        tabManager.mutate(at: index) { tab in
+            tab.execution.isExecuting = true
+            tab.execution.executionTime = nil
+            tab.execution.errorMessage = nil
+            tab.display.explainText = nil
+            tab.display.explainPlan = nil
+        }
+        let tab = tabManager.tabs[index]
         toolbarState.setExecuting(true)
 
-        if PluginManager.shared.supportsQueryProgress(for: connection.type) {
+        if services.pluginManager.supportsQueryProgress(for: connection.type) {
             installClickHouseProgressHandler()
         }
 
@@ -999,16 +996,14 @@ final class MainContentCoordinator {
                 await MainActor.run { [weak self] in
                     guard let self else { return }
                     currentQueryTask = nil
-                    if PluginManager.shared.supportsQueryProgress(for: self.connection.type) {
+                    if services.pluginManager.supportsQueryProgress(for: self.connection.type) {
                         self.clearClickHouseProgress()
                     }
                     toolbarState.setExecuting(false)
                     toolbarState.lastQueryDuration = executionResult.fetchResult.executionTime
 
                     if capturedGeneration != queryGeneration || Task.isCancelled {
-                        if let idx = tabManager.tabs.firstIndex(where: { $0.id == tabId }) {
-                            tabManager.tabs[idx].execution.isExecuting = false
-                        }
+                        tabManager.mutate(tabId: tabId) { $0.execution.isExecuting = false }
                         return
                     }
 
@@ -1058,11 +1053,9 @@ final class MainContentCoordinator {
             } catch {
                 await MainActor.run { [weak self] in
                     guard let self else { return }
-                    if let idx = tabManager.tabs.firstIndex(where: { $0.id == tabId }) {
-                        var tab = tabManager.tabs[idx]
+                    tabManager.mutate(tabId: tabId) { tab in
                         tab.execution.isExecuting = false
                         tab.pagination.isLoadingMore = false
-                        tabManager.tabs[idx] = tab
                     }
                     currentQueryTask = nil
                     toolbarState.setExecuting(false)
@@ -1076,17 +1069,15 @@ final class MainContentCoordinator {
     /// Reset execution state when a query is cancelled
     @MainActor
     internal func resetExecutionState(tabId: UUID, executionTime: TimeInterval) {
-        if let idx = tabManager.tabs.firstIndex(where: { $0.id == tabId }) {
-            tabManager.tabs[idx].execution.isExecuting = false
-        }
+        tabManager.mutate(tabId: tabId) { $0.execution.isExecuting = false }
         currentQueryTask = nil
         toolbarState.setExecuting(false)
         toolbarState.lastQueryDuration = executionTime
     }
 
     internal func resolveTableEditability(tab: QueryTab, sql: String) -> (tableName: String?, isEditable: Bool) {
-        let usesNoSQLBrowsing = PluginManager.shared.editorLanguage(for: connection.type) != .sql
-            || (DatabaseManager.shared.driver(for: connectionId) as? PluginDriverAdapter)?
+        let usesNoSQLBrowsing = services.pluginManager.editorLanguage(for: connection.type) != .sql
+            || (services.databaseManager.driver(for: connectionId) as? PluginDriverAdapter)?
                 .queryBuildingPluginDriver != nil
         if usesNoSQLBrowsing {
             let name = tabManager.selectedTab?.tableContext.tableName
@@ -1202,17 +1193,21 @@ final class MainContentCoordinator {
                 let strippedQuery = Self.stripTrailingOrderBy(from: baseQuery)
                 let quotedColumn = queryBuilder.quoteIdentifier(columnName)
                 let orderQuery = "\(strippedQuery) ORDER BY \(quotedColumn) \(direction)"
-                tabManager.tabs[tabIndex].sortState = currentSort
-                tabManager.tabs[tabIndex].hasUserInteraction = true
-                tabManager.tabs[tabIndex].pagination.resetLoadMore()
-                tabManager.tabs[tabIndex].content.query = orderQuery
+                tabManager.mutate(at: tabIndex) { tab in
+                    tab.sortState = currentSort
+                    tab.hasUserInteraction = true
+                    tab.pagination.resetLoadMore()
+                    tab.content.query = orderQuery
+                }
                 runQuery()
                 return
             }
 
-            tabManager.tabs[tabIndex].sortState = currentSort
-            tabManager.tabs[tabIndex].hasUserInteraction = true
-            tabManager.tabs[tabIndex].pagination.reset()
+            tabManager.mutate(at: tabIndex) { tab in
+                tab.sortState = currentSort
+                tab.hasUserInteraction = true
+                tab.pagination.reset()
+            }
             let tabId = tab.id
             let schemaVersion = tab.schemaVersion
             let sortColumns = currentSort.columns
@@ -1221,10 +1216,9 @@ final class MainContentCoordinator {
             let snapshotRows: [(id: RowID, values: [String?])] = storageRows.map { ($0.id, $0.values) }
 
             if storageRows.count > 1_000 {
-                // Sort on background thread to avoid UI freeze
                 activeSortTasks[tabId]?.cancel()
                 activeSortTasks.removeValue(forKey: tabId)
-                tabManager.tabs[tabIndex].execution.isExecuting = true
+                tabManager.mutate(at: tabIndex) { $0.execution.isExecuting = true }
                 toolbarState.setExecuting(true)
                 querySortCache.removeValue(forKey: tabId)
 
@@ -1250,10 +1244,10 @@ final class MainContentCoordinator {
                             direction: sortColumns.first?.direction ?? .ascending,
                             schemaVersion: schemaVersion
                         )
-                        var sortedTab = self.tabManager.tabs[idx]
-                        sortedTab.execution.isExecuting = false
-                        sortedTab.execution.executionTime = sortDuration
-                        self.tabManager.tabs[idx] = sortedTab
+                        self.tabManager.mutate(at: idx) { tab in
+                            tab.execution.isExecuting = false
+                            tab.execution.executionTime = sortDuration
+                        }
                         self.toolbarState.setExecuting(false)
                         self.toolbarState.lastQueryDuration = sortDuration
                         self.activeSortTasks.removeValue(forKey: tabId)
@@ -1272,17 +1266,18 @@ final class MainContentCoordinator {
         let capturedQuery = tab.content.query
         let capturedColumns = tableRows.columns
         confirmDiscardChangesIfNeeded(action: .sort) { [weak self] confirmed in
-            guard let self, confirmed,
-                  let idx = self.tabManager.tabs.firstIndex(where: { $0.id == tabId }) else { return }
-            self.tabManager.tabs[idx].sortState = capturedSort
-            self.tabManager.tabs[idx].hasUserInteraction = true
-            self.tabManager.tabs[idx].pagination.reset()
+            guard let self, confirmed else { return }
             let newQuery = self.queryBuilder.buildMultiSortQuery(
                 baseQuery: capturedQuery,
                 sortState: capturedSort,
                 columns: capturedColumns
             )
-            self.tabManager.tabs[idx].content.query = newQuery
+            guard self.tabManager.mutate(tabId: tabId, { tab in
+                tab.sortState = capturedSort
+                tab.hasUserInteraction = true
+                tab.pagination.reset()
+                tab.content.query = newQuery
+            }) else { return }
             self.runQuery()
         }
     }
@@ -1301,8 +1296,10 @@ final class MainContentCoordinator {
         let emptySort = SortState()
 
         if tab.tabType == .query {
-            tabManager.tabs[tabIndex].sortState = emptySort
-            tabManager.tabs[tabIndex].hasUserInteraction = true
+            tabManager.mutate(at: tabIndex) { tab in
+                tab.sortState = emptySort
+                tab.hasUserInteraction = true
+            }
             querySortCache.removeValue(forKey: tab.id)
             dataTabDelegate?.dataGridDidReplaceAllRows()
             return
@@ -1311,12 +1308,13 @@ final class MainContentCoordinator {
         let tabId = tab.id
         let capturedQuery = tab.content.query
         confirmDiscardChangesIfNeeded(action: .sort) { [weak self] confirmed in
-            guard let self, confirmed,
-                  let idx = self.tabManager.tabs.firstIndex(where: { $0.id == tabId }) else { return }
-            self.tabManager.tabs[idx].sortState = emptySort
-            self.tabManager.tabs[idx].hasUserInteraction = true
-            self.tabManager.tabs[idx].pagination.reset()
-            self.tabManager.tabs[idx].content.query = Self.stripTrailingOrderBy(from: capturedQuery)
+            guard let self, confirmed else { return }
+            guard self.tabManager.mutate(tabId: tabId, { tab in
+                tab.sortState = emptySort
+                tab.hasUserInteraction = true
+                tab.pagination.reset()
+                tab.content.query = Self.stripTrailingOrderBy(from: capturedQuery)
+            }) else { return }
             self.runQuery()
         }
     }

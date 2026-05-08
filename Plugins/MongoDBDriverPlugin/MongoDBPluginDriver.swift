@@ -7,7 +7,7 @@ import Foundation
 import os
 import TableProPluginKit
 
-final class MongoDBPluginDriver: PluginDatabaseDriver {
+final class MongoDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     private let config: DriverConnectionConfig
     private var mongoConnection: MongoDBConnection?
     private var currentDb: String
@@ -21,6 +21,10 @@ final class MongoDBPluginDriver: PluginDatabaseDriver {
     func commitTransaction() async throws {}
     func rollbackTransaction() async throws {}
     func quoteIdentifier(_ name: String) -> String { name }
+
+    var capabilities: PluginCapabilities {
+        [.cancelQuery]
+    }
 
     func defaultExportQuery(table: String) -> String? {
         "db.getCollection(\"\(table)\").find({})"
