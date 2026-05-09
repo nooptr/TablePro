@@ -1,10 +1,3 @@
-//
-//  PostgreSQLDriver.swift
-//  TableProMobile
-//
-//  PostgreSQL driver conforming to DatabaseDriver directly (no plugin layer).
-//
-
 import CLibPQ
 import Foundation
 import TableProDatabase
@@ -98,7 +91,7 @@ final class PostgreSQLDriver: DatabaseDriver, @unchecked Sendable {
                         continuation.yield(.columns(columns))
                         var emitted = 0
                         while !Task.isCancelled, emitted < options.maxRows {
-                            guard let cells = try await actor.fetchNextRow(options: options, columns: columns) else {
+                            guard let cells = await actor.fetchNextRow(options: options, columns: columns) else {
                                 break
                             }
                             continuation.yield(.row(Row(cells: cells)))

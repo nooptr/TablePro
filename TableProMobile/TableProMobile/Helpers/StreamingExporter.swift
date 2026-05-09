@@ -1,8 +1,3 @@
-//
-//  StreamingExporter.swift
-//  TableProMobile
-//
-
 import Foundation
 import os
 import TableProDatabase
@@ -125,7 +120,7 @@ actor StreamingExporter {
 }
 
 extension ExportFormat {
-    var fileExtension: String {
+    nonisolated var fileExtension: String {
         switch self {
         case .csv: return "csv"
         case .json: return "json"

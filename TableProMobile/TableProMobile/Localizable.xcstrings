@@ -20,6 +20,16 @@
         }
       }
     },
+    "%@ -> %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ -> %2$@"
+          }
+        }
+      }
+    },
     "%@ · %@" : {
       "localizations" : {
         "en" : {
@@ -43,6 +53,7 @@
       }
     },
     "%@ → %@" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -60,6 +71,46 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%1$@ → %2$@"
+          }
+        }
+      }
+    },
+    "%@, %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@, %2$@"
+          }
+        }
+      }
+    },
+    "%@, %@, %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@, %2$@, %3$@"
+          }
+        }
+      }
+    },
+    "%@, %@, %@, tag %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@, %2$@, %3$@, tag %4$@"
+          }
+        }
+      }
+    },
+    "%@, %@, %lld rows" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@, %2$@, %3$lld rows"
           }
         }
       }
@@ -191,6 +242,9 @@
         }
       }
     },
+    "Active DB" : {
+
+    },
     "Add a database connection to get started." : {
       "localizations" : {
         "vi" : {
@@ -238,6 +292,18 @@
           }
         }
       }
+    },
+    "After 1 hour" : {
+
+    },
+    "After 1 minute" : {
+
+    },
+    "After 5 minutes" : {
+
+    },
+    "After 15 minutes" : {
+
     },
     "All" : {
       "localizations" : {
@@ -384,6 +450,9 @@
         }
       }
     },
+    "Auth" : {
+
+    },
     "Auth Method" : {
       "localizations" : {
         "vi" : {
@@ -399,6 +468,9 @@
           }
         }
       }
+    },
+    "Authenticate to access your database connections." : {
+
     },
     "Authentication Failed" : {
       "localizations" : {
@@ -431,6 +503,9 @@
           }
         }
       }
+    },
+    "Auto-Lock" : {
+
     },
     "Build" : {
       "localizations" : {
@@ -465,7 +540,6 @@
       }
     },
     "Cannot Save" : {
-      "extractionState" : "stale",
       "localizations" : {
         "vi" : {
           "stringUnit" : {
@@ -770,6 +844,9 @@
         }
       }
     },
+    "Connected" : {
+
+    },
     "Connecting to %@..." : {
       "localizations" : {
         "vi" : {
@@ -786,6 +863,9 @@
         }
       }
     },
+    "Connecting…" : {
+
+    },
     "Connection" : {
       "localizations" : {
         "vi" : {
@@ -801,6 +881,9 @@
           }
         }
       }
+    },
+    "Connection Deleted" : {
+
     },
     "Connection Failed" : {
       "localizations" : {
@@ -1154,6 +1237,9 @@
         }
       }
     },
+    "Databases" : {
+
+    },
     "Default" : {
       "localizations" : {
         "vi" : {
@@ -1170,6 +1256,12 @@
         }
       }
     },
+    "Default DB" : {
+
+    },
+    "Default Safe Mode" : {
+
+    },
     "Default: %@" : {
       "localizations" : {
         "vi" : {
@@ -1185,6 +1277,9 @@
           }
         }
       }
+    },
+    "Defaults applied when adding a new connection and when opening a table for the first time." : {
+
     },
     "Delete" : {
       "localizations" : {
@@ -1265,6 +1360,9 @@
           }
         }
       }
+    },
+    "Disconnected" : {
+
     },
     "Done" : {
       "localizations" : {
@@ -1394,6 +1492,9 @@
         }
       }
     },
+    "Enabled" : {
+
+    },
     "Enter a name for the new SQLite database." : {
       "localizations" : {
         "vi" : {
@@ -1426,7 +1527,11 @@
         }
       }
     },
+    "Enter a page number (1-%lld)" : {
+
+    },
     "Enter a page number (1–%lld)" : {
+      "extractionState" : "stale",
       "localizations" : {
         "vi" : {
           "stringUnit" : {
@@ -1620,6 +1725,9 @@
         }
       }
     },
+    "File" : {
+
+    },
     "Filter" : {
       "localizations" : {
         "vi" : {
@@ -1667,6 +1775,9 @@
           }
         }
       }
+    },
+    "Focus search" : {
+
     },
     "Foreign Keys" : {
       "extractionState" : "stale",
@@ -1861,6 +1972,12 @@
         }
       }
     },
+    "iCloud Sync" : {
+
+    },
+    "Immediately" : {
+
+    },
     "Import connections from your Mac" : {
       "localizations" : {
         "vi" : {
@@ -1893,6 +2010,9 @@
           }
         }
       }
+    },
+    "Info" : {
+
     },
     "Input Method" : {
       "localizations" : {
@@ -1941,6 +2061,12 @@
           }
         }
       }
+    },
+    "Load Failed" : {
+
+    },
+    "Load full value" : {
+
     },
     "Load More" : {
       "extractionState" : "stale",
@@ -2012,7 +2138,13 @@
     "Local Network access is required. Open Settings > Privacy & Security > Local Network and turn TablePro on." : {
 
     },
+    "Local Network access may be blocked. Open Settings > Privacy & Security > Local Network and turn TablePro on." : {
+
+    },
     "Local Network Access Required" : {
+
+    },
+    "Locks TablePro when reopened after the selected idle time. Cold launches always require authentication." : {
 
     },
     "Logic" : {
@@ -2094,6 +2226,9 @@
           }
         }
       }
+    },
+    "New Connections" : {
+
     },
     "New Database" : {
       "localizations" : {
@@ -2288,7 +2423,6 @@
       }
     },
     "No primary key values found." : {
-      "extractionState" : "stale",
       "localizations" : {
         "vi" : {
           "stringUnit" : {
@@ -2448,6 +2582,9 @@
         }
       }
     },
+    "Off" : {
+
+    },
     "OK" : {
       "localizations" : {
         "vi" : {
@@ -2546,6 +2683,12 @@
           }
         }
       }
+    },
+    "Opens table data" : {
+
+    },
+    "Opens this connection" : {
+
     },
     "Operator" : {
       "localizations" : {
@@ -2675,6 +2818,9 @@
         }
       }
     },
+    "Path" : {
+
+    },
     "Port" : {
       "localizations" : {
         "vi" : {
@@ -2692,6 +2838,7 @@
       }
     },
     "Primary" : {
+      "extractionState" : "stale",
       "localizations" : {
         "vi" : {
           "stringUnit" : {
@@ -2884,6 +3031,15 @@
         }
       }
     },
+    "Require Face ID" : {
+
+    },
+    "Require Optic ID" : {
+
+    },
+    "Require Touch ID" : {
+
+    },
     "Results Cleared" : {
       "localizations" : {
         "vi" : {
@@ -2901,6 +3057,7 @@
       }
     },
     "Results cleared due to memory pressure." : {
+      "extractionState" : "stale",
       "localizations" : {
         "vi" : {
           "stringUnit" : {
@@ -2915,6 +3072,9 @@
           }
         }
       }
+    },
+    "Results trimmed due to memory pressure." : {
+
     },
     "Retry" : {
       "localizations" : {
@@ -3031,6 +3191,12 @@
         }
       }
     },
+    "Schema" : {
+
+    },
+    "Schemas" : {
+
+    },
     "Search all columns" : {
       "localizations" : {
         "vi" : {
@@ -3094,6 +3260,9 @@
           }
         }
       }
+    },
+    "Security" : {
+
     },
     "SELECT * FROM ..." : {
       "localizations" : {
@@ -3448,6 +3617,12 @@
         }
       }
     },
+    "Stats" : {
+
+    },
+    "Status" : {
+
+    },
     "Stop" : {
 
     },
@@ -3468,6 +3643,9 @@
         }
       }
     },
+    "Sync" : {
+
+    },
     "Sync from iCloud" : {
       "localizations" : {
         "vi" : {
@@ -3483,6 +3661,9 @@
           }
         }
       }
+    },
+    "Sync with iCloud" : {
+
     },
     "Syncing from iCloud..." : {
       "localizations" : {
@@ -3517,6 +3698,9 @@
         }
       }
     },
+    "Table" : {
+
+    },
     "Table Structure" : {
       "localizations" : {
         "vi" : {
@@ -3532,6 +3716,9 @@
           }
         }
       }
+    },
+    "TablePro is Locked" : {
+
     },
     "Tables" : {
       "localizations" : {
@@ -3725,6 +3912,9 @@
         }
       }
     },
+    "This connection no longer exists. It may have been removed from another device." : {
+
+    },
     "This database has no tables." : {
       "localizations" : {
         "vi" : {
@@ -3806,7 +3996,6 @@
       }
     },
     "This table needs a primary key to identify the row." : {
-      "extractionState" : "stale",
       "localizations" : {
         "vi" : {
           "stringUnit" : {
@@ -3854,6 +4043,15 @@
         }
       }
     },
+    "Try Again" : {
+
+    },
+    "Try again or check your connection." : {
+
+    },
+    "Type" : {
+
+    },
     "Ungrouped" : {
       "localizations" : {
         "vi" : {
@@ -3871,6 +4069,7 @@
       }
     },
     "Unique" : {
+      "extractionState" : "stale",
       "localizations" : {
         "vi" : {
           "stringUnit" : {
@@ -3885,6 +4084,15 @@
           }
         }
       }
+    },
+    "Unlock" : {
+
+    },
+    "Unlock TablePro to access your database connections." : {
+
+    },
+    "Use Passcode" : {
+
     },
     "Username" : {
       "localizations" : {
@@ -3934,6 +4142,9 @@
         }
       }
     },
+    "View" : {
+
+    },
     "Views" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -3966,6 +4177,9 @@
           }
         }
       }
+    },
+    "When off, connections, groups, and tags stay on this device only. Existing iCloud data is not deleted." : {
+
     },
     "Write Query Blocked" : {
       "localizations" : {

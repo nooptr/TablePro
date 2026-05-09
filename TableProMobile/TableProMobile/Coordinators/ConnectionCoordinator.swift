@@ -1,8 +1,3 @@
-//
-//  ConnectionCoordinator.swift
-//  TableProMobile
-//
-
 import Foundation
 import Observation
 import os
@@ -33,7 +28,8 @@ final class ConnectionCoordinator {
         }
     }
     var pendingQuery: String?
-    var navigationPath = NavigationPath()
+    var tablesPath = NavigationPath()
+    var showingEditSheet = false
 
     private(set) var queryHistory: [QueryHistoryItem] = []
     private let historyStorage = QueryHistoryStorage()
@@ -161,7 +157,7 @@ final class ConnectionCoordinator {
     // MARK: - Database / Schema Switching
 
     func switchDatabase(to name: String) async {
-        guard let session, name != activeDatabase, !isSwitching else { return }
+        guard session != nil, name != activeDatabase, !isSwitching else { return }
         isSwitching = true
         defer { isSwitching = false }
 
@@ -280,7 +276,7 @@ final class ConnectionCoordinator {
         appState.pendingTableName = nil
         selectedTab = .tables
         Task { @MainActor in
-            navigationPath.append(table)
+            tablesPath.append(table)
         }
     }
 

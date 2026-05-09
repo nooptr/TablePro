@@ -30,7 +30,12 @@ final class AppEvents {
 
     let connectionStatusChanged = PassthroughSubject<ConnectionStatusChange, Never>()
 
-    let connectionUpdated = PassthroughSubject<Void, Never>()
+    /// Connection metadata changed (name, color, group, type, etc.).
+    /// Payload is the affected connection's id, or `nil` for bulk updates
+    /// (sync pull, multi-import) where the sender doesn't track individual ids.
+    /// Subscribers scoped to a single connection should filter `payload == id`;
+    /// list-level subscribers refresh on every event regardless.
+    let connectionUpdated = PassthroughSubject<UUID?, Never>()
 
     let databaseDidConnect = PassthroughSubject<DatabaseDidConnect, Never>()
 
@@ -41,13 +46,26 @@ final class AppEvents {
 
     // MARK: - Data Sources
 
-    let queryHistoryDidUpdate = PassthroughSubject<Void, Never>()
+    /// Query history changed (entry added, deleted, or cleared).
+    /// Payload is the affected connection's id, or `nil` for cross-connection
+    /// operations (delete-by-id without connection lookup, clear-all).
+    /// Per-connection subscribers should refresh on `payload == nil || payload == self.connectionId`.
+    let queryHistoryDidUpdate = PassthroughSubject<UUID?, Never>()
 
-    let sqlFavoritesDidUpdate = PassthroughSubject<Void, Never>()
+    /// SQL favorites or favorite folders changed.
+    /// Payload is the affected connection's id, or `nil` for cross-connection
+    /// favorites (`favorite.connectionId == nil`) and bulk operations
+    /// (multi-favorite delete) where the sender doesn't track a single id.
+    /// Per-connection subscribers should refresh on `payload == nil || payload == self.connectionId`.
+    let sqlFavoritesDidUpdate = PassthroughSubject<UUID?, Never>()
 
     let linkedFoldersDidUpdate = PassthroughSubject<Void, Never>()
 
-    let linkedSQLFoldersDidUpdate = PassthroughSubject<Void, Never>()
+    /// Linked SQL folder rescan completed; cached file index changed.
+    /// Senders are bulk rescans across all enabled folders, so payload is always `nil`.
+    /// The shape is kept consistent with `sqlFavoritesDidUpdate` so subscribers can
+    /// uniformly handle "this update may affect me" via `payload == nil || payload == self.connectionId`.
+    let linkedSQLFoldersDidUpdate = PassthroughSubject<UUID?, Never>()
 
     // MARK: - License & Sync
 
@@ -74,4 +92,3 @@ struct ConnectionStatusChange: Sendable {
 struct DatabaseDidConnect: Sendable {
     let connectionId: UUID
 }
-
