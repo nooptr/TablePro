@@ -124,9 +124,6 @@ struct DataGridView: NSViewRepresentable {
         context.coordinator.tableName = configuration.tableName
         context.coordinator.primaryKeyColumns = configuration.primaryKeyColumns
         context.coordinator.tabType = configuration.tabType
-        if let connectionId = configuration.connectionId {
-            context.coordinator.observeTeardown(connectionId: connectionId)
-        }
 
         return scrollView
     }
@@ -160,10 +157,6 @@ struct DataGridView: NSViewRepresentable {
             }
         }
 
-        if let connectionId = configuration.connectionId, coordinator.teardownCancellable == nil {
-            coordinator.observeTeardown(connectionId: connectionId)
-        }
-
         let latestRows = tableRowsProvider()
         let rowDisplayCount = sortedIDs?.count ?? latestRows.count
         let columnCount = latestRows.columns.count
@@ -180,10 +173,10 @@ struct DataGridView: NSViewRepresentable {
         let oldColumnCount = coordinator.cachedColumnCount
 
         let structureChanged = oldRowCount != rowDisplayCount || oldColumnCount != columnCount
-        let needsFullReload = structureChanged
 
         coordinator.updateCache()
-        coordinator.rebuildColumnMetadataCache(from: latestRows)
+        let schemaChanged = coordinator.rebuildColumnMetadataCache(from: latestRows)
+        let needsFullReload = structureChanged || schemaChanged
 
         if oldRowCount == 0, rowDisplayCount > 0 {
             let rowH = tableView.rowHeight

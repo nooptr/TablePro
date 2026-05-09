@@ -186,25 +186,12 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
             }
     }
 
-    func observeTeardown(connectionId: UUID) {
-        teardownCancellable = AppEvents.shared.mainCoordinatorTeardown
-            .filter { $0.connectionId == connectionId }
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in
-                Task {
-                    self?.releaseData()
-                }
-            }
-    }
-
-    private func releaseData() {
+    func releaseData() {
         overlayEditor?.dismiss(commit: false)
         settingsCancellable?.cancel()
         settingsCancellable = nil
         themeCancellable?.cancel()
         themeCancellable = nil
-        teardownCancellable?.cancel()
-        teardownCancellable = nil
         visualIndex.clear()
         displayCache.removeAllObjects()
         columnDisplayFormats = []
@@ -223,8 +210,6 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
         activeFKPreviewPopover?.close()
         activeFKPreviewPopover = nil
     }
-
-    private(set) var teardownCancellable: AnyCancellable?
 
     func updateCache() {
         let tableRows = tableRowsProvider()
@@ -508,7 +493,8 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
         tableView.scrollRowToVisible(0)
     }
 
-    func rebuildColumnMetadataCache(from tableRows: TableRows) {
+    @discardableResult
+    func rebuildColumnMetadataCache(from tableRows: TableRows) -> Bool {
         var enumSet = Set<Int>()
         var fkSet = Set<Int>()
         let columns = tableRows.columns
@@ -532,9 +518,10 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
         fkColumns = fkSet
 
         let nextSchema = ColumnIdentitySchema(columns: columns)
-        if nextSchema != identitySchema {
-            identitySchema = nextSchema
-        }
+        guard nextSchema != identitySchema else { return false }
+        identitySchema = nextSchema
+        displayCache.removeAllObjects()
+        return true
     }
 
     // MARK: - Font Updates

@@ -446,7 +446,9 @@ final class SyncCoordinator {
         if !connectionIdsToDelete.isEmpty {
             var connections = ConnectionStorage.shared.loadConnections()
             connections.removeAll { connectionIdsToDelete.contains($0.id) }
-            ConnectionStorage.shared.saveConnections(connections)
+            if !ConnectionStorage.shared.saveConnections(connections) {
+                Self.logger.error("Failed to apply remote connection deletions: persistence error")
+            }
         }
         if !groupIdsToDelete.isEmpty {
             var groups = GroupStorage.shared.loadGroups()
@@ -471,7 +473,13 @@ final class SyncCoordinator {
 
     @discardableResult
     private func applyRemoteConnection(_ record: CKRecord, tombstoneIds: Set<String>) -> Bool {
-        guard let remoteConnection = SyncRecordMapper.toConnection(record) else { return false }
+        let remoteConnection: DatabaseConnection
+        do {
+            remoteConnection = try SyncRecordMapper.toConnection(record)
+        } catch {
+            Self.logger.error("Skipping remote connection \(record.recordID.recordName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return false
+        }
 
         if tombstoneIds.contains(remoteConnection.id.uuidString) {
             return false
@@ -504,7 +512,10 @@ final class SyncCoordinator {
         } else {
             connections.append(remoteConnection)
         }
-        ConnectionStorage.shared.saveConnections(connections)
+        guard ConnectionStorage.shared.saveConnections(connections) else {
+            Self.logger.error("Failed to apply remote connection update: persistence error for \(remoteConnection.id, privacy: .public)")
+            return false
+        }
         return true
     }
 
@@ -539,7 +550,13 @@ final class SyncCoordinator {
     }
 
     private func applyRemoteSSHProfile(_ record: CKRecord, tombstoneIds: Set<String>) {
-        guard let remoteProfile = SyncRecordMapper.toSSHProfile(record) else { return }
+        let remoteProfile: SSHProfile
+        do {
+            remoteProfile = try SyncRecordMapper.toSSHProfile(record)
+        } catch {
+            Self.logger.error("Skipping remote SSH profile \(record.recordID.recordName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return
+        }
         if tombstoneIds.contains(remoteProfile.id.uuidString) { return }
 
         var profiles = SSHProfileStorage.shared.loadProfiles()
@@ -555,7 +572,11 @@ final class SyncCoordinator {
         guard let category = SyncRecordMapper.settingsCategory(from: record),
               let data = SyncRecordMapper.settingsData(from: record)
         else { return }
-        applySettingsData(data, for: category)
+        do {
+            try applySettingsData(data, for: category)
+        } catch {
+            Self.logger.error("Skipping remote settings \(record.recordID.recordName, privacy: .public) (\(category, privacy: .public)): \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     // MARK: - Observers
@@ -704,45 +725,24 @@ final class SyncCoordinator {
         }
     }
 
-    private func applySettingsData(_ data: Data, for category: String) {
+    private func applySettingsData(_ data: Data, for category: String) throws {
         let manager = AppSettingsManager.shared
         let decoder = JSONDecoder()
 
-        switch category {
-        case "general":
-            if let settings = try? decoder.decode(GeneralSettings.self, from: data) {
-                manager.general = settings
+        do {
+            switch category {
+            case "general": manager.general = try decoder.decode(GeneralSettings.self, from: data)
+            case "appearance": manager.appearance = try decoder.decode(AppearanceSettings.self, from: data)
+            case "editor": manager.editor = try decoder.decode(EditorSettings.self, from: data)
+            case "dataGrid": manager.dataGrid = try decoder.decode(DataGridSettings.self, from: data)
+            case "history": manager.history = try decoder.decode(HistorySettings.self, from: data)
+            case "tabs": manager.tabs = try decoder.decode(TabSettings.self, from: data)
+            case "keyboard": manager.keyboard = try decoder.decode(KeyboardSettings.self, from: data)
+            case "ai": manager.ai = try decoder.decode(AISettings.self, from: data)
+            default: return
             }
-        case "appearance":
-            if let settings = try? decoder.decode(AppearanceSettings.self, from: data) {
-                manager.appearance = settings
-            }
-        case "editor":
-            if let settings = try? decoder.decode(EditorSettings.self, from: data) {
-                manager.editor = settings
-            }
-        case "dataGrid":
-            if let settings = try? decoder.decode(DataGridSettings.self, from: data) {
-                manager.dataGrid = settings
-            }
-        case "history":
-            if let settings = try? decoder.decode(HistorySettings.self, from: data) {
-                manager.history = settings
-            }
-        case "tabs":
-            if let settings = try? decoder.decode(TabSettings.self, from: data) {
-                manager.tabs = settings
-            }
-        case "keyboard":
-            if let settings = try? decoder.decode(KeyboardSettings.self, from: data) {
-                manager.keyboard = settings
-            }
-        case "ai":
-            if let settings = try? decoder.decode(AISettings.self, from: data) {
-                manager.ai = settings
-            }
-        default:
-            break
+        } catch {
+            throw SyncDecodeError.decodeFailure(field: category, underlying: error)
         }
     }
 

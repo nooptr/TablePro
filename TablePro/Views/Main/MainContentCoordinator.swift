@@ -100,11 +100,16 @@ final class MainContentCoordinator {
 
     @ObservationIgnored private(set) var filterCoordinator: FilterCoordinator!
     @ObservationIgnored private(set) var queryExecutionCoordinator: QueryExecutionCoordinator!
+    @ObservationIgnored private(set) var paginationCoordinator: PaginationCoordinator!
+    @ObservationIgnored private(set) var rowEditingCoordinator: RowEditingCoordinator!
 
     /// Stable identifier for this coordinator's window (set by MainContentView on appear)
     var windowId: UUID?
 
-    /// Direct reference to sidebar viewmodel — eliminates global notification broadcasts
+    /// Setting this presents the favorite-edit dialog sheet from `MainEditorContentView`.
+    var favoriteDialogQuery: FavoriteDialogQuery?
+
+    /// Direct reference to sidebar viewmodel, eliminates global notification broadcasts
     weak var sidebarViewModel: SidebarViewModel?
 
     /// Direct reference to structure view actions — eliminates notification broadcasts
@@ -354,8 +359,8 @@ final class MainContentCoordinator {
         )
         self.persistence = TabPersistenceCoordinator(connectionId: connection.id)
 
-        _ = SchemaProviderRegistry.shared.getOrCreate(for: connection.id)
-        SchemaProviderRegistry.shared.retain(for: connection.id)
+        _ = services.schemaProviderRegistry.getOrCreate(for: connection.id)
+        services.schemaProviderRegistry.retain(for: connection.id)
         ConnectionDataCache.shared(for: connection.id).ensureLoaded()
         changeManager.undoManagerProvider = { [weak self] in self?.contentWindow?.undoManager }
         changeManager.onUndoApplied = { [weak self] result in self?.handleUndoResult(result) }
@@ -388,7 +393,7 @@ final class MainContentCoordinator {
 
         _ = Self.registerTerminationObserver
 
-        externalFileModCancellable = AppEvents.shared.linkedSQLFoldersDidUpdate
+        externalFileModCancellable = services.appEvents.linkedSQLFoldersDidUpdate
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 self?.checkOpenTabsForExternalModification()
@@ -396,6 +401,8 @@ final class MainContentCoordinator {
 
         self.filterCoordinator = FilterCoordinator(parent: self)
         self.queryExecutionCoordinator = QueryExecutionCoordinator(parent: self)
+        self.paginationCoordinator = PaginationCoordinator(parent: self)
+        self.rowEditingCoordinator = RowEditingCoordinator(parent: self)
 
         Self.lifecycleLogger.info(
             "[open] MainContentCoordinator.init done connId=\(connection.id, privacy: .public) elapsedMs=\(Int(Date().timeIntervalSince(initStart) * 1_000))"
@@ -424,11 +431,12 @@ final class MainContentCoordinator {
         startFileWatcherIfNeeded()
         // Retry when driver becomes available (connection may still be in progress)
         if changeManager.pluginDriver == nil {
-            pluginDriverCancellable = AppEvents.shared.databaseDidConnect
+            pluginDriverCancellable = services.appEvents.databaseDidConnect
                 .receive(on: RunLoop.main)
-                .sink { [weak self] _ in
+                .sink { [weak self] payload in
+                    guard let self, payload.connectionId == self.connection.id else { return }
                     Task {
-                        self?.setupPluginDriver()
+                        self.setupPluginDriver()
                     }
                 }
         }
@@ -504,7 +512,7 @@ final class MainContentCoordinator {
     private func reconcilePostSchemaLoad() async {
         guard case .loaded(let tables) = services.schemaService.state(for: connectionId) else { return }
         if let driver = services.databaseManager.driver(for: connectionId),
-           let provider = SchemaProviderRegistry.shared.provider(for: connectionId) {
+           let provider = services.schemaProviderRegistry.provider(for: connectionId) {
             let currentDb = services.databaseManager.session(for: connectionId)?.activeDatabase
             await provider.resetForDatabase(currentDb, tables: tables, driver: driver)
         }
@@ -558,9 +566,7 @@ final class MainContentCoordinator {
         for task in activeSortTasks.values { task.cancel() }
         activeSortTasks.removeAll()
 
-        AppEvents.shared.mainCoordinatorTeardown.send(
-            MainCoordinatorTeardown(connectionId: connection.id)
-        )
+        dataTabDelegate?.tableViewCoordinator?.releaseData()
 
         tabSessionRegistry.removeAll()
         querySortCache.removeAll()
@@ -579,8 +585,8 @@ final class MainContentCoordinator {
         // Release metadata
         tableMetadata = nil
 
-        SchemaProviderRegistry.shared.release(for: connection.id)
-        SchemaProviderRegistry.shared.purgeUnused()
+        services.schemaProviderRegistry.release(for: connection.id)
+        services.schemaProviderRegistry.purgeUnused()
         Self.lifecycleLogger.info(
             "[close] MainContentCoordinator.teardown done connId=\(self.connection.id, privacy: .public) elapsedMs=\(Int(Date().timeIntervalSince(start) * 1_000))"
         )
@@ -602,8 +608,8 @@ final class MainContentCoordinator {
             }
             if !alreadyHandled {
                 Task { @MainActor in
-                    SchemaProviderRegistry.shared.release(for: connectionId)
-                    SchemaProviderRegistry.shared.purgeUnused()
+                    services.schemaProviderRegistry.release(for: connectionId)
+                    services.schemaProviderRegistry.purgeUnused()
                 }
             }
             return
@@ -616,8 +622,8 @@ final class MainContentCoordinator {
 
         if !alreadyHandled {
             Task { @MainActor in
-                SchemaProviderRegistry.shared.release(for: connectionId)
-                SchemaProviderRegistry.shared.purgeUnused()
+                services.schemaProviderRegistry.release(for: connectionId)
+                services.schemaProviderRegistry.purgeUnused()
             }
         }
     }

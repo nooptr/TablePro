@@ -7,6 +7,7 @@
 //
 
 import AppKit
+import Combine
 import os
 import SwiftUI
 import TableProPluginKit
@@ -96,6 +97,7 @@ struct CreateTableView: View {
 
             TextField("Enter table name", text: $tableName)
                 .textFieldStyle(.roundedBorder)
+                .autocorrectionDisabled(true)
                 .frame(maxWidth: 300)
 
             if showMySQLOptions {
@@ -348,7 +350,7 @@ struct CreateTableView: View {
                     wasSuccessful: true
                 )
 
-                NotificationCenter.default.post(name: .refreshData, object: nil)
+                AppCommands.shared.refreshData.send(nil)
 
                 if let coordinator {
                     coordinator.openTableTab(tableName)

@@ -34,7 +34,7 @@ final class WelcomeViewModel {
 
     @ObservationIgnored let services: AppServices
     private var storage: ConnectionStorage { services.connectionStorage }
-    private let groupStorage = GroupStorage.shared
+    private var groupStorage: GroupStorage { services.groupStorage }
 
     // MARK: - State
 
@@ -43,7 +43,7 @@ final class WelcomeViewModel {
     var selectedConnectionIds: Set<UUID> = []
     var groups: [ConnectionGroup] = []
     var linkedConnections: [LinkedConnection] = []
-    var showOnboarding = !AppSettingsStorage.shared.hasCompletedOnboarding()
+    var showOnboarding: Bool
     var connectionsToDelete: [DatabaseConnection] = []
     var showDeleteConfirmation = false
     var showDeleteGroupConfirmation = false
@@ -81,9 +81,9 @@ final class WelcomeViewModel {
 
     @ObservationIgnored private var connectionUpdatedCancellable: AnyCancellable?
     @ObservationIgnored private var linkedFoldersCancellable: AnyCancellable?
-    @ObservationIgnored private var exportObserver: NSObjectProtocol?
-    @ObservationIgnored private var importObserver: NSObjectProtocol?
-    @ObservationIgnored private var importFromAppObserver: NSObjectProtocol?
+    @ObservationIgnored private var exportConnectionsCancellable: AnyCancellable?
+    @ObservationIgnored private var importConnectionsCancellable: AnyCancellable?
+    @ObservationIgnored private var importFromAppCancellable: AnyCancellable?
     @ObservationIgnored private var welcomeRouterTask: Task<Void, Never>?
     @ObservationIgnored private var searchDebounceTask: Task<Void, Never>?
     private static let searchDebounceNanoseconds: UInt64 = 150_000_000
@@ -146,6 +146,7 @@ final class WelcomeViewModel {
 
     init(services: AppServices = .live) {
         self.services = services
+        self.showOnboarding = !services.appSettingsStorage.hasCompletedOnboarding()
     }
 
     // MARK: - Setup & Teardown
@@ -160,45 +161,39 @@ final class WelcomeViewModel {
             }
         }
 
-        connectionUpdatedCancellable = AppEvents.shared.connectionUpdated
+        connectionUpdatedCancellable = services.appEvents.connectionUpdated
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 self?.loadConnections()
             }
 
-        exportObserver = NotificationCenter.default.addObserver(
-            forName: .exportConnections, object: nil, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
+        exportConnectionsCancellable = AppCommands.shared.exportConnections
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
                 guard let self, !self.connections.isEmpty else { return }
                 self.activeSheet = .exportConnections(self.connections)
             }
-        }
 
-        importObserver = NotificationCenter.default.addObserver(
-            forName: .importConnections, object: nil, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.importConnectionsFromFile()
-            }
-        }
-
-        importFromAppObserver = NotificationCenter.default.addObserver(
-            forName: .importConnectionsFromApp, object: nil, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.activeSheet = .importFromApp
-            }
-        }
-
-        linkedFoldersCancellable = AppEvents.shared.linkedFoldersDidUpdate
+        importConnectionsCancellable = AppCommands.shared.importConnections
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
-                self?.linkedConnections = LinkedFolderWatcher.shared.linkedConnections
+                self?.importConnectionsFromFile()
+            }
+
+        importFromAppCancellable = AppCommands.shared.importConnectionsFromApp
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.activeSheet = .importFromApp
+            }
+
+        linkedFoldersCancellable = services.appEvents.linkedFoldersDidUpdate
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.linkedConnections = services.linkedFolderWatcher.linkedConnections
             }
 
         loadConnections()
-        linkedConnections = LinkedFolderWatcher.shared.linkedConnections
+        linkedConnections = services.linkedFolderWatcher.linkedConnections
 
         consumePendingRouterActions()
         startWelcomeRouterObservation()
@@ -264,11 +259,6 @@ final class WelcomeViewModel {
     deinit {
         welcomeRouterTask?.cancel()
         searchDebounceTask?.cancel()
-        [exportObserver, importObserver, importFromAppObserver].forEach {
-            if let observer = $0 {
-                NotificationCenter.default.removeObserver(observer)
-            }
-        }
     }
 
     // MARK: - Data Loading
@@ -402,7 +392,11 @@ final class WelcomeViewModel {
         for i in connections.indices where ids.contains(connections[i].id) {
             connections[i].groupId = groupId
         }
-        storage.saveConnections(connections)
+        guard storage.saveConnections(connections) else {
+            connections = storage.loadConnections()
+            rebuildTree()
+            return
+        }
         rebuildTree()
     }
 
@@ -411,7 +405,11 @@ final class WelcomeViewModel {
         for i in connections.indices where ids.contains(connections[i].id) {
             connections[i].groupId = nil
         }
-        storage.saveConnections(connections)
+        guard storage.saveConnections(connections) else {
+            connections = storage.loadConnections()
+            rebuildTree()
+            return
+        }
         rebuildTree()
     }
 
@@ -537,7 +535,11 @@ final class WelcomeViewModel {
             }
         }
 
-        storage.saveConnections(connections)
+        guard storage.saveConnections(connections) else {
+            connections = storage.loadConnections()
+            rebuildTree()
+            return
+        }
         if !dirtyIds.isEmpty {
             services.syncTracker.markDirty(.connection, ids: dirtyIds)
         }
@@ -572,7 +574,11 @@ final class WelcomeViewModel {
             order += 1
         }
 
-        storage.saveConnections(connections)
+        guard storage.saveConnections(connections) else {
+            connections = storage.loadConnections()
+            rebuildTree()
+            return
+        }
         if !dirtyIds.isEmpty {
             services.syncTracker.markDirty(.connection, ids: dirtyIds)
         }
@@ -580,7 +586,9 @@ final class WelcomeViewModel {
     }
 
     func focusConnectionFormWindow() {
-        NotificationCenter.default.post(name: .focusConnectionFormWindowRequested, object: nil)
+        if let window = NSApp.windows.first(where: { AppLaunchCoordinator.isConnectionFormWindow($0) }) {
+            window.makeKeyAndOrderFront(nil)
+        }
     }
 
     // MARK: - Private Helpers
