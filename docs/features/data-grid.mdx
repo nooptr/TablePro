@@ -31,6 +31,12 @@ Toggle between **Data**, **Structure**, and **JSON** in the status bar. Query ta
 
 JSON mode renders all rows as a JSON array. Toggle between Text and Tree views in the toolbar. To export only specific rows, select them in Data mode first, then switch to JSON. The Copy JSON button writes to the clipboard. View mode is remembered per tab.
 
+### Foreign Key Navigation
+
+Foreign key cells show an arrow on the right edge. Click it to open the referenced table, filtered to the matching row. A plain click uses the current tab; `Cmd`-click opens a new tab.
+
+Right-click the cell for the same options plus **Preview Referenced Row**, which shows the row in a popover.
+
 ## Column Features
 
 ### Resizing Columns
@@ -47,6 +53,12 @@ Click a column header to sort:
 - **Second click**: Sort descending (Z-A, 9-0)
 - **Third click**: Remove sort
 
+By default tables open in engine order (no `ORDER BY`). To always sort by primary key or first column on open, set Settings > Data Grid > Default row sort. Options are **No sorting** (default), **Primary key**, and **First column**. Tables without a primary key fall back to engine order even when Primary key is selected. Click a column header at any time to replace the default sort.
+
+<Note>
+If the resolved sort column is not orderable on the server (for example a `BLOB`, `JSON`, or spatial column with First column selected), the query fails. Switch the setting back to No sorting, or click a different column header.
+</Note>
+
 Sort applies to the full result. TablePro re-runs the query with `ORDER BY` appended; if your query already has an `ORDER BY`, it is replaced.
 
 {/* Screenshot: Column header with sort indicator */}
@@ -62,6 +74,12 @@ Sort applies to the full result. TablePro re-runs the query with `ORDER BY` appe
     alt="Column header with sort indicator"
   />
 </Frame>
+
+### Hiding Columns
+
+Toggle columns on or off from the columns button in the status bar, or a column header's right-click menu. Hidden columns are remembered per table.
+
+A hidden column is also left out of the query, so it isn't fetched. If a table is slow to open because one column holds a lot of data, hide that column and the table loads faster. Showing it again re-runs the query to load it. The primary key is always fetched, so editing and saving keep working even if you hide it.
 
 
 ## Data Editing
@@ -91,7 +109,7 @@ To edit a cell:
 
 ### Date/Time Picker
 
-Date, datetime, timestamp, and time columns open a native date picker instead of a text field. The picker adapts to the column type (`DATE`: year/month/day, `DATETIME`/`TIMESTAMP`: adds hour/minute/second, `TIME`: hour/minute/second only). Outputs in `YYYY-MM-DD HH:MM:SS` format. If the existing value cannot be parsed, it defaults to now.
+Date, datetime, timestamp, and time columns have a date picker. Double-click the cell to edit the value as text, or click the chevron button to open the picker, which shows a calendar for the date and hour, minute, and second fields for the time. `DATE` shows the calendar only; `TIME` shows the time fields only; `DATETIME` and `TIMESTAMP` show both. The picker keeps the value's existing format, fractional seconds, and timezone offset. An empty or unparseable cell starts at the current date and time. To set the current timestamp or `NULL`, right-click the cell and use Set Value.
 
 {/* Screenshot: Date picker for editing date columns */}
 <Frame caption="Date picker for editing date columns">
@@ -243,6 +261,12 @@ Select multiple rows with `Cmd+click` (non-contiguous) or `Shift+click` (range) 
   />
 </Frame>
 
+### Fill Column
+
+Right-click a column header and choose **Fill Column** to set one value across all loaded rows at once. Enter the value in the dialog, or check **Set to NULL** for nullable columns. The dialog shows how many rows it will set.
+
+Fill stages the change like any other edit, so review it with **Preview SQL** and **Commit** (`Cmd+S`) to apply, or **Discard** to drop it. `Cmd+Z` reverses the whole fill in one step. It only affects the rows currently loaded in the grid, not rows on other pages, and is not available on primary key columns.
+
 ### Saving Changes
 
 Changes are queued, not applied immediately. Manage pending changes with:
@@ -315,7 +339,25 @@ Use arrow keys to move between cells. Press `Enter` to edit, `Escape` to cancel.
 
 Click a cell to select it. Drag or Shift+click to select a range. Click row numbers for entire rows; Cmd+click for non-contiguous rows.
 
-Select cells and press `Cmd+C` for TSV, `Cmd+Shift+C` for CSV, or `Cmd+Option+J` for JSON.
+`Cmd+C` copies the focused cell value when a single row is selected and a cell has focus; otherwise it copies the selected row(s) as TSV. `Cmd+Shift+C` always copies the selected row(s) as TSV. `Cmd+Option+J` copies as JSON.
+
+Right-click a row and choose **Copy as** for additional formats:
+
+| Format | Description |
+|--------|-------------|
+| Cell Value | The clicked cell's content |
+| With Headers | TSV with the column names as the first line |
+| JSON | A JSON array of row objects |
+| CSV | RFC 4180 CSV; empty fields for NULL |
+| CSV with Headers | Same as CSV with the header row prepended |
+| Markdown | GitHub-flavored Markdown table |
+| IN Clause | `('a', 'b', 'c')` from the clicked column across selected rows, ready for `WHERE col IN (...)` |
+| INSERT Statement(s) | SQL INSERT for each row (SQL databases only) |
+| UPDATE Statement(s) | SQL UPDATE for each row by primary key (SQL databases only) |
+
+Right-click a column header and choose **Copy Column Values** to copy every loaded value in that column, one per line.
+
+Copying rows reflects the grid as shown: hidden columns are left out and the columns follow their current order. Copy as UPDATE always keeps the primary key so the WHERE clause stays correct, even when that column is hidden.
 
 {/* Screenshot: Copy options in context menu */}
 <Frame caption="Copy options in context menu">
@@ -333,7 +375,13 @@ Select cells and press `Cmd+C` for TSV, `Cmd+Shift+C` for CSV, or `Cmd+Option+J`
 
 ## Pagination
 
-Table tabs paginate large result sets. Set page size in **Settings** > **Editor** (Small: 100, Medium: 500, Large: 1,000, Custom: any value from 10 to 100,000). Smaller pages load faster.
+Table tabs paginate large result sets. The status bar shows a rows-per-page menu and First / Previous / Next / Last buttons, with a page indicator between them.
+
+- **Rows per page**: pick a preset (5, 10, 20, 100, 500, 1,000), enter a custom size, or choose **All rows** to load the whole table on one page. Loading all rows asks for confirmation first, since large tables use a lot of memory.
+- **Page navigation**: jump to the first or last page, step one page at a time, or click the page indicator to go to a specific page.
+- The bar also appears for filtered tables whose total row count is unknown. There the Next button stays available while a full page keeps loading, and the indicator shows the page number without a total.
+
+Set the default page size in **Settings** > **Editor** (Small: 100, Medium: 500, Large: 1,000, Custom: any value from 10 to 100,000). Smaller pages load faster.
 
 {/* Screenshot: Pagination controls with page navigation */}
 <Frame caption="Pagination controls with page navigation">

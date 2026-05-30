@@ -59,7 +59,7 @@ struct ConnectionFieldRow: View {
                 ),
                 in: range.closedRange
             ) {
-                Text("\(field.label): \(Int(value) ?? range.lowerBound)")
+                Text(verbatim: "\(field.label): \(Int(value) ?? range.lowerBound)")
             }
         case .hostList:
             EmptyView()

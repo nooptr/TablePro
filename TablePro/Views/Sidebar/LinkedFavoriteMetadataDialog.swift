@@ -66,7 +66,7 @@ internal struct LinkedFavoriteMetadataDialog: View {
             if let saveError {
                 Label(saveError, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
-                    .foregroundStyle(Color(nsColor: .systemRed))
+                    .foregroundStyle(.red)
             }
 
             HStack {

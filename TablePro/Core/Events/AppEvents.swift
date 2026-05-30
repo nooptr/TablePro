@@ -22,9 +22,9 @@ final class AppEvents {
 
     let dataGridSettingsChanged = PassthroughSubject<Void, Never>()
 
-    let aiSettingsChanged = PassthroughSubject<Void, Never>()
+    let currentSchemaChanged = PassthroughSubject<UUID, Never>()
 
-    let terminalSettingsChanged = PassthroughSubject<Void, Never>()
+    let aiSettingsChanged = PassthroughSubject<Void, Never>()
 
     // MARK: - Connections
 

@@ -141,7 +141,7 @@ struct ConnectionImportSheet: View {
             if let passphraseError {
                 Label(passphraseError, systemImage: "exclamationmark.triangle.fill")
                     .font(.subheadline)
-                    .foregroundStyle(Color(nsColor: .systemOrange))
+                    .foregroundStyle(.orange)
             }
 
             Spacer()

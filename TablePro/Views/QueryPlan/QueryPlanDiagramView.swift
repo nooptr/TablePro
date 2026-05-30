@@ -167,10 +167,10 @@ struct QueryPlanDiagramView: View {
     // MARK: - Color
 
     private func nodeColor(fraction: Double) -> Color {
-        if fraction > 0.5 { return Color(nsColor: .systemRed) }
-        if fraction > 0.2 { return Color(nsColor: .systemOrange) }
-        if fraction > 0.05 { return Color(nsColor: .systemYellow) }
-        return Color(nsColor: .systemGreen)
+        if fraction > 0.5 { return .red }
+        if fraction > 0.2 { return .orange }
+        if fraction > 0.05 { return .yellow }
+        return .green
     }
 
     // MARK: - Layout

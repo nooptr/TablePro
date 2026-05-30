@@ -11,6 +11,22 @@ import Foundation
 import OSLog
 import TableProPluginKit
 
+private extension Array where Element == String? {
+    var asCells: [PluginCellValue] { map(PluginCellValue.fromOptional) }
+}
+
+private extension Array where Element == String {
+    var asCells: [PluginCellValue] { map(PluginCellValue.text) }
+}
+
+private extension Array where Element == [String?] {
+    var asCellRows: [[PluginCellValue]] { map { $0.map(PluginCellValue.fromOptional) } }
+}
+
+private extension Array where Element == [String] {
+    var asCellRows: [[PluginCellValue]] { map { $0.map(PluginCellValue.text) } }
+}
+
 final class RedisPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     private let config: DriverConnectionConfig
     private var redisConnection: RedisPluginConnection?
@@ -47,7 +63,7 @@ final class RedisPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     // MARK: - Connection Management
 
     func connect() async throws {
-        let sslConfig = RedisSSLConfig(additionalFields: config.additionalFields)
+        let sslConfig = config.ssl
         let redisDb = Int(config.additionalFields["redisDatabase"] ?? "") ?? Int(config.database) ?? 0
 
         let conn = RedisPluginConnection(
@@ -98,7 +114,7 @@ final class RedisPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         return try await executeOperation(operation, connection: conn, startTime: startTime)
     }
 
-    func executeParameterized(query: String, parameters: [String?]) async throws -> PluginQueryResult {
+    func executeParameterized(query: String, parameters: [PluginCellValue]) async throws -> PluginQueryResult {
         try await execute(query: query)
     }
 
@@ -546,7 +562,12 @@ final class RedisPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                     } else {
                         preview = nil
                     }
-                    rowBatch.append([key, typeNames[i], ttlStr, preview])
+                    rowBatch.append([
+                        .text(key),
+                        .text(typeNames[i]),
+                        .text(ttlStr),
+                        PluginCellValue.fromOptional(preview)
+                    ])
                 }
                 if !rowBatch.isEmpty {
                     continuation.yield(.rows(rowBatch))
@@ -596,11 +617,12 @@ final class RedisPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     func generateStatements(
         table: String,
         columns: [String],
+        primaryKeyColumns: [String],
         changes: [PluginRowChange],
-        insertedRowData: [Int: [String?]],
+        insertedRowData: [Int: [PluginCellValue]],
         deletedRowIndices: Set<Int>,
         insertedRowIndices: Set<Int>
-    ) -> [(statement: String, parameters: [String?])]? {
+    ) -> [(statement: String, parameters: [PluginCellValue])]? {
         let generator = RedisStatementGenerator(namespaceName: table, columns: columns)
         return generator.generateStatements(
             from: changes, insertedRowData: insertedRowData,
@@ -655,7 +677,7 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["Key", "Value"],
                 columnTypeNames: ["String", "String"],
-                rows: [[key, value]],
+                rows: [[key, value].asCells],
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -680,7 +702,7 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["deleted"],
                 columnTypeNames: ["Int64"],
-                rows: [[String(deleted)]],
+                rows: [[String(deleted)].asCells],
                 rowsAffected: deleted,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -710,7 +732,7 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["Key", "Type"],
                 columnTypeNames: ["String", "String"],
-                rows: [[key, typeName]],
+                rows: [[key, typeName].asCells],
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -721,7 +743,7 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["Key", "TTL"],
                 columnTypeNames: ["String", "Int64"],
-                rows: [[key, String(ttl)]],
+                rows: [[key, String(ttl)].asCells],
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -732,7 +754,7 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["Key", "PTTL"],
                 columnTypeNames: ["String", "Int64"],
-                rows: [[key, String(pttl)]],
+                rows: [[key, String(pttl)].asCells],
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -761,13 +783,13 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["exists"],
                 columnTypeNames: ["Int64"],
-                rows: [[String(count)]],
+                rows: [[String(count)].asCells],
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
 
         default:
-            fatalError("Unexpected operation in executeKeyOperation")
+            throw RedisPluginError(code: 0, message: "Unexpected operation in executeKeyOperation")
         }
     }
 
@@ -785,7 +807,7 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["Field", "Value"],
                 columnTypeNames: ["String", "String"],
-                rows: [[field, value]],
+                rows: [[field, value].asCells],
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -800,7 +822,7 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["added"],
                 columnTypeNames: ["Int64"],
-                rows: [[String(added)]],
+                rows: [[String(added)].asCells],
                 rowsAffected: added,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -816,13 +838,13 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["removed"],
                 columnTypeNames: ["Int64"],
-                rows: [[String(removed)]],
+                rows: [[String(removed)].asCells],
                 rowsAffected: removed,
                 executionTime: Date().timeIntervalSince(startTime)
             )
 
         default:
-            fatalError("Unexpected operation in executeHashOperation")
+            throw RedisPluginError(code: 0, message: "Unexpected operation in executeHashOperation")
         }
     }
 
@@ -845,7 +867,7 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["length"],
                 columnTypeNames: ["Int64"],
-                rows: [[String(length)]],
+                rows: [[String(length)].asCells],
                 rowsAffected: values.count,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -857,7 +879,7 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["length"],
                 columnTypeNames: ["Int64"],
-                rows: [[String(length)]],
+                rows: [[String(length)].asCells],
                 rowsAffected: values.count,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -868,13 +890,13 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["Key", "Length"],
                 columnTypeNames: ["String", "Int64"],
-                rows: [[key, String(length)]],
+                rows: [[key, String(length)].asCells],
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
 
         default:
-            fatalError("Unexpected operation in executeListOperation")
+            throw RedisPluginError(code: 0, message: "Unexpected operation in executeListOperation")
         }
     }
 
@@ -897,7 +919,7 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["added"],
                 columnTypeNames: ["Int64"],
-                rows: [[String(added)]],
+                rows: [[String(added)].asCells],
                 rowsAffected: added,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -909,7 +931,7 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["removed"],
                 columnTypeNames: ["Int64"],
-                rows: [[String(removed)]],
+                rows: [[String(removed)].asCells],
                 rowsAffected: removed,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -920,13 +942,13 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["Key", "Cardinality"],
                 columnTypeNames: ["String", "Int64"],
-                rows: [[key, String(count)]],
+                rows: [[key, String(count)].asCells],
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
 
         default:
-            fatalError("Unexpected operation in executeSetOperation")
+            throw RedisPluginError(code: 0, message: "Unexpected operation in executeSetOperation")
         }
     }
 
@@ -958,7 +980,7 @@ private extension RedisPluginDriver {
                 return PluginQueryResult(
                     columns: ["score"],
                     columnTypeNames: ["String"],
-                    rows: [[scoreStr]],
+                    rows: [[scoreStr].asCells],
                     rowsAffected: 0,
                     executionTime: Date().timeIntervalSince(startTime)
                 )
@@ -968,7 +990,7 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: [columnName],
                 columnTypeNames: ["Int64"],
-                rows: [[String(count)]],
+                rows: [[String(count)].asCells],
                 rowsAffected: count,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -980,7 +1002,7 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["removed"],
                 columnTypeNames: ["Int64"],
-                rows: [[String(removed)]],
+                rows: [[String(removed)].asCells],
                 rowsAffected: removed,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -991,13 +1013,13 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["Key", "Cardinality"],
                 columnTypeNames: ["String", "Int64"],
-                rows: [[key, String(count)]],
+                rows: [[key, String(count)].asCells],
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
 
         default:
-            fatalError("Unexpected operation in executeSortedSetOperation")
+            throw RedisPluginError(code: 0, message: "Unexpected operation in executeSortedSetOperation")
         }
     }
 
@@ -1021,13 +1043,13 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["Key", "Length"],
                 columnTypeNames: ["String", "Int64"],
-                rows: [[key, String(length)]],
+                rows: [[key, String(length)].asCells],
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
 
         default:
-            fatalError("Unexpected operation in executeStreamOperation")
+            throw RedisPluginError(code: 0, message: "Unexpected operation in executeStreamOperation")
         }
     }
 
@@ -1044,7 +1066,7 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["ok"],
                 columnTypeNames: ["Int32"],
-                rows: [["1"]],
+                rows: [["1"].asCells],
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -1057,7 +1079,7 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["info"],
                 columnTypeNames: ["String"],
-                rows: [[infoText]],
+                rows: [[infoText].asCells],
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -1068,7 +1090,7 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["keys"],
                 columnTypeNames: ["Int64"],
-                rows: [[String(count)]],
+                rows: [[String(count)].asCells],
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -1108,7 +1130,7 @@ private extension RedisPluginDriver {
             return buildStatusResult("OK", startTime: startTime)
 
         default:
-            fatalError("Unexpected operation in executeServerOperation")
+            throw RedisPluginError(code: 0, message: "Unexpected operation in executeServerOperation")
         }
     }
 }
@@ -1247,7 +1269,7 @@ private extension RedisPluginDriver {
             previewReplies = try await conn.executePipeline(previewCommands)
         }
 
-        var rows: [[String?]] = []
+        var rows: [[PluginCellValue]] = []
         rows.reserveCapacity(keys.count)
         for (i, key) in keys.enumerated() {
             let ttlStr = String(ttlValues[i])
@@ -1260,7 +1282,7 @@ private extension RedisPluginDriver {
             } else {
                 preview = nil
             }
-            rows.append([key, typeNames[i], ttlStr, preview])
+            rows.append([key, typeNames[i], ttlStr, preview].asCells)
         }
 
         return PluginQueryResult(
@@ -1421,7 +1443,7 @@ private extension RedisPluginDriver {
         PluginQueryResult(
             columns: ["status"],
             columnTypeNames: ["String"],
-            rows: [[message]],
+            rows: [[message].asCells],
             rowsAffected: 0,
             executionTime: Date().timeIntervalSince(startTime)
         )
@@ -1433,7 +1455,7 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["result"],
                 columnTypeNames: ["String"],
-                rows: [[s]],
+                rows: [[s].asCells],
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -1442,7 +1464,7 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["result"],
                 columnTypeNames: ["Int64"],
-                rows: [[String(i)]],
+                rows: [[String(i)].asCells],
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -1452,13 +1474,13 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["result"],
                 columnTypeNames: ["String"],
-                rows: [[str]],
+                rows: [[str].asCells],
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
 
         case .array(let items):
-            let rows = items.map { [redisReplyToString($0)] as [String?] }
+            let rows = items.map { ([redisReplyToString($0)] as [String?]).asCells }
             return PluginQueryResult(
                 columns: ["result"],
                 columnTypeNames: ["String"],
@@ -1471,7 +1493,7 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["result"],
                 columnTypeNames: ["String"],
-                rows: [[e]],
+                rows: [[e].asCells],
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -1480,7 +1502,7 @@ private extension RedisPluginDriver {
             return PluginQueryResult(
                 columns: ["result"],
                 columnTypeNames: ["String"],
-                rows: [["(nil)"]],
+                rows: [["(nil)"].asCells],
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -1508,10 +1530,10 @@ private extension RedisPluginDriver {
             )
         }
 
-        var rows: [[String?]] = []
+        var rows: [[PluginCellValue]] = []
         var i = 0
         while i + 1 < items.count {
-            rows.append([redisReplyToString(items[i]), redisReplyToString(items[i + 1])])
+            rows.append([redisReplyToString(items[i]), redisReplyToString(items[i + 1])].asCells)
             i += 2
         }
 
@@ -1535,8 +1557,8 @@ private extension RedisPluginDriver {
             )
         }
 
-        let rows = items.enumerated().map { index, item -> [String?] in
-            [String(startOffset + index), redisReplyToString(item)]
+        let rows = items.enumerated().map { index, item -> [PluginCellValue] in
+            ([String(startOffset + index), redisReplyToString(item)] as [String?]).asCells
         }
 
         return PluginQueryResult(
@@ -1559,7 +1581,7 @@ private extension RedisPluginDriver {
             )
         }
 
-        let rows = items.map { [redisReplyToString($0)] as [String?] }
+        let rows = items.map { ([redisReplyToString($0)] as [String?]).asCells }
 
         return PluginQueryResult(
             columns: ["Member"],
@@ -1582,10 +1604,10 @@ private extension RedisPluginDriver {
         }
 
         if withScores {
-            var rows: [[String?]] = []
+            var rows: [[PluginCellValue]] = []
             var i = 0
             while i + 1 < items.count {
-                rows.append([redisReplyToString(items[i]), redisReplyToString(items[i + 1])])
+                rows.append([redisReplyToString(items[i]), redisReplyToString(items[i + 1])].asCells)
                 i += 2
             }
             return PluginQueryResult(
@@ -1596,7 +1618,7 @@ private extension RedisPluginDriver {
                 executionTime: Date().timeIntervalSince(startTime)
             )
         } else {
-            let rows = items.map { [redisReplyToString($0)] as [String?] }
+            let rows = items.map { ([redisReplyToString($0)] as [String?]).asCells }
             return PluginQueryResult(
                 columns: ["Member"],
                 columnTypeNames: ["String"],
@@ -1618,7 +1640,7 @@ private extension RedisPluginDriver {
             )
         }
 
-        var rows: [[String?]] = []
+        var rows: [[PluginCellValue]] = []
         for entry in entries {
             guard let entryParts = entry.arrayValue, entryParts.count >= 2,
                   let fields = entryParts[1].arrayValue else {
@@ -1632,7 +1654,7 @@ private extension RedisPluginDriver {
                 fieldPairs.append("\(redisReplyToString(fields[i]))=\(redisReplyToString(fields[i + 1]))")
                 i += 2
             }
-            rows.append([entryId, fieldPairs.joined(separator: ", ")])
+            rows.append([entryId, fieldPairs.joined(separator: ", ")].asCells)
         }
 
         return PluginQueryResult(
@@ -1655,10 +1677,10 @@ private extension RedisPluginDriver {
             )
         }
 
-        var rows: [[String?]] = []
+        var rows: [[PluginCellValue]] = []
         var i = 0
         while i + 1 < items.count {
-            rows.append([redisReplyToString(items[i]), redisReplyToString(items[i + 1])])
+            rows.append([redisReplyToString(items[i]), redisReplyToString(items[i + 1])].asCells)
             i += 2
         }
 

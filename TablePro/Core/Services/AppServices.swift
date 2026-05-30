@@ -15,8 +15,8 @@ struct AppServices {
     let pluginManager: PluginManager
     let schemaService: SchemaService
     let schemaProviderRegistry: SchemaProviderRegistry
-    let queryHistoryStorage: QueryHistoryStorage
     let sqlFavoriteManager: SQLFavoriteManager
+    let favoriteTablesStorage: FavoriteTablesStorage
     let aiChatStorage: AIChatStorage
     let aiKeyStorage: AIKeyStorage
     let groupStorage: GroupStorage
@@ -33,7 +33,6 @@ struct AppServices {
     let mcpServerManager: MCPServerManager
     let syncTracker: SyncChangeTracker
     let themeEngine: ThemeEngine
-    let feedbackAPIClient: FeedbackAPIClient
 
     static let live = AppServices(
         appEvents: .shared,
@@ -44,8 +43,8 @@ struct AppServices {
         pluginManager: .shared,
         schemaService: .shared,
         schemaProviderRegistry: .shared,
-        queryHistoryStorage: .shared,
         sqlFavoriteManager: .shared,
+        favoriteTablesStorage: .shared,
         aiChatStorage: .shared,
         aiKeyStorage: .shared,
         groupStorage: .shared,
@@ -61,8 +60,7 @@ struct AppServices {
         copilotService: .shared,
         mcpServerManager: .shared,
         syncTracker: .shared,
-        themeEngine: .shared,
-        feedbackAPIClient: .shared
+        themeEngine: .shared
     )
 }
 

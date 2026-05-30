@@ -33,7 +33,7 @@ extension MainContentCoordinator {
         tabId: UUID,
         columns: [String],
         columnTypes: [ColumnType],
-        rows: [[String?]],
+        rows: [[PluginCellValue]],
         executionTime: TimeInterval,
         rowsAffected: Int,
         statusMessage: String?,
@@ -111,9 +111,5 @@ extension MainContentCoordinator {
 
     func restoreSchemaAndRunQuery(_ schema: String) async {
         await queryExecutionCoordinator.restoreSchemaAndRunQuery(schema)
-    }
-
-    func columnExclusions(for tableName: String) -> [ColumnExclusion] {
-        queryExecutionCoordinator.columnExclusions(for: tableName)
     }
 }

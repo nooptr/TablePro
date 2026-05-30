@@ -7,14 +7,20 @@ import AppKit
 import Combine
 import SwiftUI
 
+enum FilterCompletionSource {
+    case staticValues([String])
+    case sqlTokens(RawSQLFilterCompletionProvider)
+}
+
 struct FilterValueTextField: NSViewRepresentable {
     @Binding var text: String
     @Binding var focusedId: UUID?
     let identity: UUID
     var placeholder: String = ""
-    var completions: [String] = []
+    var completionSource: FilterCompletionSource = .staticValues([])
     var allowsMultiLine: Bool = false
     var onSubmit: () -> Void = {}
+    var onCancel: () -> Void = {}
 
     static func suggestions(for input: String, in completions: [String]) -> [String] {
         guard !input.isEmpty else { return [] }
@@ -24,6 +30,31 @@ struct FilterValueTextField: NSViewRepresentable {
             return []
         }
         return matches
+    }
+
+    static func splice(into current: String, range: NSRange, insertText: String) -> (text: String, caret: Int)? {
+        let ns = current as NSString
+        guard range.location >= 0, range.location + range.length <= ns.length else { return nil }
+        let caret = range.location + (insertText as NSString).length
+        return (ns.replacingCharacters(in: range, with: insertText), caret)
+    }
+
+    enum SuggestionKeyOutcome: Equatable {
+        case moveSelection(Int)
+        case accept(submitting: Bool)
+        case dismiss
+        case passThrough
+    }
+
+    static func suggestionKeyOutcome(for key: KeyCode?, submitsOnAccept: Bool) -> SuggestionKeyOutcome {
+        switch key {
+        case .downArrow: return .moveSelection(1)
+        case .upArrow: return .moveSelection(-1)
+        case .return: return .accept(submitting: submitsOnAccept)
+        case .tab: return .accept(submitting: false)
+        case .escape: return .dismiss
+        default: return .passThrough
+        }
     }
 
     func makeNSView(context: Context) -> NSTextField {
@@ -45,12 +76,14 @@ struct FilterValueTextField: NSViewRepresentable {
             textField.lineBreakMode = .byTruncatingTail
         }
 
+        textField.owner = context.coordinator
         context.coordinator.textField = textField
         context.coordinator.text = $text
         context.coordinator.focusedId = $focusedId
         context.coordinator.identity = identity
-        context.coordinator.completions = completions
+        context.coordinator.completionSource = completionSource
         context.coordinator.onSubmit = onSubmit
+        context.coordinator.onCancel = onCancel
 
         return textField
     }
@@ -59,8 +92,9 @@ struct FilterValueTextField: NSViewRepresentable {
         context.coordinator.text = $text
         context.coordinator.focusedId = $focusedId
         context.coordinator.identity = identity
-        context.coordinator.completions = completions
+        context.coordinator.completionSource = completionSource
         context.coordinator.onSubmit = onSubmit
+        context.coordinator.onCancel = onCancel
         context.coordinator.textField = textField
 
         textField.placeholderString = placeholder
@@ -71,18 +105,7 @@ struct FilterValueTextField: NSViewRepresentable {
             textField.stringValue = text
         }
 
-        if focusedId == identity {
-            let binding = $focusedId
-            let pendingId = identity
-            DispatchQueue.main.async {
-                guard let window = textField.window,
-                      binding.wrappedValue == pendingId else { return }
-                if window.firstResponder !== textField.currentEditor() {
-                    window.makeFirstResponder(textField)
-                }
-                binding.wrappedValue = nil
-            }
-        }
+        context.coordinator.focusIfRequested()
     }
 
     func makeCoordinator() -> Coordinator {
@@ -90,8 +113,9 @@ struct FilterValueTextField: NSViewRepresentable {
             text: $text,
             focusedId: $focusedId,
             identity: identity,
-            completions: completions,
-            onSubmit: onSubmit
+            completionSource: completionSource,
+            onSubmit: onSubmit,
+            onCancel: onCancel
         )
     }
 
@@ -100,26 +124,58 @@ struct FilterValueTextField: NSViewRepresentable {
         var text: Binding<String>
         var focusedId: Binding<UUID?>
         var identity: UUID
-        var completions: [String]
+        var completionSource: FilterCompletionSource
         var onSubmit: () -> Void
+        var onCancel: () -> Void
         weak var textField: NSTextField?
 
         private let suggestionState = SuggestionState()
         private var suggestionPopover: NSPopover?
         private var keyMonitor: Any?
+        private var latestReplacementRange: NSRange?
+        private var completionGeneration = 0
+        private static let completionDebounce: UInt64 = 50_000_000
+
+        private var submitsOnAccept: Bool {
+            if case .staticValues = completionSource { return true }
+            return false
+        }
 
         init(
             text: Binding<String>,
             focusedId: Binding<UUID?>,
             identity: UUID,
-            completions: [String],
-            onSubmit: @escaping () -> Void
+            completionSource: FilterCompletionSource,
+            onSubmit: @escaping () -> Void,
+            onCancel: @escaping () -> Void
         ) {
             self.text = text
             self.focusedId = focusedId
             self.identity = identity
-            self.completions = completions
+            self.completionSource = completionSource
             self.onSubmit = onSubmit
+            self.onCancel = onCancel
+        }
+
+        func focusIfRequested() {
+            guard focusedId.wrappedValue == identity,
+                  let textField,
+                  let window = textField.window else { return }
+            if window.firstResponder !== textField.currentEditor() {
+                window.makeFirstResponder(textField)
+            }
+        }
+
+        func handleBecameFirstResponder() {
+            if focusedId.wrappedValue != identity {
+                focusedId.wrappedValue = identity
+            }
+        }
+
+        func handleResignedFirstResponder() {
+            if focusedId.wrappedValue == identity {
+                focusedId.wrappedValue = nil
+            }
         }
 
         deinit {
@@ -145,7 +201,7 @@ struct FilterValueTextField: NSViewRepresentable {
         ) -> Bool {
             if commandSelector == #selector(NSResponder.insertNewline(_:)) {
                 if suggestionPopover != nil {
-                    acceptCurrentSelection(submitting: true)
+                    acceptCurrentSelection(submitting: submitsOnAccept)
                     return true
                 }
                 onSubmit()
@@ -156,16 +212,33 @@ struct FilterValueTextField: NSViewRepresentable {
                 text.wrappedValue = textView.string
                 return true
             }
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                if suggestionPopover != nil {
+                    dismissSuggestions()
+                    return true
+                }
+                onCancel()
+                return true
+            }
             return false
         }
 
         private func updateSuggestions(for textField: NSTextField) {
-            guard !completions.isEmpty else {
+            if let fieldEditor = textField.currentEditor() as? NSTextView,
+               fieldEditor.hasMarkedText() {
                 dismissSuggestions()
                 return
             }
-            if let fieldEditor = textField.currentEditor() as? NSTextView,
-               fieldEditor.hasMarkedText() {
+            switch completionSource {
+            case .staticValues(let values):
+                updateStaticSuggestions(for: textField, values: values)
+            case .sqlTokens(let provider):
+                updateTokenSuggestions(for: textField, provider: provider)
+            }
+        }
+
+        private func updateStaticSuggestions(for textField: NSTextField, values: [String]) {
+            guard !values.isEmpty else {
                 dismissSuggestions()
                 return
             }
@@ -174,22 +247,57 @@ struct FilterValueTextField: NSViewRepresentable {
                 dismissSuggestions()
                 return
             }
-            let filtered = FilterValueTextField.suggestions(for: input, in: completions)
+            let filtered = FilterValueTextField.suggestions(for: input, in: values)
             guard !filtered.isEmpty else {
                 dismissSuggestions()
                 return
             }
+            let items = filtered.map { SuggestionItem(label: $0, insertText: $0) }
+            presentSuggestions(items, for: textField, replacementRange: nil)
+        }
 
+        private func updateTokenSuggestions(for textField: NSTextField, provider: RawSQLFilterCompletionProvider) {
+            let fieldText = textField.stringValue
+            guard !fieldText.isEmpty else {
+                dismissSuggestions()
+                return
+            }
+            let editor = textField.currentEditor() as? NSTextView
+            let cursor = editor?.selectedRange().location ?? (fieldText as NSString).length
+
+            completionGeneration &+= 1
+            let generation = completionGeneration
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: Self.completionDebounce)
+                guard let self, self.completionGeneration == generation else { return }
+                let result = await provider.completions(fieldText: fieldText, cursor: cursor)
+                guard self.completionGeneration == generation else { return }
+                guard let result else {
+                    self.dismissSuggestions()
+                    return
+                }
+                let items = result.items.map {
+                    SuggestionItem(label: $0.label, insertText: $0.insertText)
+                }
+                self.presentSuggestions(items, for: textField, replacementRange: result.replacementRange)
+            }
+        }
+
+        private func presentSuggestions(
+            _ items: [SuggestionItem],
+            for textField: NSTextField,
+            replacementRange: NSRange?
+        ) {
+            latestReplacementRange = replacementRange
             if suggestionPopover != nil {
-                suggestionState.items = filtered
+                suggestionState.items = items
                 suggestionState.selectedIndex = 0
                 return
             }
-
-            showPopover(for: textField, items: filtered)
+            showPopover(for: textField, items: items)
         }
 
-        private func showPopover(for textField: NSTextField, items: [String]) {
+        private func showPopover(for textField: NSTextField, items: [SuggestionItem]) {
             suggestionState.items = items
             suggestionState.selectedIndex = 0
 
@@ -207,7 +315,7 @@ struct FilterValueTextField: NSViewRepresentable {
                 contentSize: NSSize(width: dropdownWidth, height: dropdownHeight)
             ) { [weak self] dismiss in
                 SuggestionDropdownView(state: state) { selection in
-                    self?.commit(selection: selection, submitting: false)
+                    self?.commit(item: selection, submitting: false)
                     dismiss()
                 }
             }
@@ -227,25 +335,20 @@ struct FilterValueTextField: NSViewRepresentable {
                           nsEvent.window?.firstResponder === textField.currentEditor()
                     else { return nsEvent }
 
-                    switch nsEvent.semanticKeyCode {
-                    case .downArrow:
-                        self.moveSelection(by: 1)
-                        return nil
-                    case .upArrow:
-                        self.moveSelection(by: -1)
-                        return nil
-                    case .return:
-                        self.acceptCurrentSelection(submitting: true)
-                        return nil
-                    case .tab:
-                        self.acceptCurrentSelection(submitting: false)
-                        return nil
-                    case .escape:
+                    switch FilterValueTextField.suggestionKeyOutcome(
+                        for: nsEvent.semanticKeyCode,
+                        submitsOnAccept: self.submitsOnAccept
+                    ) {
+                    case .moveSelection(let delta):
+                        self.moveSelection(by: delta)
+                    case .accept(let submitting):
+                        self.acceptCurrentSelection(submitting: submitting)
+                    case .dismiss:
                         self.dismissSuggestions()
-                        return nsEvent
-                    default:
+                    case .passThrough:
                         return nsEvent
                     }
+                    return nil
                 }
             }
         }
@@ -272,19 +375,37 @@ struct FilterValueTextField: NSViewRepresentable {
                 if submitting { onSubmit() }
                 return
             }
-            commit(selection: items[index], submitting: submitting)
+            commit(item: items[index], submitting: submitting)
         }
 
-        private func commit(selection: String, submitting: Bool) {
-            text.wrappedValue = selection
-            textField?.stringValue = selection
+        private func commit(item: SuggestionItem, submitting: Bool) {
+            switch completionSource {
+            case .staticValues:
+                text.wrappedValue = item.insertText
+                textField?.stringValue = item.insertText
+            case .sqlTokens:
+                spliceTokenCompletion(item.insertText)
+            }
             dismissSuggestions()
             if submitting {
                 onSubmit()
             }
         }
 
+        private func spliceTokenCompletion(_ insertText: String) {
+            guard let textField, let range = latestReplacementRange,
+                  let spliced = FilterValueTextField.splice(
+                      into: textField.stringValue, range: range, insertText: insertText
+                  )
+            else { return }
+
+            text.wrappedValue = spliced.text
+            textField.stringValue = spliced.text
+            (textField.currentEditor() as? NSTextView)?.selectedRange = NSRange(location: spliced.caret, length: 0)
+        }
+
         func dismissSuggestions() {
+            completionGeneration &+= 1
             removeKeyMonitor()
             suggestionPopover?.close()
             suggestionPopover = nil
@@ -292,6 +413,13 @@ struct FilterValueTextField: NSViewRepresentable {
     }
 
     private final class SubstitutionDisabledTextField: NSTextField {
+        weak var owner: Coordinator?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            owner?.focusIfRequested()
+        }
+
         override func becomeFirstResponder() -> Bool {
             let result = super.becomeFirstResponder()
             if result, let editor = currentEditor() as? NSTextView {
@@ -300,26 +428,42 @@ struct FilterValueTextField: NSViewRepresentable {
                 editor.isAutomaticTextReplacementEnabled = false
                 editor.isAutomaticSpellingCorrectionEnabled = false
             }
+            if result {
+                owner?.handleBecameFirstResponder()
+            }
+            return result
+        }
+
+        override func resignFirstResponder() -> Bool {
+            let result = super.resignFirstResponder()
+            if result {
+                owner?.handleResignedFirstResponder()
+            }
             return result
         }
     }
 
+    private struct SuggestionItem: Equatable {
+        let label: String
+        let insertText: String
+    }
+
     @MainActor
     private final class SuggestionState: ObservableObject {
-        @Published var items: [String] = []
+        @Published var items: [SuggestionItem] = []
         @Published var selectedIndex: Int = 0
     }
 
     private struct SuggestionDropdownView: View {
         @ObservedObject var state: SuggestionState
-        let onSelect: (String) -> Void
+        let onSelect: (SuggestionItem) -> Void
 
         var body: some View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(Array(state.items.enumerated()), id: \.offset) { index, item in
-                            Text(item)
+                            Text(item.label)
                                 .font(.callout)
                                 .lineLimit(1)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -334,6 +478,11 @@ struct FilterValueTextField: NSViewRepresentable {
                                 .contentShape(Rectangle())
                                 .onTapGesture { onSelect(item) }
                                 .id(index)
+                                .accessibilityElement(children: .ignore)
+                                .accessibilityLabel(item.label)
+                                .accessibilityAddTraits(
+                                    state.selectedIndex == index ? [.isButton, .isSelected] : .isButton
+                                )
                         }
                     }
                     .padding(4)

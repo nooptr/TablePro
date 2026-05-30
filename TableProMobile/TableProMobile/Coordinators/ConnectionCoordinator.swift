@@ -49,11 +49,13 @@ final class ConnectionCoordinator {
 
     var supportsDatabaseSwitching: Bool {
         connection.type == .mysql || connection.type == .mariadb ||
-        connection.type == .postgresql || connection.type == .redshift
+        connection.type == .postgresql || connection.type == .redshift ||
+        connection.type == .mssql
     }
 
     var supportsSchemas: Bool {
-        connection.type == .postgresql || connection.type == .redshift
+        connection.type == .postgresql || connection.type == .redshift ||
+        connection.type == .mssql
     }
 
     init(connection: DatabaseConnection, appState: AppState) {
@@ -132,25 +134,28 @@ final class ConnectionCoordinator {
 
     func reconnectIfNeeded() async {
         guard let session, !isSwitching, !isReconnecting else { return }
+        do {
+            _ = try await session.driver.ping()
+            return
+        } catch {
+            // Ping failed; fall through to actual reconnect path below.
+        }
+
         isReconnecting = true
         defer { isReconnecting = false }
         do {
-            _ = try await session.driver.ping()
+            await appState.sshProvider.setPendingConnectionId(connection.id)
+            let newSession = try await appState.connectionManager.connect(connection)
+            self.session = newSession
         } catch {
-            do {
-                await appState.sshProvider.setPendingConnectionId(connection.id)
-                let newSession = try await appState.connectionManager.connect(connection)
-                self.session = newSession
-            } catch {
-                let context = ErrorContext(
-                    operation: "reconnect",
-                    databaseType: connection.type,
-                    host: connection.host,
-                    sshEnabled: connection.sshEnabled
-                )
-                phase = .error(ErrorClassifier.classify(error, context: context))
-                self.session = nil
-            }
+            let context = ErrorContext(
+                operation: "reconnect",
+                databaseType: connection.type,
+                host: connection.host,
+                sshEnabled: connection.sshEnabled
+            )
+            phase = .error(ErrorClassifier.classify(error, context: context))
+            self.session = nil
         }
     }
 

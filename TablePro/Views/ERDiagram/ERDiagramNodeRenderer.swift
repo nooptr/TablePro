@@ -98,10 +98,10 @@ enum ERDiagramNodeRenderer {
 
             // PK/FK badge
             if col.isPrimaryKey {
-                let badge = Text(Image(systemName: "key.fill")).font(.system(size: Self.badgePointSize * scale)).foregroundStyle(Color(nsColor: .systemYellow))
+                let badge = Text(Image(systemName: "key.fill")).font(.system(size: Self.badgePointSize * scale)).foregroundStyle(.yellow)
                 clipped.draw(clipped.resolve(badge), at: CGPoint(x: rect.minX + badgeXOffset, y: rowY), anchor: .center)
             } else if col.isForeignKey {
-                let badge = Text(Image(systemName: "link")).font(.system(size: Self.badgePointSize * scale)).foregroundStyle(Color(nsColor: .systemBlue))
+                let badge = Text(Image(systemName: "link")).font(.system(size: Self.badgePointSize * scale)).foregroundStyle(.blue)
                 clipped.draw(clipped.resolve(badge), at: CGPoint(x: rect.minX + badgeXOffset, y: rowY), anchor: .center)
             }
 

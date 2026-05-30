@@ -18,7 +18,27 @@ final class OraclePlugin: NSObject, TableProPlugin, DriverPlugin, PluginDiagnost
     static let iconName = "oracle-icon"
     static let defaultPort = 1_521
     static let additionalConnectionFields: [ConnectionField] = [
-        ConnectionField(id: "oracleServiceName", label: "Service Name", placeholder: "ORCL")
+        ConnectionField(
+            id: "oracleConnectionType",
+            label: "Connection Type",
+            defaultValue: "service",
+            fieldType: .dropdown(options: [
+                ConnectionField.DropdownOption(value: "service", label: "Service Name"),
+                ConnectionField.DropdownOption(value: "sid", label: "SID")
+            ])
+        ),
+        ConnectionField(
+            id: "oracleServiceName",
+            label: "Service Name",
+            placeholder: "ORCL",
+            visibleWhen: FieldVisibilityRule(fieldId: "oracleConnectionType", values: ["service"])
+        ),
+        ConnectionField(
+            id: "oracleSID",
+            label: "SID",
+            placeholder: "XE",
+            visibleWhen: FieldVisibilityRule(fieldId: "oracleConnectionType", values: ["sid"])
+        )
     ]
 
     // MARK: - UI/Capability Metadata
@@ -123,9 +143,10 @@ final class OraclePlugin: NSObject, TableProPlugin, DriverPlugin, PluginDiagnost
                 title: String(localized: "Connection Dropped During Handshake"),
                 message: oracleError.message,
                 suggestedActions: [
-                    String(localized: "If the same connection works in DBeaver or sqlplus, this is likely an OOB compatibility issue with cloud-hosted Oracle."),
-                    String(localized: "TablePro 1.2.0 already gates OOB on the server flag, so most cases are resolved. If you still hit this, file an issue."),
-                    String(localized: "Try disabling SSH tunnel or load balancer firewall rules between client and server.")
+                    String(localized: "The server may require Native Network Encryption, which the pure-Swift driver cannot negotiate."),
+                    String(localized: "Configure the listener for TLS, or set SQLNET.ENCRYPTION_SERVER to ACCEPTED instead of REQUIRED."),
+                    String(localized: "If the same connection works in DBeaver or SQL Developer, they use Oracle's OCI client, which supports Native Network Encryption."),
+                    String(localized: "Check for a firewall or load balancer between the client and server that closes connections mid-handshake.")
                 ],
                 supportURL: URL(string: "https://github.com/TableProApp/TablePro/issues/483")
             )
@@ -134,9 +155,8 @@ final class OraclePlugin: NSObject, TableProPlugin, DriverPlugin, PluginDiagnost
                 title: String(localized: "Server Version Not Supported"),
                 message: oracleError.message,
                 suggestedActions: [
-                    String(localized: "TablePro requires Oracle 12c or later via the OracleNIO Swift driver."),
-                    String(localized: "Check the user account's password_versions; only 10G, 11G, and 12C are supported."),
-                    String(localized: "Rotate the password under modern auth if password_versions contains an unrecognized verifier.")
+                    String(localized: "TablePro supports Oracle Database 11.1 and later. This server reports an older release (10g or earlier)."),
+                    String(localized: "Upgrade the database to 11.2 or later, or connect with a client that bundles Oracle's OCI client such as SQL Developer or DataGrip.")
                 ],
                 supportURL: issuesURL
             )
@@ -185,27 +205,32 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     // MARK: - Connection
 
     func connect() async throws {
-        let serviceName = config.additionalFields["oracleServiceName"] ?? ""
+        let useSID = config.additionalFields["oracleConnectionType"] == "sid"
+        let identifier = useSID
+            ? config.additionalFields["oracleSID"] ?? ""
+            : config.additionalFields["oracleServiceName"] ?? ""
         let conn = OracleConnectionWrapper(
             host: config.host,
             port: config.port,
             user: config.username,
             password: config.password,
             database: config.database,
-            serviceName: serviceName
+            serviceName: identifier,
+            useSID: useSID,
+            sslConfig: config.ssl
         )
         try await conn.connect()
         self.oracleConn = conn
 
         if let result = try? await conn.executeQuery("SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL"),
-           let schema = result.rows.first?.first ?? nil {
+           let schema = result.rows.first?.first?.asText {
             _currentSchema = schema
         } else {
             _currentSchema = config.username.uppercased()
         }
 
         if let result = try? await conn.executeQuery("SELECT BANNER FROM V$VERSION WHERE ROWNUM = 1"),
-           let versionStr = result.rows.first?.first ?? nil {
+           let versionStr = result.rows.first?.first?.asText {
             _serverVersion = String(versionStr.prefix(60))
         }
     }
@@ -253,8 +278,8 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                     ORDER BY COLUMN_ID
                     """
                 if let colResult = try? await conn.executeQuery(colSQL) {
-                    let colNames = colResult.rows.compactMap { $0.first ?? nil }
-                    let colTypes = colResult.rows.map { ($0[safe: 1] ?? nil)?.lowercased() ?? "varchar2" }
+                    let colNames = colResult.rows.compactMap { $0.first?.asText }
+                    let colTypes = colResult.rows.map { ($0[safe: 1]?.asText)?.lowercased() ?? "varchar2" }
                     if !colNames.isEmpty {
                         result = OracleQueryResult(
                             columns: colNames,
@@ -311,8 +336,8 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             """
         let result = try await execute(query: sql)
         return result.rows.compactMap { row -> PluginTableInfo? in
-            guard let name = row[safe: 0] ?? nil else { return nil }
-            let rawType = row[safe: 1] ?? nil
+            guard let name = row[safe: 0]?.asText else { return nil }
+            let rawType = row[safe: 1]?.asText
             let tableType = (rawType == "VIEW") ? "VIEW" : "TABLE"
             return PluginTableInfo(name: name, type: tableType)
         }
@@ -346,13 +371,13 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             """
         let result = try await execute(query: sql)
         return result.rows.compactMap { row -> PluginColumnInfo? in
-            guard let name = row[safe: 0] ?? nil else { return nil }
-            let dataType = (row[safe: 1] ?? nil)?.lowercased() ?? "varchar2"
-            let dataLength = row[safe: 2] ?? nil
-            let precision = row[safe: 3] ?? nil
-            let scale = row[safe: 4] ?? nil
-            let isNullable = (row[safe: 5] ?? nil) == "Y"
-            let isPk = (row[safe: 6] ?? nil) == "Y"
+            guard let name = row[safe: 0]?.asText else { return nil }
+            let dataType = (row[safe: 1]?.asText)?.lowercased() ?? "varchar2"
+            let dataLength = row[safe: 2]?.asText
+            let precision = row[safe: 3]?.asText
+            let scale = row[safe: 4]?.asText
+            let isNullable = (row[safe: 5]?.asText) == "Y"
+            let isPk = (row[safe: 6]?.asText) == "Y"
 
             let fullType = buildOracleFullType(dataType: dataType, dataLength: dataLength, precision: precision, scale: scale)
 
@@ -383,10 +408,10 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         let result = try await execute(query: sql)
         var indexMap: [String: (unique: Bool, primary: Bool, columns: [String])] = [:]
         for row in result.rows {
-            guard let idxName = row[safe: 0] ?? nil,
-                  let colName = row[safe: 2] ?? nil else { continue }
-            let isUnique = (row[safe: 1] ?? nil) == "UNIQUE"
-            let isPrimary = (row[safe: 3] ?? nil) == "Y"
+            guard let idxName = row[safe: 0]?.asText,
+                  let colName = row[safe: 2]?.asText else { continue }
+            let isUnique = (row[safe: 1]?.asText) == "UNIQUE"
+            let isPrimary = (row[safe: 3]?.asText) == "Y"
             if indexMap[idxName] == nil {
                 indexMap[idxName] = (unique: isUnique, primary: isPrimary, columns: [])
             }
@@ -427,11 +452,11 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             """
         let result = try await execute(query: sql)
         return result.rows.compactMap { row -> PluginForeignKeyInfo? in
-            guard let constraintName = row[safe: 0] ?? nil,
-                  let columnName = row[safe: 1] ?? nil,
-                  let refTable = row[safe: 2] ?? nil,
-                  let refColumn = row[safe: 3] ?? nil else { return nil }
-            let deleteRule = (row[safe: 4] ?? nil) ?? "NO ACTION"
+            guard let constraintName = row[safe: 0]?.asText,
+                  let columnName = row[safe: 1]?.asText,
+                  let refTable = row[safe: 2]?.asText,
+                  let refColumn = row[safe: 3]?.asText else { return nil }
+            let deleteRule = (row[safe: 4]?.asText) ?? "NO ACTION"
             return PluginForeignKeyInfo(
                 name: constraintName,
                 column: columnName,
@@ -469,14 +494,14 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         let result = try await execute(query: sql)
         var columnsByTable: [String: [PluginColumnInfo]] = [:]
         for row in result.rows {
-            guard let tableName = row[safe: 0] ?? nil,
-                  let name = row[safe: 1] ?? nil else { continue }
-            let dataType = (row[safe: 2] ?? nil)?.lowercased() ?? "varchar2"
-            let dataLength = row[safe: 3] ?? nil
-            let precision = row[safe: 4] ?? nil
-            let scale = row[safe: 5] ?? nil
-            let isNullable = (row[safe: 6] ?? nil) == "Y"
-            let isPk = (row[safe: 7] ?? nil) == "Y"
+            guard let tableName = row[safe: 0]?.asText,
+                  let name = row[safe: 1]?.asText else { continue }
+            let dataType = (row[safe: 2]?.asText)?.lowercased() ?? "varchar2"
+            let dataLength = row[safe: 3]?.asText
+            let precision = row[safe: 4]?.asText
+            let scale = row[safe: 5]?.asText
+            let isNullable = (row[safe: 6]?.asText) == "Y"
+            let isPk = (row[safe: 7]?.asText) == "Y"
 
             let fullType = buildOracleFullType(dataType: dataType, dataLength: dataLength, precision: precision, scale: scale)
 
@@ -515,12 +540,12 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         let result = try await execute(query: sql)
         var fksByTable: [String: [PluginForeignKeyInfo]] = [:]
         for row in result.rows {
-            guard let tableName = row[safe: 0] ?? nil,
-                  let constraintName = row[safe: 1] ?? nil,
-                  let columnName = row[safe: 2] ?? nil,
-                  let refTable = row[safe: 3] ?? nil,
-                  let refColumn = row[safe: 4] ?? nil else { continue }
-            let deleteRule = (row[safe: 5] ?? nil) ?? "NO ACTION"
+            guard let tableName = row[safe: 0]?.asText,
+                  let constraintName = row[safe: 1]?.asText,
+                  let columnName = row[safe: 2]?.asText,
+                  let refTable = row[safe: 3]?.asText,
+                  let refColumn = row[safe: 4]?.asText else { continue }
+            let deleteRule = (row[safe: 5]?.asText) ?? "NO ACTION"
             let fk = PluginForeignKeyInfo(
                 name: constraintName,
                 column: columnName,
@@ -550,9 +575,9 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             """
         let result = try await execute(query: sql)
         return result.rows.compactMap { row -> PluginDatabaseMetadata? in
-            guard let name = row[safe: 0] ?? nil else { return nil }
-            let tableCount = (row[safe: 1] ?? nil).flatMap { Int($0) } ?? 0
-            let sizeBytes = (row[safe: 2] ?? nil).flatMap { Int64($0) }
+            guard let name = row[safe: 0]?.asText else { return nil }
+            let tableCount = (row[safe: 1]?.asText).flatMap { Int($0) } ?? 0
+            let sizeBytes = (row[safe: 2]?.asText).flatMap { Int64($0) }
             return PluginDatabaseMetadata(name: name, tableCount: tableCount, sizeBytes: sizeBytes)
         }
     }
@@ -586,7 +611,7 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         // which corrupts OracleNIO's connection state machine.
         let sql = "SELECT TEXT_VC FROM ALL_VIEWS WHERE VIEW_NAME = '\(escapedView)' AND OWNER = '\(escaped)'"
         let result = try await execute(query: sql)
-        return result.rows.first?.first?.flatMap { $0 } ?? ""
+        return result.rows.first?.first?.asText ?? ""
     }
 
     func fetchTableMetadata(table: String, schema: String?) async throws -> PluginTableMetadata {
@@ -604,9 +629,9 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             """
         let result = try await execute(query: sql)
         if let row = result.rows.first {
-            let rowCount = (row[safe: 0] ?? nil).flatMap { Int64($0) }
-            let sizeBytes = (row[safe: 1] ?? nil).flatMap { Int64($0) } ?? 0
-            let comment = row[safe: 2] ?? nil
+            let rowCount = (row[safe: 0]?.asText).flatMap { Int64($0) }
+            let sizeBytes = (row[safe: 1]?.asText).flatMap { Int64($0) } ?? 0
+            let comment = row[safe: 2]?.asText
             return PluginTableMetadata(
                 tableName: table,
                 dataSize: sizeBytes,
@@ -624,7 +649,7 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             """
         let viewResult = try await execute(query: viewSQL)
         if let row = viewResult.rows.first {
-            let comment = row[safe: 0] ?? nil
+            let comment = row[safe: 0]?.asText
             return PluginTableMetadata(tableName: table, comment: comment)
         }
 
@@ -634,13 +659,13 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     func fetchDatabases() async throws -> [String] {
         let sql = "SELECT USERNAME FROM ALL_USERS ORDER BY USERNAME"
         let result = try await execute(query: sql)
-        return result.rows.compactMap { $0.first ?? nil }
+        return result.rows.compactMap { $0.first?.asText }
     }
 
     func fetchSchemas() async throws -> [String] {
         let sql = "SELECT USERNAME FROM ALL_USERS ORDER BY USERNAME"
         let result = try await execute(query: sql)
-        return result.rows.compactMap { $0.first ?? nil }
+        return result.rows.compactMap { $0.first?.asText }
     }
 
     func fetchDatabaseMetadata(_ database: String) async throws -> PluginDatabaseMetadata {
@@ -654,8 +679,8 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         do {
             let result = try await execute(query: sql)
             if let row = result.rows.first {
-                let tableCount = (row[safe: 0] ?? nil).flatMap { Int($0) } ?? 0
-                let sizeBytes = (row[safe: 1] ?? nil).flatMap { Int64($0) } ?? 0
+                let tableCount = (row[safe: 0]?.asText).flatMap { Int($0) } ?? 0
+                let sizeBytes = (row[safe: 1]?.asText).flatMap { Int64($0) } ?? 0
                 return PluginDatabaseMetadata(
                     name: database,
                     tableCount: tableCount,
@@ -673,12 +698,13 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     func generateStatements(
         table: String,
         columns: [String],
+        primaryKeyColumns: [String],
         changes: [PluginRowChange],
-        insertedRowData: [Int: [String?]],
+        insertedRowData: [Int: [PluginCellValue]],
         deletedRowIndices: Set<Int>,
         insertedRowIndices: Set<Int>
-    ) -> [(statement: String, parameters: [String?])]? {
-        var statements: [(statement: String, parameters: [String?])] = []
+    ) -> [(statement: String, parameters: [PluginCellValue])]? {
+        var statements: [(statement: String, parameters: [PluginCellValue])] = []
 
         for change in changes {
             switch change.type {
@@ -711,16 +737,16 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     private func generateOracleInsert(
         table: String,
         columns: [String],
-        values: [String?]
-    ) -> (statement: String, parameters: [String?])? {
+        values: [PluginCellValue]
+    ) -> (statement: String, parameters: [PluginCellValue])? {
         var insertColumns: [String] = []
         var valuesSQL: [String] = []
-        var parameters: [String?] = []
+        var parameters: [PluginCellValue] = []
 
         for (index, value) in values.enumerated() {
             guard index < columns.count else { continue }
             insertColumns.append(escapeOracleIdentifier(columns[index]))
-            if value == "__DEFAULT__" {
+            if value.asText == "__DEFAULT__" {
                 valuesSQL.append("DEFAULT")
             } else {
                 valuesSQL.append("?")
@@ -740,11 +766,11 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         table: String,
         columns: [String],
         change: PluginRowChange
-    ) -> (statement: String, parameters: [String?])? {
+    ) -> (statement: String, parameters: [PluginCellValue])? {
         guard !change.cellChanges.isEmpty, let originalRow = change.originalRow else { return nil }
 
         let escapedTable = escapeOracleIdentifier(table)
-        var parameters: [String?] = []
+        var parameters: [PluginCellValue] = []
 
         let setClauses = change.cellChanges.map { cellChange -> String in
             let col = escapeOracleIdentifier(cellChange.columnName)
@@ -756,11 +782,12 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         for (index, columnName) in columns.enumerated() {
             guard index < originalRow.count else { continue }
             let col = escapeOracleIdentifier(columnName)
-            if let value = originalRow[index] {
+            let value = originalRow[index]
+            if value.isNull {
+                conditions.append("\(col) IS NULL")
+            } else {
                 parameters.append(value)
                 conditions.append("\(col) = ?")
-            } else {
-                conditions.append("\(col) IS NULL")
             }
         }
 
@@ -775,21 +802,22 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         table: String,
         columns: [String],
         change: PluginRowChange
-    ) -> (statement: String, parameters: [String?])? {
+    ) -> (statement: String, parameters: [PluginCellValue])? {
         guard let originalRow = change.originalRow else { return nil }
 
         let escapedTable = escapeOracleIdentifier(table)
-        var parameters: [String?] = []
+        var parameters: [PluginCellValue] = []
         var conditions: [String] = []
 
         for (index, columnName) in columns.enumerated() {
             guard index < originalRow.count else { continue }
             let col = escapeOracleIdentifier(columnName)
-            if let value = originalRow[index] {
+            let value = originalRow[index]
+            if value.isNull {
+                conditions.append("\(col) IS NULL")
+            } else {
                 parameters.append(value)
                 conditions.append("\(col) = ?")
-            } else {
-                conditions.append("\(col) IS NULL")
             }
         }
 
@@ -973,6 +1001,13 @@ final class OraclePluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         let escaped = schema.replacingOccurrences(of: "\"", with: "\"\"")
         _ = try await execute(query: "ALTER SESSION SET CURRENT_SCHEMA = \"\(escaped)\"")
         _currentSchema = schema
+    }
+
+    /// Oracle has no real database concept; "switch database" is a schema switch.
+    /// Aliases to keep `coordinator.switchDatabase` working from tab restore paths
+    /// without relying on a manager-side kludge.
+    func switchDatabase(to database: String) async throws {
+        try await switchSchema(to: database)
     }
 
     // MARK: - All Tables Metadata

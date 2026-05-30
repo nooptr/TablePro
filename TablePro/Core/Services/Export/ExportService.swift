@@ -153,7 +153,7 @@ final class ExportService {
             PluginExportTable(
                 name: table.name,
                 databaseName: table.databaseName,
-                tableType: table.type == .view ? "view" : "table",
+                tableType: table.type.rawValue.lowercased(),
                 optionValues: table.optionValues
             )
         }
@@ -374,7 +374,7 @@ final class ExportService {
             do {
                 let result = try await driver.execute(query: batchQuery)
                 for row in result.rows {
-                    if let countStr = row.first, let count = Int(countStr ?? "0") {
+                    if let cell = row.first, let count = Int(cell.asText ?? "0") {
                         total += count
                     }
                 }
@@ -383,7 +383,7 @@ final class ExportService {
                     do {
                         let tableRef = qualifiedTableRef(for: table, driver: driver)
                         let result = try await driver.execute(query: "SELECT COUNT(*) FROM \(tableRef)")
-                        if let countStr = result.rows.first?.first, let count = Int(countStr ?? "0") {
+                        if let cell = result.rows.first?.first, let count = Int(cell.asText ?? "0") {
                             total += count
                         }
                     } catch {

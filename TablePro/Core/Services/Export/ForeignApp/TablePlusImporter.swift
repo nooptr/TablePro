@@ -5,6 +5,7 @@
 
 import Foundation
 import os
+import TableProPluginKit
 
 struct TablePlusImporter: ForeignAppImporter {
     private static let logger = Logger(subsystem: "com.TablePro", category: "TablePlusImporter")
@@ -13,16 +14,18 @@ struct TablePlusImporter: ForeignAppImporter {
     let displayName = "TablePlus"
     let symbolName = "rectangle.stack"
     let appBundleIdentifier = "com.tinyapp.TablePlus"
+    let readsPasswordsFromKeychain = true
+
+    static let keychainService = "com.tableplus.TablePlus"
+
+    var readKeychain: ForeignKeychainRead = ForeignKeychainReader.readPassword
+    var keyFileExists: (_ path: String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
 
     var connectionsFileURL: URL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/com.tinyapp.TablePlus/Data/Connections.plist")
 
     var groupsFileURL: URL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/com.tinyapp.TablePlus/Data/ConnectionGroups.plist")
-
-    func isAvailable() -> Bool {
-        FileManager.default.fileExists(atPath: connectionsFileURL.path)
-    }
 
     func connectionCount() -> Int {
         guard let data = try? Data(contentsOf: connectionsFileURL),
@@ -185,8 +188,7 @@ struct TablePlusImporter: ForeignAppImporter {
         let port = (entry["ServerPort"] as? String).flatMap(Int.init)
         let username = entry["ServerUser"] as? String ?? ""
         let useKey = entry["isUsePrivateKey"] as? Bool ?? false
-        let rawKeyPath = entry["ServerPrivateKeyName"] as? String ?? ""
-        let keyPath = ForeignAppPathHelper.resolveKeyPath(rawKeyPath)
+        let keyPath = useKey ? importedKeyPath(entry["ServerPrivateKeyName"] as? String ?? "") : ""
 
         return ExportableSSHConfig(
             enabled: true,
@@ -194,7 +196,7 @@ struct TablePlusImporter: ForeignAppImporter {
             port: port,
             username: username,
             authMethod: useKey ? "Private Key" : "Password",
-            privateKeyPath: useKey ? keyPath : "",
+            privateKeyPath: keyPath,
             agentSocketPath: "",
             jumpHosts: nil,
             totpMode: nil,
@@ -202,6 +204,14 @@ struct TablePlusImporter: ForeignAppImporter {
             totpDigits: nil,
             totpPeriod: nil
         )
+    }
+
+    private func importedKeyPath(_ rawName: String) -> String {
+        let trimmed = rawName.trimmingCharacters(in: .whitespaces)
+        let resolved = ForeignAppPathHelper.resolveKeyPath(trimmed)
+        guard !resolved.isEmpty else { return "" }
+        if trimmed.hasPrefix("/") || trimmed.hasPrefix("~/") { return resolved }
+        return keyFileExists(PathPortability.expandHome(resolved)) ? resolved : ""
     }
 
     private func parseSSLConfig(_ entry: [String: Any]) -> ExportableSSLConfig? {
@@ -218,18 +228,22 @@ struct TablePlusImporter: ForeignAppImporter {
         }
 
         let paths = entry["TlsKeyPaths"] as? [String] ?? []
+        func certPath(_ index: Int) -> String? {
+            guard index < paths.count, !paths[index].isEmpty else { return nil }
+            return paths[index]
+        }
         return ExportableSSLConfig(
             mode: mode,
-            caCertificatePath: !paths.isEmpty ? paths[0] : nil,
-            clientCertificatePath: paths.count > 1 ? paths[1] : nil,
-            clientKeyPath: paths.count > 2 ? paths[2] : nil
+            caCertificatePath: certPath(0),
+            clientCertificatePath: certPath(1),
+            clientKeyPath: certPath(2)
         )
     }
 
     private func readCredentials(for connectionId: String, abortFlag: inout Bool) -> ExportableCredentials {
         func read(_ account: String) -> String? {
             guard !abortFlag else { return nil }
-            switch ForeignKeychainReader.readPassword(service: "com.tableplus.TablePlus", account: account) {
+            switch readKeychain(Self.keychainService, account) {
             case .found(let value):
                 return value
             case .notFound:
@@ -247,6 +261,7 @@ struct TablePlusImporter: ForeignAppImporter {
             password: dbPassword,
             sshPassword: sshPassword,
             keyPassphrase: keyPassphrase,
+            sslClientKeyPassphrase: nil,
             totpSecret: nil,
             pluginSecureFields: nil
         )
@@ -262,7 +277,7 @@ struct TablePlusImporter: ForeignAppImporter {
         case "MSSQL": return "SQL Server"
         case "Redshift": return "Redshift"
         case "MariaDB": return "MariaDB"
-        case "CockroachDB": return "PostgreSQL"
+        case "CockroachDB": return "CockroachDB"
         default: return driver
         }
     }
@@ -271,6 +286,7 @@ struct TablePlusImporter: ForeignAppImporter {
         switch dbType {
         case "MySQL", "MariaDB": return 3_306
         case "PostgreSQL", "Redshift": return 5_432
+        case "CockroachDB": return 26_257
         case "MongoDB": return 27_017
         case "Redis": return 6_379
         case "SQL Server": return 1_433

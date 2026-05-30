@@ -18,9 +18,13 @@ import TableProPluginKit
 /// Custom Commands struct for pasteboard operations
 struct PasteboardCommands: Commands {
     var settingsManager: AppSettingsManager
-    @FocusedValue(\.commandActions) var actions: MainContentCommandActions?
+    @FocusedValue(\.commandActions) var focusedActions: MainContentCommandActions?
+    @Bindable var commandRegistry: CommandActionsRegistry
 
-    /// Build a SwiftUI KeyboardShortcut from keyboard settings
+    private var actions: MainContentCommandActions? {
+        focusedActions ?? commandRegistry.current
+    }
+
     private func shortcut(for action: ShortcutAction) -> KeyboardShortcut? {
         settingsManager.keyboard.keyboardShortcut(for: action)
     }
@@ -33,21 +37,24 @@ struct PasteboardCommands: Commands {
             .optionalKeyboardShortcut(shortcut(for: .cut))
 
             Button("Copy") {
-                let action = PasteboardActionRouter.resolveCopyAction(
-                    firstResponder: NSApp.keyWindow?.firstResponder,
-                    hasRowSelection: actions?.hasRowSelection ?? false,
-                    hasTableSelection: actions?.hasTableSelection ?? false
-                )
-                switch action {
-                case .textCopy:
-                    NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil)
-                case .copyRows:
+                if NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil) {
+                    return
+                }
+                if actions?.hasRowSelection == true {
                     actions?.copySelectedRows()
-                case .copyTableNames:
+                } else if actions?.hasTableSelection == true {
                     actions?.copyTableNames()
                 }
             }
             .optionalKeyboardShortcut(shortcut(for: .copy))
+
+            Button("Copy Rows") {
+                if !NSApp.sendAction(#selector(TableProResponderActions.copyRowsAsTSV(_:)), to: nil, from: nil) {
+                    actions?.copySelectedRows()
+                }
+            }
+            .optionalKeyboardShortcut(shortcut(for: .copyRowsExplicit))
+            .disabled(!(actions?.hasRowSelection ?? false))
 
             Button("Copy with Headers") {
                 actions?.copySelectedRowsWithHeaders()
@@ -62,14 +69,10 @@ struct PasteboardCommands: Commands {
             .disabled(!(actions?.hasRowSelection ?? false))
 
             Button("Paste") {
-                let action = PasteboardActionRouter.resolvePasteAction(
-                    firstResponder: NSApp.keyWindow?.firstResponder,
-                    isCurrentTabEditable: actions?.isCurrentTabEditable ?? false
-                )
-                switch action {
-                case .textPaste:
-                    NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil)
-                case .pasteRows:
+                if NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil) {
+                    return
+                }
+                if actions?.isCurrentTabEditable == true {
                     actions?.pasteRows()
                 }
             }
@@ -89,8 +92,12 @@ struct PasteboardCommands: Commands {
             .optionalKeyboardShortcut(shortcut(for: .selectAll))
 
             Button("Clear Selection") {
-                // Use responder chain - cancelOperation is the standard ESC action
-                NSApp.sendAction(#selector(NSResponder.cancelOperation(_:)), to: nil, from: nil)
+                // Route the Esc key equivalent to Vim first when the active editor is
+                // in a non-normal mode — the menu shortcut otherwise preempts the
+                // local event monitor and Vim never sees the keystroke.
+                if !EditorEventRouter.shared.handleVimEscapeFromMenu() {
+                    NSApp.sendAction(#selector(NSResponder.cancelOperation(_:)), to: nil, from: nil)
+                }
             }
             .optionalKeyboardShortcut(shortcut(for: .clearSelection))
         }
@@ -98,6 +105,23 @@ struct PasteboardCommands: Commands {
 }
 
 // MARK: - App Menu Commands
+
+/// Where `Cmd+F` resolves in the current context. The data-grid filter lives in
+/// the View menu and the editor's Find lives in the Edit menu. Only the item
+/// matching the current route binds `Cmd+F`; the other drops it. Two items
+/// sharing one key equivalent makes SwiftUI dedupe the shortcut and AppKit bind
+/// it to the disabled item, so the live owner must be unique.
+enum CommandFRoute {
+    case inspectorFilter
+    case tableFilter
+    case editorFind
+
+    static func resolve(isInspector: Bool, isTableTab: Bool) -> CommandFRoute {
+        if isInspector { return .inspectorFilter }
+        if isTableTab { return .tableFilter }
+        return .editorFind
+    }
+}
 
 /// All menu commands extracted into a separate Commands struct so that AppState
 /// changes only re-evaluate the menu items — NOT the Scene body / WindowGroups.
@@ -117,6 +141,13 @@ struct AppMenuCommands: Commands {
     /// otherwise (covers toolbar-click + welcome→connect race scenarios).
     private var actions: MainContentCommandActions? {
         focusedActions ?? commandRegistry.current
+    }
+
+    private var sidebarLayoutBinding: Binding<SidebarLayout> {
+        Binding(
+            get: { actions?.sidebarLayout ?? .flat },
+            set: { actions?.setSidebarLayout($0) }
+        )
     }
 
     private func shortcut(for action: ShortcutAction) -> KeyboardShortcut? {
@@ -139,6 +170,14 @@ struct AppMenuCommands: Commands {
             return coordinator.commandActions
         }
         return nil
+    }
+
+    private var keyWindowIsInspector: Bool {
+        NSApp.keyWindow?.windowController is InspectorWindowController
+    }
+
+    private var commandFRoute: CommandFRoute {
+        CommandFRoute.resolve(isInspector: keyWindowIsInspector, isTableTab: actions?.isTableTab == true)
     }
 
     var body: some Commands {
@@ -237,22 +276,32 @@ struct AppMenuCommands: Commands {
             Divider()
 
             Button("Save Changes") {
-                actions?.saveChanges()
+                if keyWindowIsInspector {
+                    NSApp.sendAction(#selector(InspectorViewController.saveDocument(_:)), to: nil, from: nil)
+                } else {
+                    actions?.saveChanges()
+                }
             }
             .optionalKeyboardShortcut(shortcut(for: .saveChanges))
-            // Match toolbar: also disable when no pending changes — avoids
-            // a no-op Cmd+S when nothing has been edited.
+            // Disable only when a connection tab is focused with nothing to
+            // save. When no SwiftUI content is focused (e.g. a document
+            // inspector window), stay enabled so the action can route through
+            // the responder chain.
             .disabled(
-                !(actions?.isConnected ?? false)
-                    || actions?.isReadOnly ?? false
-                    || !(actions?.hasPendingChanges ?? false)
+                keyWindowIsInspector
+                    ? false
+                    : (actions.map { !$0.isConnected || $0.isReadOnly || !$0.hasPendingChanges } ?? false)
             )
 
             Button(String(localized: "Save As...")) {
-                actions?.saveFileAs()
+                if keyWindowIsInspector {
+                    NSApp.sendAction(#selector(InspectorViewController.saveDocumentAs(_:)), to: nil, from: nil)
+                } else {
+                    actions?.saveFileAs()
+                }
             }
             .optionalKeyboardShortcut(shortcut(for: .saveAs))
-            .disabled(!(actions?.isConnected ?? false))
+            .disabled(keyWindowIsInspector ? false : (actions.map { !$0.isConnected } ?? false))
 
             Button(actions != nil ? "Close Tab" : "Close") {
                 if let resolved = resolvedCloseTabActions {
@@ -299,6 +348,20 @@ struct AppMenuCommands: Commands {
                     || actions?.isReadOnly ?? false
                     || !(actions.map { PluginManager.shared.supportsImport(for: $0.currentDatabaseType) } ?? true)
             )
+
+            Button(String(localized: "Backup Dump\u{2026}")) {
+                actions?.backupDatabase()
+            }
+            .disabled(!(actions?.isConnected ?? false) || !(actions?.supportsBackup ?? false))
+
+            Button(String(localized: "Restore Dump\u{2026}")) {
+                actions?.restoreDatabase()
+            }
+            .disabled(
+                !(actions?.isConnected ?? false)
+                    || !(actions?.supportsRestore ?? false)
+                    || actions?.isReadOnly ?? false
+            )
         }
 
         // Query menu
@@ -306,13 +369,13 @@ struct AppMenuCommands: Commands {
             Button("Execute Query") {
                 actions?.runQuery()
             }
-            .keyboardShortcut(.return, modifiers: .command)
+            .optionalKeyboardShortcut(shortcut(for: .executeQuery))
             .disabled(!(actions?.isConnected ?? false) || !(actions?.hasQueryText ?? false))
 
             Button(String(localized: "Execute All Statements")) {
                 actions?.runAllStatements()
             }
-            .keyboardShortcut(.return, modifiers: [.command, .shift])
+            .optionalKeyboardShortcut(shortcut(for: .executeAllStatements))
             .disabled(!(actions?.isConnected ?? false) || !(actions?.hasQueryText ?? false))
 
             Button("Explain Query") {
@@ -347,7 +410,7 @@ struct AppMenuCommands: Commands {
             Button(String(localized: "Cancel Query")) {
                 actions?.cancelCurrentQuery()
             }
-            .keyboardShortcut(".", modifiers: .command)
+            .optionalKeyboardShortcut(shortcut(for: .cancelQuery))
             .disabled(!(actions?.isQueryExecuting ?? false))
 
             Button("Refresh") {
@@ -360,6 +423,32 @@ struct AppMenuCommands: Commands {
                 actions?.openQuickSwitcher()
             }
             .optionalKeyboardShortcut(shortcut(for: .quickSwitcher))
+            .disabled(!(actions?.isConnected ?? false))
+
+            Divider()
+
+            Button(String(localized: "Previous Page")) {
+                actions?.goToPreviousPage()
+            }
+            .optionalKeyboardShortcut(shortcut(for: .previousPage))
+            .disabled(!(actions?.isConnected ?? false))
+
+            Button(String(localized: "Next Page")) {
+                actions?.goToNextPage()
+            }
+            .optionalKeyboardShortcut(shortcut(for: .nextPage))
+            .disabled(!(actions?.isConnected ?? false))
+
+            Button(String(localized: "First Page")) {
+                actions?.goToFirstPage()
+            }
+            .optionalKeyboardShortcut(shortcut(for: .firstPage))
+            .disabled(!(actions?.isConnected ?? false))
+
+            Button(String(localized: "Last Page")) {
+                actions?.goToLastPage()
+            }
+            .optionalKeyboardShortcut(shortcut(for: .lastPage))
             .disabled(!(actions?.isConnected ?? false))
 
             Divider()
@@ -402,44 +491,48 @@ struct AppMenuCommands: Commands {
         // Edit menu - Undo/Redo (smart handling for both text editor and data grid)
         CommandGroup(replacing: .undoRedo) {
             Button("Undo") {
-                // Check if first responder is a text view (SQL editor)
-                if let firstResponder = NSApp.keyWindow?.firstResponder,
-                   firstResponder is NSTextView || firstResponder is TextView {
-                    // Send undo: (with colon) through responder chain —
-                    // CodeEditTextView.TextView responds to undo: via @objc func undo(_:)
+                // Inspector windows and text views both handle undo: via the
+                // AppKit responder chain. Data grid tabs route through actions.
+                if keyWindowIsInspector ||
+                    (NSApp.keyWindow?.firstResponder is NSTextView) ||
+                    (NSApp.keyWindow?.firstResponder is TextView) {
                     NSApp.sendAction(#selector(TableProResponderActions.undo(_:)), to: nil, from: nil)
                 } else {
-                    // Data grid undo
                     actions?.undoChange()
                 }
             }
             .optionalKeyboardShortcut(shortcut(for: .undo))
 
             Button("Redo") {
-                // Check if first responder is a text view (SQL editor)
-                if let firstResponder = NSApp.keyWindow?.firstResponder,
-                   firstResponder is NSTextView || firstResponder is TextView {
-                    // Send redo: (with colon) through responder chain
+                if keyWindowIsInspector ||
+                    (NSApp.keyWindow?.firstResponder is NSTextView) ||
+                    (NSApp.keyWindow?.firstResponder is TextView) {
                     NSApp.sendAction(#selector(TableProResponderActions.redo(_:)), to: nil, from: nil)
                 } else {
-                    // Data grid redo
                     actions?.redoChange()
                 }
             }
             .optionalKeyboardShortcut(shortcut(for: .redo))
         }
 
-        // Edit menu - pasteboard commands with FocusedValue support
-        PasteboardCommands(settingsManager: settingsManager)
+        PasteboardCommands(settingsManager: settingsManager, commandRegistry: commandRegistry)
 
         // Edit menu - Find + row operations (after pasteboard)
         CommandGroup(after: .pasteboard) {
             Divider()
 
             Button(String(localized: "Find...")) {
-                EditorEventRouter.shared.showFindPanelForKeyWindow()
+                switch commandFRoute {
+                case .inspectorFilter:
+                    NSApp.sendAction(#selector(InspectorViewController.toggleInspectorFilter(_:)), to: nil, from: nil)
+                case .editorFind:
+                    EditorEventRouter.shared.showFindPanelForKeyWindow()
+                case .tableFilter:
+                    break
+                }
             }
-            .keyboardShortcut("f", modifiers: .command)
+            .optionalKeyboardShortcut(commandFRoute == .tableFilter ? nil : KeyboardShortcut("f", modifiers: .command))
+            .disabled(commandFRoute == .tableFilter)
 
             Divider()
 
@@ -480,16 +573,47 @@ struct AppMenuCommands: Commands {
 
             Divider()
 
+            Picker(selection: sidebarLayoutBinding) {
+                Text("Sidebar as List").tag(SidebarLayout.flat)
+                Text("Sidebar as Tree").tag(SidebarLayout.tree)
+            } label: {
+                Text("Sidebar Layout")
+            }
+            .pickerStyle(.inline)
+            .disabled(!(actions?.canSwitchSidebarLayout ?? false))
+
+            Divider()
+
             Button("Toggle Filters") {
                 actions?.toggleFilterPanel()
             }
-            .optionalKeyboardShortcut(shortcut(for: .toggleFilters))
-            .disabled(!(actions?.isConnected ?? false) || !(actions?.isTableTab ?? false))
+            .optionalKeyboardShortcut(commandFRoute == .tableFilter ? shortcut(for: .toggleFilters) : nil)
+            .disabled(commandFRoute != .tableFilter || !(actions?.isConnected ?? false))
 
             Button("Toggle History") {
                 actions?.toggleHistoryPanel()
             }
             .optionalKeyboardShortcut(shortcut(for: .toggleHistory))
+            .disabled(!(actions?.isConnected ?? false))
+
+            Divider()
+
+            Button("Focus Sidebar Filter") {
+                actions?.focusSidebarSearch()
+            }
+            .optionalKeyboardShortcut(shortcut(for: .focusSidebarSearch))
+            .disabled(!(actions?.isConnected ?? false))
+
+            Button("Show Tables Sidebar") {
+                actions?.showSidebarTab(.tables)
+            }
+            .optionalKeyboardShortcut(shortcut(for: .showSidebarTables))
+            .disabled(!(actions?.isConnected ?? false))
+
+            Button("Show Favorites Sidebar") {
+                actions?.showSidebarTab(.favorites)
+            }
+            .optionalKeyboardShortcut(shortcut(for: .showSidebarFavorites))
             .disabled(!(actions?.isConnected ?? false))
 
             Divider()
@@ -529,12 +653,6 @@ struct AppMenuCommands: Commands {
                 actions?.showServerDashboard()
             }
             .disabled(!(actions?.isConnected ?? false) || !(actions?.supportsServerDashboard ?? false))
-
-            Button(String(localized: "Open Terminal")) {
-                actions?.openTerminal()
-            }
-            .optionalKeyboardShortcut(shortcut(for: .openTerminal))
-            .disabled(!(actions?.isConnected ?? false))
 
             Divider()
 
@@ -606,8 +724,10 @@ struct AppMenuCommands: Commands {
 
             Divider()
 
-            Button(String(localized: "Report an Issue...")) {
-                FeedbackWindowController.shared.showFeedbackPanel()
+            Button(String(localized: "Report an Issue")) {
+                if let url = URL(string: "https://github.com/TableProApp/TablePro/issues") {
+                    NSWorkspace.shared.open(url)
+                }
             }
         }
     }
@@ -653,6 +773,7 @@ struct TableProApp: App {
 
         WindowGroup("New Connection", id: SceneId.connectionForm, for: UUID?.self) { $editingId in
             ConnectionFormView(connectionId: editingId ?? nil)
+                .background(WindowOpenerBridge())
                 .background(WindowChromeConfigurator(restorable: false))
                 .environment(\.appServices, .live)
         }
@@ -662,6 +783,7 @@ struct TableProApp: App {
 
         Window("Integrations Activity", id: SceneId.integrationsActivity) {
             IntegrationsActivityView()
+                .background(WindowOpenerBridge())
                 .environment(\.appServices, .live)
         }
         .windowResizability(.contentMinSize)
@@ -676,6 +798,7 @@ struct TableProApp: App {
 
         Settings {
             SettingsView()
+                .background(WindowOpenerBridge())
                 .environment(updaterBridge)
                 .environment(\.appServices, .live)
         }

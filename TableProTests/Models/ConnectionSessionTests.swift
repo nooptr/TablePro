@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import TableProPluginKit
 import Testing
 
 @testable import TablePro
@@ -215,5 +216,23 @@ struct ConnectionSessionStateTests {
         let connection = TestFixtures.makeConnection()
         let session = ConnectionSession(connection: connection)
         #expect(session.id == connection.id)
+    }
+
+    @Test("seeds safe mode from the connection's saved default")
+    func seedsSafeModeFromConnection() {
+        var connection = TestFixtures.makeConnection()
+        connection.safeModeLevel = .readOnly
+        let session = ConnectionSession(connection: connection)
+        #expect(session.safeModeLevel == .readOnly)
+    }
+
+    @Test("clearCachedData preserves safe mode so reconnect keeps protection")
+    func clearCachedDataPreservesSafeMode() {
+        var connection = TestFixtures.makeConnection()
+        connection.safeModeLevel = .silent
+        var session = ConnectionSession(connection: connection)
+        session.safeModeLevel = .readOnly
+        session.clearCachedData()
+        #expect(session.safeModeLevel == .readOnly)
     }
 }

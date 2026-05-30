@@ -2,20 +2,48 @@
 set -euo pipefail
 
 # Build script for creating standalone plugin bundles
-# Usage: ./scripts/build-plugin.sh <PluginTarget> [arm64|x86_64|both]
-# Example: ./scripts/build-plugin.sh OracleDriverPlugin arm64
+# Usage: ./scripts/build-plugin.sh <PluginTarget> [arm64|x86_64|both] [version]
+# Example: ./scripts/build-plugin.sh OracleDriverPlugin arm64 1.0.0
+#
+# Version (3rd arg or PLUGIN_VERSION env) is injected as MARKETING_VERSION so
+# CFBundleShortVersionString in the built bundle matches the registry version.
+# Required for bundled drivers that also ship via registry. Without it, the
+# user copy ties with built-in v1.0 and PluginManager prunes it on load.
 
-PLUGIN_TARGET="${1:?Usage: $0 <PluginTarget> [arm64|x86_64|both]}"
+PLUGIN_TARGET="${1:?Usage: $0 <PluginTarget> [arm64|x86_64|both] [version]}"
 ARCH="${2:-both}"
+PLUGIN_VERSION="${3:-${PLUGIN_VERSION:-}}"
 PROJECT="TablePro.xcodeproj"
 CONFIG="Release"
 BUILD_DIR="build/Plugins"
-SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: Dat Ngo Quoc (D7HJ5TFYCU)}"
-TEAM_ID="D7HJ5TFYCU"
+SIGN_IDENTITY="${SIGN_IDENTITY:-}"
+TEAM_ID="${TEAM_ID:-}"
 NOTARIZE="${NOTARIZE:-false}"
-APPLE_ID="${APPLE_ID:-datngoquoc@icloud.com}"
+APPLE_ID="${APPLE_ID:-}"
 
-echo "Building plugin: $PLUGIN_TARGET for $ARCH"
+if [ -z "$TEAM_ID" ]; then
+    echo "ERROR: TEAM_ID is not set. Pass via env or set in your shell profile." >&2
+    echo "       Example: TEAM_ID=ABCDEFGHIJ ./scripts/build-plugin.sh $PLUGIN_TARGET" >&2
+    exit 1
+fi
+
+if [ -z "$SIGN_IDENTITY" ]; then
+    # Try the canonical "Developer ID Application: <Name> (<TEAMID>)" pattern.
+    # If your keychain stores the identity differently, set SIGN_IDENTITY explicitly.
+    SIGN_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
+        | awk -F'"' -v team="$TEAM_ID" '$2 ~ /Developer ID Application/ && $2 ~ team {print $2; exit}')
+    if [ -z "$SIGN_IDENTITY" ]; then
+        echo "ERROR: No Developer ID Application identity found in keychain for team $TEAM_ID." >&2
+        echo "       Either install the cert or set SIGN_IDENTITY explicitly." >&2
+        exit 1
+    fi
+fi
+
+if [ -n "$PLUGIN_VERSION" ]; then
+    echo "Building plugin: $PLUGIN_TARGET v$PLUGIN_VERSION for $ARCH"
+else
+    echo "Building plugin: $PLUGIN_TARGET for $ARCH (no version override)"
+fi
 
 build_plugin() {
     local arch=$1
@@ -27,6 +55,11 @@ build_plugin() {
     # transitive SPM dependency resolution in explicit module builds
     DERIVED_DATA_DIR="build/DerivedData"
 
+    local marketing_version_arg=""
+    if [ -n "$PLUGIN_VERSION" ]; then
+        marketing_version_arg="MARKETING_VERSION=$PLUGIN_VERSION"
+    fi
+
     if ! xcodebuild \
         -project "$PROJECT" \
         -scheme "$PLUGIN_TARGET" \
@@ -37,12 +70,15 @@ build_plugin() {
         CODE_SIGN_IDENTITY="$SIGN_IDENTITY" \
         CODE_SIGN_STYLE=Manual \
         DEVELOPMENT_TEAM="$TEAM_ID" \
+        ${marketing_version_arg:+"$marketing_version_arg"} \
         -skipPackagePluginValidation \
         -derivedDataPath "$DERIVED_DATA_DIR" \
         build > "build-plugin-${arch}.log" 2>&1; then
         echo "FATAL: xcodebuild failed for $PLUGIN_TARGET ($arch)" >&2
-        echo "Last 30 lines of build log:" >&2
-        tail -30 "build-plugin-${arch}.log" >&2
+        echo "=== Swift errors (grep error:) ===" >&2
+        grep -nE "error:|cannot|undefined symbol" "build-plugin-${arch}.log" | head -40 >&2 || true
+        echo "=== Last 80 lines of build log ===" >&2
+        tail -80 "build-plugin-${arch}.log" >&2
         exit 1
     fi
 
@@ -55,6 +91,16 @@ build_plugin() {
     fi
 
     echo "Built: $plugin_bundle" >&2
+
+    if [ -n "$PLUGIN_VERSION" ]; then
+        actual_version=$(plutil -extract CFBundleShortVersionString raw -o - "$plugin_bundle/Contents/Info.plist" 2>/dev/null || echo "")
+        if [ "$actual_version" != "$PLUGIN_VERSION" ]; then
+            echo "FATAL: Built bundle CFBundleShortVersionString='$actual_version' but expected '$PLUGIN_VERSION'" >&2
+            echo "       MARKETING_VERSION injection failed. Users would see 'Update to v$PLUGIN_VERSION' loops." >&2
+            exit 1
+        fi
+        echo "Bundle version verified: CFBundleShortVersionString=$actual_version" >&2
+    fi
 
     # Strip the plugin binary to reduce size
     local plugin_name
@@ -125,6 +171,12 @@ notarize_zip() {
     if [ "$NOTARIZE" != "true" ]; then
         echo "Skipping notarization (set NOTARIZE=true to enable)"
         return
+    fi
+
+    if [ -z "$APPLE_ID" ]; then
+        echo "ERROR: APPLE_ID is not set but NOTARIZE=true." >&2
+        echo "       Pass APPLE_ID=<your-apple-id> or set notarytool-profile in your keychain." >&2
+        exit 1
     fi
 
     echo "Submitting for notarization..."

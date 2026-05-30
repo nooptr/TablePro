@@ -10,10 +10,12 @@ struct SSLPaneView: View {
 
     var body: some View {
         ConnectionSSLView(
+            databaseType: coordinator.network.type,
             sslMode: $coordinator.ssl.mode,
             sslCaCertPath: $coordinator.ssl.caCertPath,
             sslClientCertPath: $coordinator.ssl.clientCertPath,
-            sslClientKeyPath: $coordinator.ssl.clientKeyPath
+            sslClientKeyPath: $coordinator.ssl.clientKeyPath,
+            sslClientKeyPassphrase: $coordinator.ssl.clientKeyPassphrase
         )
     }
 }

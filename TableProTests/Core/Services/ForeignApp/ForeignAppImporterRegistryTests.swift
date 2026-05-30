@@ -4,6 +4,7 @@
 //
 
 import Foundation
+import TableProPluginKit
 @testable import TablePro
 import Testing
 
@@ -12,12 +13,13 @@ struct ForeignAppImporterRegistryTests {
     @Test("Registry contains all importers")
     func testRegistryContainsAllImporters() {
         let importers = ForeignAppImporterRegistry.all
-        #expect(importers.count == 3)
+        #expect(importers.count == 4)
 
         let ids = importers.map(\.id)
         #expect(ids.contains("tableplus"))
         #expect(ids.contains("sequelace"))
         #expect(ids.contains("dbeaver"))
+        #expect(ids.contains("beekeeperstudio"))
     }
 
     @Test("All importers have unique IDs")
@@ -74,5 +76,29 @@ struct ForeignAppImporterRegistryTests {
         #expect(importer.id == "dbeaver")
         #expect(importer.displayName == "DBeaver")
         #expect(importer.appBundleIdentifier == "org.jkiss.dbeaver.core.product")
+    }
+
+    @Test("Beekeeper Studio importer has correct metadata")
+    func testBeekeeperStudioImporterMetadata() {
+        let importer = BeekeeperStudioImporter()
+        #expect(importer.id == "beekeeperstudio")
+        #expect(importer.displayName == "Beekeeper Studio")
+        #expect(importer.appBundleIdentifier == "io.beekeeperstudio.desktop")
+    }
+
+    @Test("Importers declare whether passwords are read from the keychain")
+    func testReadsPasswordsFromKeychainFlags() {
+        #expect(TablePlusImporter().readsPasswordsFromKeychain == true)
+        #expect(SequelAceImporter().readsPasswordsFromKeychain == true)
+        #expect(DataGripImporter().readsPasswordsFromKeychain == true)
+        #expect(DBeaverImporter().readsPasswordsFromKeychain == false)
+        #expect(BeekeeperStudioImporter().readsPasswordsFromKeychain == false)
+    }
+
+    @Test("Keychain confirmation applies only to keychain-based importers when importing passwords")
+    func testRequiresKeychainConfirmation() {
+        #expect(ImportFromAppSheet.requiresKeychainConfirmation(includePasswords: true, importer: TablePlusImporter()))
+        #expect(!ImportFromAppSheet.requiresKeychainConfirmation(includePasswords: true, importer: DBeaverImporter()))
+        #expect(!ImportFromAppSheet.requiresKeychainConfirmation(includePasswords: false, importer: TablePlusImporter()))
     }
 }

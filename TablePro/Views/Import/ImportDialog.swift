@@ -149,7 +149,7 @@ struct ImportDialog: View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: currentPlugin.map { type(of: $0).iconName } ?? "doc.text.fill")
                 .font(.title)
-                .foregroundStyle(Color(nsColor: .systemBlue))
+                .foregroundStyle(.blue)
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
@@ -275,6 +275,7 @@ struct ImportDialog: View {
             Button("Cancel") {
                 isPresented = false
             }
+            .keyboardShortcut(.cancelAction)
 
             Spacer()
 
@@ -283,7 +284,7 @@ struct ImportDialog: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(fileURL == nil || (importService?.state.isImporting ?? false) || availableFormats.isEmpty || hasPreviewError)
-            .keyboardShortcut(.return, modifiers: [])
+            .keyboardShortcut(.defaultAction)
         }
         .padding(16)
     }

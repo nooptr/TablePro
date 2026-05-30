@@ -6,13 +6,18 @@
 import SwiftUI
 
 enum SettingsTab: String {
-    case general, appearance, editor, keyboard, ai, terminal, mcp, plugins, account
+    case general, appearance, editor, keyboard, ai, mcp, plugins, account
 }
 
 struct SettingsView: View {
     @Bindable private var settingsManager = AppSettingsManager.shared
     @Environment(UpdaterBridge.self) var updaterBridge
     @AppStorage("selectedSettingsTab") private var selectedTab: String = SettingsTab.general.rawValue
+    private let pluginManager = PluginManager.shared
+
+    private var pluginAttentionCount: Int {
+        pluginManager.rejectedPlugins.count + pluginManager.pluginsWithRegistryUpdate.count
+    }
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -45,16 +50,13 @@ struct SettingsView: View {
                 .tabItem { Label("AI", systemImage: "sparkles") }
                 .tag(SettingsTab.ai.rawValue)
 
-            TerminalSettingsView(settings: $settingsManager.terminal)
-                .tabItem { Label("Terminal", systemImage: "terminal") }
-                .tag(SettingsTab.terminal.rawValue)
-
             MCPSettingsView(settings: $settingsManager.mcp)
                 .tabItem { Label("Integrations", systemImage: "network") }
                 .tag(SettingsTab.mcp.rawValue)
 
             PluginsSettingsView()
                 .tabItem { Label("Plugins", systemImage: "puzzlepiece.extension") }
+                .badge(pluginAttentionCount)
                 .tag(SettingsTab.plugins.rawValue)
 
             AccountSettingsView()

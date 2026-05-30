@@ -15,11 +15,12 @@ final class RegistryClient {
     private(set) var lastFetchDate: Date?
 
     private var cachedETag: String? {
-        get { UserDefaults.standard.string(forKey: "registryETag") }
-        set { UserDefaults.standard.set(newValue, forKey: "registryETag") }
+        get { UserDefaults.standard.string(forKey: Self.etagKey) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.etagKey) }
     }
 
     let session: URLSession
+    static let supportedSchemaVersion = 2
     private static let logger = Logger(subsystem: "com.TablePro", category: "RegistryClient")
 
     private static let defaultRegistryURL = URL(string:
@@ -27,6 +28,11 @@ final class RegistryClient {
 
     static let customRegistryURLKey = "com.TablePro.customRegistryURL"
     private static let lastRegistryURLKey = "com.TablePro.lastRegistryURL"
+    private static let etagKey = "com.TablePro.registryETag"
+    private static let lastFetchKey = "com.TablePro.registryLastFetch"
+    private static let legacyManifestCacheKey = "registryManifestCache"
+    private static let legacyETagKey = "registryETag"
+    private static let legacyLastFetchKey = "registryLastFetch"
 
     var isUsingCustomRegistry: Bool {
         registryURL != Self.defaultRegistryURL
@@ -41,8 +47,15 @@ final class RegistryClient {
         return Self.defaultRegistryURL
     }
 
-    private static let manifestCacheKey = "registryManifestCache"
-    private static let lastFetchKey = "registryLastFetch"
+    private static let manifestCacheFileName = "registry-manifest.json"
+
+    private static var manifestCacheURL: URL? {
+        let fm = FileManager.default
+        guard let dir = fm.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
+        let bundleId = Bundle.main.bundleIdentifier ?? "com.TablePro"
+        return dir.appendingPathComponent(bundleId, isDirectory: true)
+            .appendingPathComponent(manifestCacheFileName)
+    }
 
     private init() {
         let config = URLSessionConfiguration.default
@@ -51,10 +64,40 @@ final class RegistryClient {
         config.waitsForConnectivity = true
         self.session = URLSession(configuration: config)
 
-        if let cachedData = UserDefaults.standard.data(forKey: Self.manifestCacheKey),
-           let cached = try? JSONDecoder().decode(RegistryManifest.self, from: cachedData) {
-            manifest = cached
-            lastFetchDate = UserDefaults.standard.object(forKey: Self.lastFetchKey) as? Date
+        Self.migrateLegacyKeys()
+        loadCachedManifest()
+    }
+
+    private static func migrateLegacyKeys() {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: legacyETagKey) != nil {
+            defaults.removeObject(forKey: legacyETagKey)
+        }
+        if defaults.object(forKey: legacyLastFetchKey) != nil {
+            defaults.removeObject(forKey: legacyLastFetchKey)
+        }
+        if defaults.object(forKey: legacyManifestCacheKey) != nil {
+            defaults.removeObject(forKey: legacyManifestCacheKey)
+        }
+    }
+
+    private func loadCachedManifest() {
+        guard let url = Self.manifestCacheURL,
+              let data = try? Data(contentsOf: url),
+              let cached = try? JSONDecoder().decode(RegistryManifest.self, from: data)
+        else { return }
+        manifest = cached
+        lastFetchDate = UserDefaults.standard.object(forKey: Self.lastFetchKey) as? Date
+    }
+
+    private static func writeCachedManifest(_ data: Data) {
+        guard let url = manifestCacheURL else { return }
+        let dir = url.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            logger.warning("Failed to write registry cache: \(error.localizedDescription)")
         }
     }
 
@@ -71,10 +114,7 @@ final class RegistryClient {
             UserDefaults.standard.set(currentURL, forKey: Self.lastRegistryURLKey)
         }
 
-        var request = URLRequest(url: registryURL)
-        if !forceRefresh, let etag = cachedETag {
-            request.setValue(etag, forHTTPHeaderField: "If-None-Match")
-        }
+        let request = makeManifestRequest(forceRefresh: forceRefresh)
 
         do {
             let (data, response) = try await session.data(for: request)
@@ -86,13 +126,30 @@ final class RegistryClient {
             switch httpResponse.statusCode {
             case 304:
                 Self.logger.debug("Registry manifest not modified (304)")
+                if manifest == nil {
+                    Self.logger.warning("Got 304 but no cached manifest in memory; retrying without If-None-Match")
+                    cachedETag = nil
+                    await fetchManifest(forceRefresh: true)
+                    return
+                }
                 fetchState = .loaded
 
             case 200...299:
                 let decoded = try JSONDecoder().decode(RegistryManifest.self, from: data)
+
+                if decoded.schemaVersion > Self.supportedSchemaVersion {
+                    Self.logger.error(
+                        "Registry schemaVersion \(decoded.schemaVersion) is newer than supported \(Self.supportedSchemaVersion); falling back to cached manifest"
+                    )
+                    fallbackToCacheOrFail(
+                        message: String(localized: "Plugin registry requires a newer app version")
+                    )
+                    return
+                }
+
                 manifest = decoded
 
-                UserDefaults.standard.set(data, forKey: Self.manifestCacheKey)
+                Self.writeCachedManifest(data)
                 cachedETag = httpResponse.value(forHTTPHeaderField: "ETag")
                 lastFetchDate = Date()
                 UserDefaults.standard.set(lastFetchDate, forKey: Self.lastFetchKey)
@@ -112,6 +169,21 @@ final class RegistryClient {
             Self.logger.error("Registry fetch failed: \(error.localizedDescription)")
             fallbackToCacheOrFail(message: error.localizedDescription)
         }
+    }
+
+    func makeManifestRequest(forceRefresh: Bool) -> URLRequest {
+        var request = URLRequest(url: registryURL)
+        if forceRefresh {
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+        } else if let etag = cachedETag {
+            request.setValue(etag, forHTTPHeaderField: "If-None-Match")
+        }
+        return request
+    }
+
+    func refreshedPlugin(matching plugin: RegistryPlugin) async -> RegistryPlugin {
+        await fetchManifest(forceRefresh: true)
+        return manifest?.plugins.first { $0.id == plugin.id } ?? plugin
     }
 
     private func fallbackToCacheOrFail(message: String) {

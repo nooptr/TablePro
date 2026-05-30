@@ -8,12 +8,13 @@
 //
 
 import Foundation
+import TableProPluginKit
 import Testing
+
 @testable import TablePro
 
 @Suite("Shared Sidebar Sync Invariants")
 struct SharedSidebarSyncTests {
-
     // MARK: - Helpers
 
     private func makeTable(_ name: String, type: TableInfo.TableType = .table) -> TableInfo {
@@ -34,13 +35,14 @@ struct SharedSidebarSyncTests {
             oldTables: previousSelectedTables,
             newTables: newSelectedTables
         )
-        #expect(action == .navigate(tableName: "users", isView: false))
+        #expect(action == .navigate(table: TableInfo(name: "users", type: .table, rowCount: nil)))
 
         // But SidebarNavigationResult.resolve skips because clicked == current tab
         let result = SidebarNavigationResult.resolve(
             clickedTableName: "users",
             currentTabTableName: "users",  // <-- current tab IS "users"
-            hasExistingTabs: true
+            hasExistingTabs: true,
+            isActiveTabReusable: false
         )
         #expect(result == .skip, "syncSidebarToCurrentTab must not trigger navigation")
     }
@@ -74,7 +76,7 @@ struct SharedSidebarSyncTests {
             oldTables: [makeTable("orders")],
             newTables: [makeTable("users")]
         )
-        #expect(action == .navigate(tableName: "users", isView: false))
+        #expect(action == .navigate(table: TableInfo(name: "users", type: .table, rowCount: nil)))
 
         // But isKeyWindow guard blocks it. We test the invariant:
         // handleTableSelectionChange should early-return when isKeyWindow=false.
@@ -105,12 +107,13 @@ struct SharedSidebarSyncTests {
             newTables: [makeTable("users")]
         )
         // This produces .navigate — but SidebarNavigationResult catches it
-        #expect(action == .navigate(tableName: "users", isView: false))
+        #expect(action == .navigate(table: TableInfo(name: "users", type: .table, rowCount: nil)))
 
         let result = SidebarNavigationResult.resolve(
             clickedTableName: "users",
             currentTabTableName: "users",
-            hasExistingTabs: true
+            hasExistingTabs: true,
+            isActiveTabReusable: false
         )
         #expect(result == .skip, "Even with stale previous, skip when table matches current tab")
     }
@@ -134,14 +137,15 @@ struct SharedSidebarSyncTests {
             oldTables: [makeTable("users")],
             newTables: [makeTable("orders")]
         )
-        #expect(action == .navigate(tableName: "orders", isView: false))
+        #expect(action == .navigate(table: TableInfo(name: "orders", type: .table, rowCount: nil)))
 
         let result = SidebarNavigationResult.resolve(
             clickedTableName: "orders",
             currentTabTableName: "users",
-            hasExistingTabs: true
+            hasExistingTabs: true,
+            isActiveTabReusable: false
         )
-        #expect(result == .revertAndOpenNewWindow)
+        #expect(result == .openNewTab)
     }
 
     @Test("Click table with no existing tabs — opens in place")
@@ -150,14 +154,15 @@ struct SharedSidebarSyncTests {
             oldTables: [],
             newTables: [makeTable("users")]
         )
-        #expect(action == .navigate(tableName: "users", isView: false))
+        #expect(action == .navigate(table: TableInfo(name: "users", type: .table, rowCount: nil)))
 
         let result = SidebarNavigationResult.resolve(
             clickedTableName: "users",
             currentTabTableName: nil,
-            hasExistingTabs: false
+            hasExistingTabs: false,
+            isActiveTabReusable: false
         )
-        #expect(result == .openInPlace)
+        #expect(result == .reuseActiveTab)
     }
 
     @Test("Click same table as current tab — skip")
@@ -167,12 +172,13 @@ struct SharedSidebarSyncTests {
             oldTables: [],
             newTables: [makeTable("users")]
         )
-        #expect(action == .navigate(tableName: "users", isView: false))
+        #expect(action == .navigate(table: TableInfo(name: "users", type: .table, rowCount: nil)))
 
         let result = SidebarNavigationResult.resolve(
             clickedTableName: "users",
             currentTabTableName: "users",
-            hasExistingTabs: true
+            hasExistingTabs: true,
+            isActiveTabReusable: false
         )
         #expect(result == .skip)
     }
@@ -187,7 +193,7 @@ struct SharedSidebarSyncTests {
             oldTables: [makeTable("orders")],
             newTables: [makeTable("users")]
         )
-        #expect(action == .navigate(tableName: "users", isView: false))
+        #expect(action == .navigate(table: TableInfo(name: "users", type: .table, rowCount: nil)))
         // Window B's isKeyWindow = false → handleTableSelectionChange returns early
         // This is enforced by the guard, not by these pure functions
     }

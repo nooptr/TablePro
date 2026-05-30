@@ -10,18 +10,10 @@ import Foundation
 import os
 import TableProPluginKit
 
-final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
-    private let config: DriverConnectionConfig
-    private var libpqConnection: LibPQPluginConnection?
-    private var _currentSchema: String = "public"
+final class RedshiftPluginDriver: LibPQBackedDriver, @unchecked Sendable {
+    let core: LibPQDriverCore
 
     private static let logger = Logger(subsystem: "com.TablePro.PostgreSQLDriver", category: "RedshiftPluginDriver")
-
-    var currentSchema: String? { _currentSchema }
-    var supportsSchemas: Bool { true }
-    var supportsTransactions: Bool { true }
-    var serverVersion: String? { libpqConnection?.serverVersion() }
-    var parameterStyle: ParameterStyle { .dollar }
 
     var capabilities: PluginCapabilities {
         [
@@ -34,132 +26,7 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     }
 
     init(config: DriverConnectionConfig) {
-        self.config = config
-    }
-
-    private var escapedSchema: String {
-        escapeLiteral(_currentSchema)
-    }
-
-    private func escapeLiteral(_ str: String) -> String {
-        var result = str
-        result = result.replacingOccurrences(of: "'", with: "''")
-        result = result.replacingOccurrences(of: "\0", with: "")
-        return result
-    }
-
-    // MARK: - Connection
-
-    func connect() async throws {
-        let sslConfig = PQSSLConfig(additionalFields: config.additionalFields)
-
-        let pqConn = LibPQPluginConnection(
-            host: config.host,
-            port: config.port,
-            user: config.username,
-            password: config.password.isEmpty ? nil : config.password,
-            database: config.database,
-            sslConfig: sslConfig
-        )
-
-        try await pqConn.connect()
-        self.libpqConnection = pqConn
-
-        if let schemaResult = try? await pqConn.executeQuery("SELECT current_schema()"),
-           let schema = schemaResult.rows.first?.first.flatMap({ $0 }) {
-            _currentSchema = schema
-        }
-    }
-
-    func disconnect() {
-        libpqConnection?.disconnect()
-        libpqConnection = nil
-    }
-
-    func ping() async throws {
-        _ = try await execute(query: "SELECT 1")
-    }
-
-    // MARK: - Query Execution
-
-    func execute(query: String) async throws -> PluginQueryResult {
-        try await executeWithReconnect(query: query, isRetry: false)
-    }
-
-    private func executeWithReconnect(query: String, isRetry: Bool) async throws -> PluginQueryResult {
-        guard let pqConn = libpqConnection else {
-            throw LibPQPluginError.notConnected
-        }
-
-        let startTime = Date()
-
-        do {
-            let result = try await pqConn.executeQuery(query)
-            return PluginQueryResult(
-                columns: result.columns,
-                columnTypeNames: result.columnTypeNames,
-                rows: result.rows,
-                rowsAffected: result.affectedRows,
-                executionTime: Date().timeIntervalSince(startTime),
-                isTruncated: result.isTruncated
-            )
-        } catch let error as NSError where !isRetry && isConnectionLostError(error) {
-            try await reconnect()
-            return try await executeWithReconnect(query: query, isRetry: true)
-        }
-    }
-
-    func executeParameterized(query: String, parameters: [String?]) async throws -> PluginQueryResult {
-        guard let pqConn = libpqConnection else {
-            throw LibPQPluginError.notConnected
-        }
-        let startTime = Date()
-        let result = try await pqConn.executeParameterizedQuery(query, parameters: parameters)
-        return PluginQueryResult(
-            columns: result.columns,
-            columnTypeNames: result.columnTypeNames,
-            rows: result.rows,
-            rowsAffected: result.affectedRows,
-            executionTime: Date().timeIntervalSince(startTime),
-            isTruncated: result.isTruncated
-        )
-    }
-
-    // MARK: - Streaming
-
-    func streamRows(query: String) -> AsyncThrowingStream<PluginStreamElement, Error> {
-        guard let pqConn = libpqConnection else {
-            return AsyncThrowingStream { $0.finish(throwing: LibPQPluginError.notConnected) }
-        }
-        return pqConn.streamQuery(query)
-    }
-
-    // MARK: - Reconnect
-
-    private func isConnectionLostError(_ error: NSError) -> Bool {
-        let errorMessage = error.localizedDescription.lowercased()
-        return errorMessage.contains("connection") &&
-            (errorMessage.contains("lost") ||
-                errorMessage.contains("closed") ||
-                errorMessage.contains("no connection") ||
-                errorMessage.contains("could not send"))
-    }
-
-    private func reconnect() async throws {
-        libpqConnection?.disconnect()
-        libpqConnection = nil
-        try await connect()
-    }
-
-    // MARK: - Cancellation
-
-    func cancelQuery() throws {
-        libpqConnection?.cancelCurrentQuery()
-    }
-
-    func applyQueryTimeout(_ seconds: Int) async throws {
-        let ms = seconds * 1_000
-        _ = try await execute(query: "SET statement_timeout = '\(ms)'")
+        self.core = LibPQDriverCore(config: config)
     }
 
     // MARK: - EXPLAIN
@@ -178,9 +45,9 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             ORDER BY table_name
             """
         let result = try await execute(query: query)
-        return result.rows.compactMap { row in
-            guard let name = row[0] else { return nil }
-            let typeStr = row[1] ?? "BASE TABLE"
+        return result.rows.compactMap { row -> PluginTableInfo? in
+            guard let name = row[0].asText else { return nil }
+            let typeStr = row[1].asText ?? "BASE TABLE"
             let type = typeStr.contains("VIEW") ? "VIEW" : "TABLE"
             return PluginTableInfo(name: name, type: type)
         }
@@ -219,13 +86,13 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             ORDER BY c.ordinal_position
             """
         let result = try await execute(query: query)
-        return result.rows.compactMap { row in
+        return result.rows.compactMap { row -> PluginColumnInfo? in
             guard row.count >= 4,
-                  let name = row[0],
-                  let rawDataType = row[1]
+                  let name = row[0].asText,
+                  let rawDataType = row[1].asText
             else { return nil }
 
-            let udtName = row.count > 6 ? row[6] : nil
+            let udtName = row.count > 6 ? row[6].asText : nil
             let dataType: String
             if rawDataType.uppercased() == "USER-DEFINED", let udt = udtName {
                 dataType = "ENUM(\(udt))"
@@ -233,11 +100,11 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 dataType = rawDataType.uppercased()
             }
 
-            let isNullable = row[2] == "YES"
-            let defaultValue = row[3]
-            let collation = row.count > 4 ? row[4] : nil
-            let comment = row.count > 5 ? row[5] : nil
-            let isPk = row.count > 7 && row[7] == "YES"
+            let isNullable = row[2].asText == "YES"
+            let defaultValue = row[3].asText
+            let collation = row.count > 4 ? row[4].asText : nil
+            let comment = row.count > 5 ? row[5].asText : nil
+            let isPk = row.count > 7 && row[7].asText == "YES"
 
             let charset: String? = {
                 guard let coll = collation else { return nil }
@@ -295,12 +162,12 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         var allColumns: [String: [PluginColumnInfo]] = [:]
         for row in result.rows {
             guard row.count >= 5,
-                  let tableName = row[0],
-                  let name = row[1],
-                  let rawDataType = row[2]
+                  let tableName = row[0].asText,
+                  let name = row[1].asText,
+                  let rawDataType = row[2].asText
             else { continue }
 
-            let udtName = row.count > 7 ? row[7] : nil
+            let udtName = row.count > 7 ? row[7].asText : nil
             let dataType: String
             if rawDataType.uppercased() == "USER-DEFINED", let udt = udtName {
                 dataType = "ENUM(\(udt))"
@@ -308,11 +175,11 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 dataType = rawDataType.uppercased()
             }
 
-            let isNullable = row[3] == "YES"
-            let defaultValue = row[4]
-            let collation = row.count > 5 ? row[5] : nil
-            let comment = row.count > 6 ? row[6] : nil
-            let isPk = row.count > 8 && row[8] == "YES"
+            let isNullable = row[3].asText == "YES"
+            let defaultValue = row[4].asText
+            let collation = row.count > 5 ? row[5].asText : nil
+            let comment = row.count > 6 ? row[6].asText : nil
+            let isPk = row.count > 8 && row[8].asText == "YES"
 
             let charset: String? = {
                 guard let coll = collation else { return nil }
@@ -356,9 +223,9 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         var distkeyCols: [String] = []
         var sortkeyCols: [String] = []
         for row in result.rows {
-            guard let colName = row[0] else { continue }
-            let isDistkey = row[2] == "t"
-            let sortKeyVal = Int(row[3] ?? "0") ?? 0
+            guard let colName = row[0].asText else { continue }
+            let isDistkey = row[2].asText == "t"
+            let sortKeyVal = Int(row[3].asText ?? "0") ?? 0
             if isDistkey { distkeyCols.append(colName) }
             if sortKeyVal != 0 { sortkeyCols.append(colName) }
         }
@@ -395,20 +262,20 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             ORDER BY tc.constraint_name
             """
         let result = try await execute(query: query)
-        return result.rows.compactMap { row in
+        return result.rows.compactMap { row -> PluginForeignKeyInfo? in
             guard row.count >= 6,
-                  let name = row[0],
-                  let column = row[1],
-                  let refTable = row[2],
-                  let refColumn = row[3]
+                  let name = row[0].asText,
+                  let column = row[1].asText,
+                  let refTable = row[2].asText,
+                  let refColumn = row[3].asText
             else { return nil }
             return PluginForeignKeyInfo(
                 name: name,
                 column: column,
                 referencedTable: refTable,
                 referencedColumn: refColumn,
-                onDelete: row[4] ?? "NO ACTION",
-                onUpdate: row[5] ?? "NO ACTION"
+                onDelete: row[4].asText ?? "NO ACTION",
+                onUpdate: row[5].asText ?? "NO ACTION"
             )
         }
     }
@@ -422,18 +289,18 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
               AND schema = '\(escapedSchema)'
             """
         let result = try await execute(query: query)
-        guard let firstRow = result.rows.first, let value = firstRow[0], let count = Int(value) else { return nil }
+        guard let firstRow = result.rows.first, let value = firstRow[0].asText, let count = Int(value) else { return nil }
         return count >= 0 ? count : nil
     }
 
     func fetchTableDDL(table: String, schema: String?) async throws -> String {
         let safeTable = escapeLiteral(table)
         let quotedTable = "\"\(table.replacingOccurrences(of: "\"", with: "\"\""))\""
-        let quotedSchema = "\"\(_currentSchema.replacingOccurrences(of: "\"", with: "\"\""))\""
+        let quotedSchema = "\"\(core.currentSchema.replacingOccurrences(of: "\"", with: "\"\""))\""
 
         do {
             let showResult = try await execute(query: "SHOW TABLE \(quotedSchema).\(quotedTable)")
-            if let firstRow = showResult.rows.first, let ddl = firstRow[0], !ddl.isEmpty {
+            if let firstRow = showResult.rows.first, let ddl = firstRow[0].asText, !ddl.isEmpty {
                 return ddl
             }
         } catch {
@@ -456,7 +323,7 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             ORDER BY a.attnum
             """
         let columnsResult = try await execute(query: columnsQuery)
-        let columnDefs = columnsResult.rows.compactMap { $0[0] }
+        let columnDefs = columnsResult.rows.compactMap { $0[0].asText }
         guard !columnDefs.isEmpty else {
             throw LibPQPluginError(message: "Failed to fetch DDL for table '\(table)'", sqlState: nil, detail: nil)
         }
@@ -494,7 +361,7 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
               AND schemaname = '\(escapedSchema)'
             """
         let result = try await execute(query: query)
-        guard let firstRow = result.rows.first, let ddl = firstRow[0] else {
+        guard let firstRow = result.rows.first, let ddl = firstRow[0].asText else {
             throw LibPQPluginError(message: "Failed to fetch definition for view '\(view)'", sqlState: nil, detail: nil)
         }
         return ddl
@@ -519,11 +386,11 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         }
 
         let rowCount: Int64? = {
-            guard let val = row[0] else { return nil }
+            guard let val = row[0].asText else { return nil }
             return Int64(val)
         }()
 
-        let sizeMb = Int64(row[1] ?? "0") ?? 0
+        let sizeMb = Int64(row[1].asText ?? "0") ?? 0
         let totalSize = sizeMb * 1_024 * 1_024
 
         return PluginTableMetadata(
@@ -539,18 +406,12 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         let result = try await execute(
             query: "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname"
         )
-        return result.rows.compactMap { row in row.first.flatMap { $0 } }
+        return result.rows.compactMap { row in row.first?.asText }
     }
 
     func fetchSchemas() async throws -> [String] {
         let result = try await execute(query: PostgreSQLSchemaQueries.listSchemasRedshift)
-        return result.rows.compactMap { row in row.first.flatMap { $0 } }
-    }
-
-    func switchSchema(to schema: String) async throws {
-        let escapedName = schema.replacingOccurrences(of: "\"", with: "\"\"")
-        _ = try await execute(query: "SET search_path TO \"\(escapedName)\", public")
-        _currentSchema = schema
+        return result.rows.compactMap { row in row.first?.asText }
     }
 
     func fetchDatabaseMetadata(_ database: String) async throws -> PluginDatabaseMetadata {
@@ -568,8 +429,8 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         async let sizeResult = execute(query: sizeQuery)
         let (countRes, sizeRes) = try await (countResult, sizeResult)
 
-        let tableCount = Int(countRes.rows.first?[0] ?? "0") ?? 0
-        let sizeMb = Int64(sizeRes.rows.first?[0] ?? "0") ?? 0
+        let tableCount = Int(countRes.rows.first?[0].asText ?? "0") ?? 0
+        let sizeMb = Int64(sizeRes.rows.first?[0].asText ?? "0") ?? 0
         let sizeBytes = sizeMb * 1_024 * 1_024
 
         let systemDatabases = ["dev", "padb_harvest"]
@@ -588,7 +449,7 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         let dbResult = try await execute(
             query: "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname"
         )
-        let dbNames = dbResult.rows.compactMap { $0.first.flatMap { $0 } }
+        let dbNames = dbResult.rows.compactMap { $0.first?.asText }
 
         let infoQuery = """
             SELECT database, COUNT(DISTINCT "table"), COALESCE(SUM(size), 0)
@@ -599,9 +460,9 @@ final class RedshiftPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         let infoResult = try await execute(query: infoQuery)
         var metadataByName: [String: (tableCount: Int, sizeMb: Int64)] = [:]
         for row in infoResult.rows {
-            guard let dbName = row[0] else { continue }
-            let tableCount = Int(row[1] ?? "0") ?? 0
-            let sizeMb = Int64(row[2] ?? "0") ?? 0
+            guard let dbName = row[0].asText else { continue }
+            let tableCount = Int(row[1].asText ?? "0") ?? 0
+            let sizeMb = Int64(row[2].asText ?? "0") ?? 0
             metadataByName[dbName] = (tableCount: tableCount, sizeMb: sizeMb)
         }
 

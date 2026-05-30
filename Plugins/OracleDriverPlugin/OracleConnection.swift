@@ -9,6 +9,7 @@
 import Foundation
 import Logging
 import NIOCore
+import NIOSSL
 import OracleNIO
 import OSLog
 import TableProPluginKit
@@ -59,7 +60,7 @@ extension OracleError: PluginDriverError {
 struct OracleQueryResult {
     let columns: [String]
     let columnTypeNames: [String]
-    let rows: [[String?]]
+    let rows: [[PluginCellValue]]
     let affectedRows: Int
     let isTruncated: Bool
 }
@@ -116,6 +117,8 @@ final class OracleConnectionWrapper: @unchecked Sendable {
     private let password: String
     private let database: String
     private let serviceName: String
+    private let useSID: Bool
+    private let sslConfig: SSLConfiguration
 
     private struct LockedState: Sendable {
         var isConnected = false
@@ -131,25 +134,39 @@ final class OracleConnectionWrapper: @unchecked Sendable {
 
     // MARK: - Initialization
 
-    init(host: String, port: Int, user: String, password: String, database: String, serviceName: String = "") {
+    init(
+        host: String,
+        port: Int,
+        user: String,
+        password: String,
+        database: String,
+        serviceName: String = "",
+        useSID: Bool = false,
+        sslConfig: SSLConfiguration = SSLConfiguration()
+    ) {
         self.host = host
         self.port = port
         self.user = user
         self.password = password
         self.database = database
         self.serviceName = serviceName
+        self.useSID = useSID
+        self.sslConfig = sslConfig
     }
 
     // MARK: - Connection
 
     func connect() async throws {
-        let service = serviceName.isEmpty ? database : serviceName
+        let identifier = serviceName.isEmpty ? database : serviceName
+        let service: OracleServiceMethod = useSID ? .sid(identifier) : .serviceName(identifier)
+        let tls = try OracleSSLMapping.tls(for: sslConfig)
         let config = OracleNIO.OracleConnection.Configuration(
             host: host,
             port: port,
-            service: .serviceName(service),
+            service: service,
             username: user,
-            password: password
+            password: password,
+            tls: tls
         )
 
         let connectionId = Self.connectionCounter.withLock { state -> Int in
@@ -169,17 +186,50 @@ final class OracleConnectionWrapper: @unchecked Sendable {
                 current.isConnected = true
             }
 
-            osLogger.debug("Connected to Oracle \(self.host):\(self.port)/\(service)")
+            let target = useSID ? "\(self.host):\(self.port):\(identifier)" : "\(self.host):\(self.port)/\(identifier)"
+            osLogger.debug("Connected to Oracle \(target)")
         } catch let sqlError as OracleSQLError {
             let detail = sqlError.serverInfo?.message ?? sqlError.description
             osLogger.error("Oracle connection failed: \(detail)")
-            throw OracleError(message: detail, category: classifyConnectError(sqlError))
+            if let sslError = Self.classifySSLError(detail) {
+                throw sslError
+            }
+            let category = classifyConnectError(sqlError)
+            throw OracleError(
+                message: Self.connectErrorMessage(for: category, serverDetail: detail),
+                category: category
+            )
+        } catch let nioSslError as NIOSSLError {
+            let detail = String(describing: nioSslError)
+            osLogger.error("Oracle TLS error: \(detail)")
+            throw Self.classifySSLError(detail) ?? SSLHandshakeError.unknown(serverMessage: detail)
         } catch {
             let detail = String(describing: error)
             osLogger.error("Oracle connection failed: \(detail)")
+            if let sslError = Self.classifySSLError(detail) {
+                throw sslError
+            }
             throw OracleError(message: detail, category: .connectionFailed)
         }
     }
+
+    static func classifySSLError(_ message: String) -> SSLHandshakeError? {
+        let lower = message.lowercased()
+        if lower.contains("ora-28759") || lower.contains("failure to open file") && lower.contains("wallet") {
+            return .clientCertRequired(serverMessage: message)
+        }
+        if lower.contains("ora-29024") {
+            return .cipherMismatch(serverMessage: message)
+        }
+        if lower.contains("ora-28860") {
+            return .cipherMismatch(serverMessage: message)
+        }
+        if lower.contains("certificate") && (lower.contains("verify") || lower.contains("untrusted")) {
+            return .untrustedCertificate(serverMessage: message)
+        }
+        return nil
+    }
+
 
     private func classifyConnectError(_ error: OracleSQLError) -> OracleError.Category {
         let codeDescription = error.code.description
@@ -193,6 +243,22 @@ final class OracleConnectionWrapper: @unchecked Sendable {
             return .authVersionNotSupported
         default:
             return .connectionFailed
+        }
+    }
+
+    private static func connectErrorMessage(
+        for category: OracleError.Category,
+        serverDetail: String
+    ) -> String {
+        switch category {
+        case .authVersionNotSupported:
+            return String(localized: "This Oracle server is older than release 11.1, which the database driver does not support.")
+        case .authConnectionDropped:
+            return String(localized: "The Oracle server closed the connection during the login handshake.")
+        case .authVerifierUnsupported:
+            return String(localized: "This account uses a password verifier the database driver does not support.")
+        case .generic, .notConnected, .connectionFailed, .queryFailed:
+            return serverDetail
         }
     }
 
@@ -239,20 +305,23 @@ final class OracleConnectionWrapper: @unchecked Sendable {
             osLogger.debug("Oracle columns: \(columns.count) — \(columns.joined(separator: ", "))")
 
             var columnTypeNames: [String] = []
-            var allRows: [[String?]] = []
+            var allRows: [[PluginCellValue]] = []
             var didReadTypes = false
             var truncated = false
 
             for try await row in stream {
-                var rowValues: [String?] = []
+                var rowValues: [PluginCellValue] = []
                 for cell in row {
                     if !didReadTypes {
                         columnTypeNames.append(oracleTypeName(cell.dataType))
                     }
                     if cell.bytes == nil {
-                        rowValues.append(nil)
+                        rowValues.append(.null)
+                    } else if cell.dataType == .raw || cell.dataType == .longRAW || cell.dataType == .blob,
+                              let bytes = cell.bytes {
+                        rowValues.append(.bytes(Data(bytes.readableBytesView)))
                     } else {
-                        rowValues.append(decodeCell(cell))
+                        rowValues.append(PluginCellValue.fromOptional(decodeCell(cell)))
                     }
                 }
                 didReadTypes = true
@@ -325,15 +394,18 @@ final class OracleConnectionWrapper: @unchecked Sendable {
                     return
                 }
 
-                var rowValues: [String?] = []
+                var rowValues: [PluginCellValue] = []
                 for cell in row {
                     if !headerSent {
                         columnTypeNames.append(oracleTypeName(cell.dataType))
                     }
                     if cell.bytes == nil {
-                        rowValues.append(nil)
+                        rowValues.append(.null)
+                    } else if cell.dataType == .raw || cell.dataType == .longRAW || cell.dataType == .blob,
+                              let bytes = cell.bytes {
+                        rowValues.append(.bytes(Data(bytes.readableBytesView)))
                     } else {
-                        rowValues.append(decodeCell(cell))
+                        rowValues.append(PluginCellValue.fromOptional(decodeCell(cell)))
                     }
                 }
 

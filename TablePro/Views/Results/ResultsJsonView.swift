@@ -4,6 +4,7 @@
 //
 
 import SwiftUI
+import TableProPluginKit
 
 internal struct ResultsJsonView: View {
     let tableRows: TableRows
@@ -78,7 +79,7 @@ internal struct ResultsJsonView: View {
                 copyCooldownTask?.cancel()
                 copyCooldownTask = Task { @MainActor in
                     do {
-                        try await Task.sleep(for: .milliseconds(1500))
+                        try await Task.sleep(for: .milliseconds(1_500))
                         copied = false
                     } catch {
                         // cancelled by next press
@@ -110,11 +111,7 @@ internal struct ResultsJsonView: View {
         } else {
             switch viewMode {
             case .text:
-                JSONSyntaxTextView(
-                    text: $prettyText,
-                    isEditable: false,
-                    wordWrap: true
-                )
+                JSONCodeEditor(text: $prettyText, isEditable: false)
             case .tree:
                 if let tree = parsedTree {
                     JSONTreeView(rootNode: tree, searchText: $treeSearchText)
@@ -184,8 +181,8 @@ internal struct ResultsJsonView: View {
         rows: ContiguousArray<Row>,
         selectedIndices: Set<Int>
     ) -> (json: String, pretty: String, parseResult: Result<JSONTreeNode, JSONTreeParseError>) {
-        let allRows: [[String?]] = rows.map { Array($0.values) }
-        let displayRows: [[String?]]
+        let allRows: [[PluginCellValue]] = rows.map { Array($0.values) }
+        let displayRows: [[PluginCellValue]]
         if selectedIndices.isEmpty {
             displayRows = allRows
         } else {

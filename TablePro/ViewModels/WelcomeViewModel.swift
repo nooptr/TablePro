@@ -7,6 +7,7 @@ import AppKit
 import Combine
 import os
 import SwiftUI
+import TableProPluginKit
 
 enum WelcomeActiveSheet: Identifiable {
     case newGroup(parentId: UUID?)
@@ -58,9 +59,14 @@ final class WelcomeViewModel {
 
     var connectionError: String?
     var showConnectionError = false
+    var pluginDiagnostic: PluginDiagnosticItem?
 
     var showImportFilePanel = false
     var importResultCount: Int?
+    /// Set when a sheet (import file / import-from-app) finishes work and is
+    /// about to dismiss. Flushed in the sheet's `onDismiss` so the result
+    /// alert appears after the sheet animation completes, no sleep needed.
+    var pendingImportResultCount: Int?
 
     var expandedGroupIds: Set<UUID> = {
         let strings = UserDefaults.standard.stringArray(forKey: "com.TablePro.expandedGroupIds") ?? []
@@ -91,16 +97,25 @@ final class WelcomeViewModel {
     // MARK: - Computed Properties
 
     private(set) var treeItems: [ConnectionGroupTreeNode] = []
+    private(set) var favoriteConnections: [DatabaseConnection] = []
     private(set) var connectionCountByGroup: [UUID: Int] = [:]
     private(set) var depthByGroup: [UUID: Int] = [:]
     private(set) var maxDescendantDepthByGroup: [UUID: Int] = [:]
 
     func rebuildTree() {
+        favoriteConnections = connections
+            .filter(\.isFavorite)
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+
         let tree = buildGroupTree(groups: groups, connections: connections, parentId: nil)
-        if searchText.isEmpty {
-            treeItems = tree
+        let baseItems = searchText.isEmpty ? tree : filterGroupTree(tree, searchText: searchText)
+        if searchText.isEmpty, !favoriteConnections.isEmpty {
+            treeItems = baseItems.filter { node in
+                if case .connection(let conn) = node, conn.isFavorite { return false }
+                return true
+            }
         } else {
-            treeItems = filterGroupTree(tree, searchText: searchText)
+            treeItems = baseItems
         }
 
         var counts: [UUID: Int] = [:]
@@ -207,6 +222,14 @@ final class WelcomeViewModel {
         }
         if let pendingImport = WelcomeRouter.shared.consumePendingImport() {
             activeSheet = .deeplinkImport(pendingImport)
+            return
+        }
+        if let pendingInstall = WelcomeRouter.shared.consumePendingPluginInstall() {
+            pluginInstallConnection = pendingInstall
+            return
+        }
+        if let pendingError = WelcomeRouter.shared.consumePendingError() {
+            presentConnectionFailure(pendingError.error, connection: pendingError.connection)
         }
     }
 
@@ -229,6 +252,8 @@ final class WelcomeViewModel {
                 withObservationTracking({
                     _ = WelcomeRouter.shared.pendingImport
                     _ = WelcomeRouter.shared.pendingConnectionShare
+                    _ = WelcomeRouter.shared.pendingError
+                    _ = WelcomeRouter.shared.pendingPluginInstall
                 }, onChange: {
                     box.resume(with: true)
                 })
@@ -281,36 +306,14 @@ final class WelcomeViewModel {
         Task {
             do {
                 try await TabRouter.shared.route(.openConnection(connection.id))
-            } catch is CancellationError {
-                closeConnectionWindows(for: connection.id)
-                WindowOpener.shared.openWelcome()
             } catch {
-                if case PluginError.pluginNotInstalled = error {
-                    Self.logger.info("Plugin not installed for \(connection.type.rawValue), prompting install")
-                    handleMissingPlugin(connection: connection)
-                } else {
-                    Self.logger.error(
-                        "Failed to connect: \(error.localizedDescription, privacy: .public)")
-                    handleConnectionFailure(error: error, connectionId: connection.id)
-                }
+                handleConnectError(error, connection: connection)
             }
         }
     }
 
     func connectAfterInstall(_ connection: DatabaseConnection) {
-        WindowOpener.shared.orderOutWelcome()
-        Task {
-            do {
-                try await TabRouter.shared.route(.openConnection(connection.id))
-            } catch is CancellationError {
-                closeConnectionWindows(for: connection.id)
-                WindowOpener.shared.openWelcome()
-            } catch {
-                Self.logger.error(
-                    "Failed to connect after plugin install: \(error.localizedDescription, privacy: .public)")
-                handleConnectionFailure(error: error, connectionId: connection.id)
-            }
-        }
+        connectToDatabase(connection)
     }
 
     func connectToLinkedConnection(_ linked: LinkedConnection) {
@@ -330,6 +333,28 @@ final class WelcomeViewModel {
         let duplicate = storage.duplicateConnection(connection)
         loadConnections()
         WindowOpener.shared.openConnectionForm(editing: duplicate.id)
+    }
+
+    // MARK: - Favorites
+
+    func toggleFavorite(_ targets: [DatabaseConnection]) {
+        guard !targets.isEmpty else { return }
+        let ids = Set(targets.map(\.id))
+        let live = connections.filter { ids.contains($0.id) }
+        guard !live.isEmpty else { return }
+        let shouldFavorite = !live.allSatisfy(\.isFavorite)
+        var updated: [DatabaseConnection] = []
+        for index in connections.indices where ids.contains(connections[index].id) {
+            connections[index].isFavorite = shouldFavorite
+            updated.append(connections[index])
+        }
+        guard storage.updateConnections(updated) else {
+            connections = storage.loadConnections()
+            rebuildTree()
+            return
+        }
+        rebuildTree()
+        AppEvents.shared.connectionUpdated.send(targets.count == 1 ? targets.first?.id : nil)
     }
 
     // MARK: - Delete
@@ -390,10 +415,12 @@ final class WelcomeViewModel {
 
     func moveConnections(_ targets: [DatabaseConnection], toGroup groupId: UUID) {
         let ids = Set(targets.map(\.id))
+        var updated: [DatabaseConnection] = []
         for i in connections.indices where ids.contains(connections[i].id) {
             connections[i].groupId = groupId
+            updated.append(connections[i])
         }
-        guard storage.saveConnections(connections) else {
+        guard storage.updateConnections(updated) else {
             connections = storage.loadConnections()
             rebuildTree()
             return
@@ -403,10 +430,12 @@ final class WelcomeViewModel {
 
     func removeFromGroup(_ targets: [DatabaseConnection]) {
         let ids = Set(targets.map(\.id))
+        var updated: [DatabaseConnection] = []
         for i in connections.indices where ids.contains(connections[i].id) {
             connections[i].groupId = nil
+            updated.append(connections[i])
         }
-        guard storage.saveConnections(connections) else {
+        guard storage.updateConnections(updated) else {
             connections = storage.loadConnections()
             rebuildTree()
             return
@@ -524,25 +553,22 @@ final class WelcomeViewModel {
 
         let updatedValidGroupIds = Set(groups.map(\.id))
         var order = 0
-        var dirtyIds: [String] = []
+        var updated: [DatabaseConnection] = []
         for i in connections.indices {
             let isUngrouped = connections[i].groupId.map { !updatedValidGroupIds.contains($0) } ?? true
             if isUngrouped {
                 if connections[i].sortOrder != order {
                     connections[i].sortOrder = order
-                    dirtyIds.append(connections[i].id.uuidString)
+                    updated.append(connections[i])
                 }
                 order += 1
             }
         }
 
-        guard storage.saveConnections(connections) else {
+        guard storage.updateConnections(updated) else {
             connections = storage.loadConnections()
             rebuildTree()
             return
-        }
-        if !dirtyIds.isEmpty {
-            services.syncTracker.markDirty(.connection, ids: dirtyIds)
         }
         rebuildTree()
     }
@@ -566,22 +592,19 @@ final class WelcomeViewModel {
         connections.move(fromOffsets: globalSource, toOffset: globalDestination)
 
         var order = 0
-        var dirtyIds: [String] = []
+        var updated: [DatabaseConnection] = []
         for i in connections.indices where connections[i].groupId == group.id {
             if connections[i].sortOrder != order {
                 connections[i].sortOrder = order
-                dirtyIds.append(connections[i].id.uuidString)
+                updated.append(connections[i])
             }
             order += 1
         }
 
-        guard storage.saveConnections(connections) else {
+        guard storage.updateConnections(updated) else {
             connections = storage.loadConnections()
             rebuildTree()
             return
-        }
-        if !dirtyIds.isEmpty {
-            services.syncTracker.markDirty(.connection, ids: dirtyIds)
         }
         rebuildTree()
     }
@@ -594,23 +617,38 @@ final class WelcomeViewModel {
 
     // MARK: - Private Helpers
 
-    private func handleConnectionFailure(error: Error, connectionId: UUID) {
-        closeConnectionWindows(for: connectionId)
-        connectionError = error.localizedDescription
-        showConnectionError = true
-        WindowOpener.shared.openWelcome()
+    private func handleConnectError(_ error: Error, connection: DatabaseConnection) {
+        if error is CancellationError {
+            Self.logger.info("Connection attempt cancelled for \(connection.name, privacy: .public)")
+            return
+        }
+
+        if !WindowManager.shared.hasOpenWindow(for: connection.id) {
+            Self.logger.info(
+                "Connection failed after window was closed: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+
+        if case PluginError.pluginNotInstalled = error {
+            Self.logger.info("Plugin not installed for \(connection.type.rawValue, privacy: .public)")
+            WindowManager.shared.closeWindow(for: connection.id)
+            pluginInstallConnection = connection
+            return
+        }
+
+        Self.logger.error("Failed to connect: \(error.localizedDescription, privacy: .public)")
+        WindowManager.shared.closeWindow(for: connection.id)
+        presentConnectionFailure(error, connection: connection)
     }
 
-    private func handleMissingPlugin(connection: DatabaseConnection) {
-        closeConnectionWindows(for: connection.id)
-        WindowOpener.shared.openWelcome()
-        pluginInstallConnection = connection
-    }
-
-    /// Close windows for a specific connection only, preserving other connections' windows.
-    private func closeConnectionWindows(for connectionId: UUID) {
-        for window in WindowLifecycleMonitor.shared.windows(for: connectionId) {
-            window.close()
+    private func presentConnectionFailure(_ error: Error, connection: DatabaseConnection) {
+        if let item = PluginDiagnosticItem.classify(
+            error: error, connection: connection, username: connection.username
+        ) {
+            pluginDiagnostic = item
+        } else {
+            connectionError = SSLHandshakeError.formatted(error)
+            showConnectionError = true
         }
     }
 }

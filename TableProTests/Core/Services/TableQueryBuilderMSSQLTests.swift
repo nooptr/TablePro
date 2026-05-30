@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import TableProPluginKit
 @testable import TablePro
 import Testing
 
@@ -93,5 +94,20 @@ struct TableQueryBuilderMSSQLTests {
         let query = builder.buildFilteredQuery(tableName: "users", filters: [])
         let normalized = query.uppercased()
         #expect(!normalized.contains(" LIMIT "))
+    }
+
+    // MARK: - OFFSET FETCH Fallback (no plugin browse query)
+
+    @Test("Base query without a plugin driver still emits ORDER BY (SELECT NULL) before OFFSET FETCH")
+    func baseQueryFallbackEmitsOrderBy() {
+        let dialect = PluginManager.shared.sqlDialect(for: .mssql)
+        let fallback = TableQueryBuilder(
+            databaseType: .mssql,
+            pluginDriver: nil,
+            dialect: dialect,
+            dialectQuote: dialect.map(quoteIdentifierFromDialect)
+        )
+        let query = fallback.buildBaseQuery(tableName: "users")
+        #expect(query == "SELECT * FROM [users] ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT 200 ROWS ONLY")
     }
 }

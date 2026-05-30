@@ -5,13 +5,13 @@
 //  Tests for TableRow computed property logic extracted into TableRowLogic.
 //
 
-import SwiftUI
+import TableProPluginKit
 import Testing
+
 @testable import TablePro
 
 @Suite("TableRowLogicTests")
 struct TableRowLogicTests {
-
     // MARK: - Accessibility Label
 
     @Test("Normal table accessibility label")
@@ -56,63 +56,44 @@ struct TableRowLogicTests {
         #expect(label == "View: my_view, pending delete")
     }
 
-    // MARK: - Icon Color
-
-    @Test("Normal table icon color is blue")
-    func iconColorNormalTable() {
+    @Test("Favorite table accessibility label")
+    func accessibilityLabelFavoriteTable() {
         let table = TestFixtures.makeTableInfo(name: "users", type: .table)
-        #expect(TableRowLogic.iconColor(table: table, isPendingDelete: false, isPendingTruncate: false) == .blue)
+        let label = TableRowLogic.accessibilityLabel(table: table, isPendingDelete: false, isPendingTruncate: false, isFavorite: true)
+        #expect(label == "Table: users, favorite")
     }
 
-    @Test("Normal view icon color is purple")
-    func iconColorNormalView() {
-        let table = TestFixtures.makeTableInfo(name: "v", type: .view)
-        #expect(TableRowLogic.iconColor(table: table, isPendingDelete: false, isPendingTruncate: false) == .purple)
+    // MARK: - Icon Name per Kind
+
+    @Test("Icon name per table kind")
+    func iconNamePerKind() {
+        #expect(TableRowLogic.iconName(for: .table) == "tablecells")
+        #expect(TableRowLogic.iconName(for: .view) == "eye")
+        #expect(TableRowLogic.iconName(for: .materializedView) == "square.stack.3d.up")
+        #expect(TableRowLogic.iconName(for: .foreignTable) == "link")
+        #expect(TableRowLogic.iconName(for: .systemTable) == "tablecells.badge.ellipsis")
     }
 
-    @Test("Pending delete table icon color is red")
-    func iconColorPendingDeleteTable() {
-        let table = TestFixtures.makeTableInfo(name: "users", type: .table)
-        #expect(TableRowLogic.iconColor(table: table, isPendingDelete: true, isPendingTruncate: false) == .red)
+    // MARK: - Accessibility Label per Kind
+
+    @Test("Materialized view accessibility label")
+    func accessibilityLabelMaterializedView() {
+        let table = TestFixtures.makeTableInfo(name: "daily_revenue", type: .materializedView)
+        let label = TableRowLogic.accessibilityLabel(table: table, isPendingDelete: false, isPendingTruncate: false)
+        #expect(label == "Materialized View: daily_revenue")
     }
 
-    @Test("Pending truncate table icon color is orange")
-    func iconColorPendingTruncateTable() {
-        let table = TestFixtures.makeTableInfo(name: "users", type: .table)
-        #expect(TableRowLogic.iconColor(table: table, isPendingDelete: false, isPendingTruncate: true) == .orange)
+    @Test("Foreign table accessibility label")
+    func accessibilityLabelForeignTable() {
+        let table = TestFixtures.makeTableInfo(name: "remote_users", type: .foreignTable)
+        let label = TableRowLogic.accessibilityLabel(table: table, isPendingDelete: false, isPendingTruncate: false)
+        #expect(label == "Foreign Table: remote_users")
     }
 
-    @Test("Pending delete view icon color is red")
-    func iconColorPendingDeleteView() {
-        let table = TestFixtures.makeTableInfo(name: "v", type: .view)
-        #expect(TableRowLogic.iconColor(table: table, isPendingDelete: true, isPendingTruncate: false) == .red)
-    }
-
-    @Test("Both pending — delete wins for icon color")
-    func iconColorBothPendingDeleteWins() {
-        let table = TestFixtures.makeTableInfo(name: "users", type: .table)
-        #expect(TableRowLogic.iconColor(table: table, isPendingDelete: true, isPendingTruncate: true) == .red)
-    }
-
-    // MARK: - Text Color
-
-    @Test("Normal text color is primary")
-    func textColorNormal() {
-        #expect(TableRowLogic.textColor(isPendingDelete: false, isPendingTruncate: false) == .primary)
-    }
-
-    @Test("Pending delete text color is red")
-    func textColorPendingDelete() {
-        #expect(TableRowLogic.textColor(isPendingDelete: true, isPendingTruncate: false) == .red)
-    }
-
-    @Test("Pending truncate text color is orange")
-    func textColorPendingTruncate() {
-        #expect(TableRowLogic.textColor(isPendingDelete: false, isPendingTruncate: true) == .orange)
-    }
-
-    @Test("Both pending — delete wins for text color")
-    func textColorBothPendingDeleteWins() {
-        #expect(TableRowLogic.textColor(isPendingDelete: true, isPendingTruncate: true) == .red)
+    @Test("System table accessibility label")
+    func accessibilityLabelSystemTable() {
+        let table = TestFixtures.makeTableInfo(name: "pg_class", type: .systemTable)
+        let label = TableRowLogic.accessibilityLabel(table: table, isPendingDelete: false, isPendingTruncate: false)
+        #expect(label == "System Table: pg_class")
     }
 }

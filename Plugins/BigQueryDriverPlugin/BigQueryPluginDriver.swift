@@ -57,6 +57,7 @@ internal final class BigQueryPluginDriver: PluginDatabaseDriver, @unchecked Send
             .truncateTable,
             .multiSchema,
             .cancelQuery,
+            .materializedViews,
         ]
     }
 
@@ -80,8 +81,12 @@ internal final class BigQueryPluginDriver: PluginDatabaseDriver, @unchecked Send
     }
 
     func defaultExportQuery(table: String) -> String? {
+        defaultExportQuery(table: table, schema: nil)
+    }
+
+    func defaultExportQuery(table: String, schema: String?) -> String? {
         guard let conn = connection else { return nil }
-        let dataset = lock.withLock { _currentDataset } ?? ""
+        let dataset = schema ?? (lock.withLock { _currentDataset }) ?? ""
         return "SELECT * FROM `\(conn.projectId).\(dataset).\(table)`"
     }
 
@@ -173,7 +178,7 @@ internal final class BigQueryPluginDriver: PluginDatabaseDriver, @unchecked Send
             return PluginQueryResult(
                 columns: ["ok"],
                 columnTypeNames: ["INT64"],
-                rows: [["1"]],
+                rows: [[.text("1")]],
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -193,10 +198,10 @@ internal final class BigQueryPluginDriver: PluginDatabaseDriver, @unchecked Send
                 columns: ["Metric", "Value"],
                 columnTypeNames: ["STRING", "STRING"],
                 rows: [
-                    ["Total Bytes Processed", formatBytes(bytesProcessed)],
-                    ["Total Bytes Billed", formatBytes(bytesBilled)],
-                    ["Cache Hit", cacheHit],
-                    ["Estimated Cost (USD)", estimateCost(bytesBilled)]
+                    [.text("Total Bytes Processed"), .text(formatBytes(bytesProcessed))],
+                    [.text("Total Bytes Billed"), .text(formatBytes(bytesBilled))],
+                    [.text("Cache Hit"), .text(cacheHit)],
+                    [.text("Estimated Cost (USD)"), .text(estimateCost(bytesBilled))]
                 ],
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
@@ -227,7 +232,7 @@ internal final class BigQueryPluginDriver: PluginDatabaseDriver, @unchecked Send
             return PluginQueryResult(
                 columns: ["Result"],
                 columnTypeNames: ["STRING"],
-                rows: [["Statement executed"]],
+                rows: [[.text("Statement executed")]],
                 rowsAffected: result.dmlAffectedRows,
                 executionTime: Date().timeIntervalSince(startTime),
                 statusMessage: buildCostMessage(result)
@@ -494,8 +499,22 @@ internal final class BigQueryPluginDriver: PluginDatabaseDriver, @unchecked Send
         limit: Int,
         offset: Int
     ) -> String? {
+        buildBrowseQuery(
+            table: table, schema: nil, sortColumns: sortColumns,
+            columns: columns, limit: limit, offset: offset
+        )
+    }
+
+    func buildBrowseQuery(
+        table: String,
+        schema: String?,
+        sortColumns: [(columnIndex: Int, ascending: Bool)],
+        columns: [String],
+        limit: Int,
+        offset: Int
+    ) -> String? {
         let dataset: String = lock.withLock {
-            let ds = _currentDataset ?? ""
+            let ds = schema ?? _currentDataset ?? ""
             _columnCache["\(ds).\(table)"] = columns
             return ds
         }
@@ -514,8 +533,24 @@ internal final class BigQueryPluginDriver: PluginDatabaseDriver, @unchecked Send
         limit: Int,
         offset: Int
     ) -> String? {
+        buildFilteredQuery(
+            table: table, schema: nil, filters: filters, logicMode: logicMode,
+            sortColumns: sortColumns, columns: columns, limit: limit, offset: offset
+        )
+    }
+
+    func buildFilteredQuery(
+        table: String,
+        schema: String?,
+        filters: [(column: String, op: String, value: String)],
+        logicMode: String,
+        sortColumns: [(columnIndex: Int, ascending: Bool)],
+        columns: [String],
+        limit: Int,
+        offset: Int
+    ) -> String? {
         let dataset: String = lock.withLock {
-            let ds = _currentDataset ?? ""
+            let ds = schema ?? _currentDataset ?? ""
             _columnCache["\(ds).\(table)"] = columns
             return ds
         }
@@ -531,11 +566,12 @@ internal final class BigQueryPluginDriver: PluginDatabaseDriver, @unchecked Send
     func generateStatements(
         table: String,
         columns: [String],
+        primaryKeyColumns: [String],
         changes: [PluginRowChange],
-        insertedRowData: [Int: [String?]],
+        insertedRowData: [Int: [PluginCellValue]],
         deletedRowIndices: Set<Int>,
         insertedRowIndices: Set<Int>
-    ) -> [(statement: String, parameters: [String?])]? {
+    ) -> [(statement: String, parameters: [PluginCellValue])]? {
         guard let conn = connection else { return nil }
 
         let dataset = lock.withLock { _currentDataset } ?? ""

@@ -74,7 +74,13 @@ struct WelcomeWindowView: View {
                 Text("Are you sure you want to delete the group \"\(group.name)\"? Connections in this group will be moved to the top level.")
             }
         }
-        .sheet(item: $vm.activeSheet) { sheet in
+        .sheet(item: $vm.activeSheet, onDismiss: {
+            if let count = vm.pendingImportResultCount {
+                vm.importResultCount = count
+                vm.pendingImportResultCount = nil
+            }
+            focus = .connectionList
+        }) { sheet in
             switch sheet {
             case .newGroup(let parentId):
                 CreateGroupSheet(parentId: parentId) { name, color, pid in
@@ -94,19 +100,15 @@ struct WelcomeWindowView: View {
                 LicenseActivationSheet()
             case .importFile(let url):
                 ConnectionImportSheet(fileURL: url) { count in
-                    Task { @MainActor in
-                        try? await Task.sleep(for: .milliseconds(300))
-                        vm.showImportResult(count: count)
-                    }
+                    vm.pendingImportResultCount = count
+                    vm.activeSheet = nil
                 }
             case .exportConnections(let conns):
                 ConnectionExportOptionsSheet(connections: conns)
             case .importFromApp:
                 ImportFromAppSheet { count in
-                    Task { @MainActor in
-                        try? await Task.sleep(for: .milliseconds(300))
-                        vm.showImportResult(count: count)
-                    }
+                    vm.pendingImportResultCount = count
+                    vm.activeSheet = nil
                 }
             case .deeplinkImport(let exportable):
                 DeeplinkImportSheet(connection: exportable) {
@@ -141,6 +143,11 @@ struct WelcomeWindowView: View {
         }
         .pluginInstallPrompt(connection: $vm.pluginInstallConnection) { connection in
             vm.connectAfterInstall(connection)
+        }
+        .sheet(item: $vm.pluginDiagnostic) { item in
+            PluginDiagnosticSheet(item: item) {
+                vm.pluginDiagnostic = nil
+            }
         }
         .alert(String(localized: "Rename Group"), isPresented: $vm.showRenameGroupAlert) {
             TextField(String(localized: "Group name"), text: $vm.renameGroupName)
@@ -198,8 +205,8 @@ struct WelcomeWindowView: View {
             WelcomeActionsPanel(
                 onActivateLicense: { vm.activeSheet = .activation },
                 onCreateConnection: { WindowOpener.shared.openConnectionForm() },
-                onTrySample: { vm.openSampleDatabase() },
-                onImportFromFile: { vm.importConnectionsFromFile() }
+                onImportFromApp: { vm.importConnectionsFromApp() },
+                onTrySample: { vm.openSampleDatabase() }
             )
             .frame(width: 240)
             .themeMaterial(.sidebar, .regularMaterial)
@@ -218,7 +225,7 @@ struct WelcomeWindowView: View {
             connectionsHeader
             Divider()
             ZStack {
-                if vm.treeItems.isEmpty && vm.linkedConnections.isEmpty {
+                if vm.treeItems.isEmpty && vm.linkedConnections.isEmpty && vm.favoriteConnections.isEmpty {
                     emptyState
                 } else {
                     connectionList
@@ -273,6 +280,8 @@ struct WelcomeWindowView: View {
                 text: $vm.searchText,
                 placeholder: String(localized: "Search for connection..."),
                 controlSize: .regular,
+                onMoveDown: { focus = .connectionList },
+                onSubmit: { focus = .connectionList },
                 focusTrigger: searchFocusTrigger,
                 maxWidth: 240
             )
@@ -288,27 +297,52 @@ struct WelcomeWindowView: View {
     private var connectionList: some View {
         ScrollViewReader { proxy in
             List(selection: $vm.selectedConnectionIds) {
-                TreeRowsView(items: vm.treeItems, parentGroupId: nil, vm: vm) { conn in
-                    connectionRow(for: conn)
+                let showsFavoritesSection = vm.searchText.isEmpty && !vm.favoriteConnections.isEmpty
+                let showsLinkedSection = !vm.linkedConnections.isEmpty
+                    && LicenseManager.shared.isFeatureAvailable(.linkedFolders)
+                let treeHasGroups = vm.treeItems.contains { item in
+                    if case .group = item { return true }
+                    return false
+                }
+                let treeNeedsHeader = showsFavoritesSection && !treeHasGroups && !vm.treeItems.isEmpty
+
+                if showsFavoritesSection {
+                    Section {
+                        ForEach(vm.favoriteConnections) { conn in
+                            connectionRow(for: conn)
+                        }
+                    } header: {
+                        sourceListSectionHeader(String(localized: "Favorites"))
+                    }
                 }
 
-                if !vm.linkedConnections.isEmpty, LicenseManager.shared.isFeatureAvailable(.linkedFolders) {
+                if treeNeedsHeader {
+                    Section {
+                        TreeRowsView(items: vm.treeItems, parentGroupId: nil, vm: vm) { conn in
+                            connectionRow(for: conn)
+                        }
+                    } header: {
+                        sourceListSectionHeader(String(localized: "Connections"))
+                    }
+                } else {
+                    TreeRowsView(items: vm.treeItems, parentGroupId: nil, vm: vm) { conn in
+                        connectionRow(for: conn)
+                    }
+                }
+
+                if showsLinkedSection {
                     Section {
                         ForEach(vm.linkedConnections) { linked in
                             linkedConnectionRow(for: linked)
                         }
                     } header: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "folder.fill")
-                                .font(.caption2)
-                            Text(String(localized: "Linked"))
-                                .font(.caption)
-                        }
-                        .foregroundStyle(.secondary)
+                        sourceListSectionHeader(String(localized: "Linked"))
                     }
                 }
             }
             .listStyle(.inset)
+            .listRowSeparator(.hidden)
+            .listSectionSeparator(.hidden)
             .scrollContentBackground(.hidden)
             .focused($focus, equals: .connectionList)
             .contextMenu(forSelectionType: UUID.self) { ids in
@@ -366,11 +400,20 @@ struct WelcomeWindowView: View {
         let sshProfile = connection.sshProfileId.flatMap { SSHProfileStorage.shared.profile(for: $0) }
         return WelcomeConnectionRow(
             connection: connection,
-            sshProfile: sshProfile
+            sshProfile: sshProfile,
+            isSelected: vm.selectedConnectionIds.contains(connection.id),
+            onToggleFavorite: { vm.toggleFavorite([connection]) }
         )
         .tag(connection.id)
-        .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
         .listRowSeparator(.hidden)
+    }
+
+    private func sourceListSectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.subheadline)
+            .fontWeight(.semibold)
+            .foregroundStyle(.secondary)
+            .padding(.top, 6)
     }
 
     private func linkedConnectionRow(for linked: LinkedConnection) -> some View {
@@ -386,15 +429,13 @@ struct WelcomeWindowView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(linked.connection.name)
                     .lineLimit(1)
-                Text("\(linked.connection.host):\(linked.connection.port)")
+                Text(verbatim: linked.connection.displaySubtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
         }
         .tag(linked.id)
-        .padding(.vertical, 4)
-        .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
         .contentShape(Rectangle())
         .listRowSeparator(.hidden)
     }
@@ -473,6 +514,7 @@ private struct TreeRowsView<ConnectionContent: View>: View {
                 } label: {
                     groupLabel(for: group)
                 }
+                .listRowSeparator(.hidden)
             }
         }
         .onMove(perform: allConnections ? { from, to in

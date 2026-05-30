@@ -69,7 +69,7 @@ struct DataBrowserView: View {
                 ]
             }
             .toolbar { topToolbar }
-            .toolbar(rows.isEmpty && !viewModel.hasActiveSearch && !viewModel.hasActiveFilters ? .hidden : .visible, for: .bottomBar)
+            .toolbar(rows.isEmpty && !viewModel.hasActiveSearch && !viewModel.hasActiveFilters && !viewModel.isPageLoading ? .hidden : .visible, for: .bottomBar)
             .toolbar { paginationToolbar }
             .task {
                 viewModel.attach(session: session, table: table, databaseType: connection.type, host: connection.host)
@@ -199,6 +199,9 @@ struct DataBrowserView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let appError = viewModel.loadError {
             ErrorView(error: appError) { await viewModel.load() }
+        } else if rows.isEmpty, viewModel.isPageLoading {
+            ProgressView()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if rows.isEmpty, viewModel.hasActiveSearch {
             ContentUnavailableView.search(text: viewModel.activeSearchText)
         } else if rows.isEmpty {
@@ -248,7 +251,7 @@ struct DataBrowserView: View {
                 onSaved: { Task { await viewModel.load() } },
                 loadFullValue: { ref in
                     guard let session else { return nil }
-                    return try await viewModel.loadFullValue(driver: session.driver, ref: ref)
+                    return try await viewModel.loadFullValue(driver: session.driver, ref: ref, databaseType: connection.type)
                 }
             )
         } label: {
@@ -266,6 +269,11 @@ struct DataBrowserView: View {
                 }
                 .tint(.red)
             }
+        }
+        .accessibilityAction(named: Text("Delete row")) {
+            guard !isView, viewModel.hasPrimaryKeys, !connection.safeModeLevel.blocksWrites else { return }
+            deleteTarget = viewModel.primaryKeyValues(for: row)
+            showDeleteConfirmation = true
         }
     }
 
@@ -440,6 +448,7 @@ struct DataBrowserView: View {
             columnDetails: viewModel.columnDetails,
             session: session,
             databaseType: connection.type,
+            safeModeLevel: connection.safeModeLevel,
             onInserted: { Task { await viewModel.load() } }
         )
     }

@@ -20,17 +20,22 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
     func pluginGenerateStatements(
         table: String,
         columns: [String],
+        primaryKeyColumns: [String],
         changes: [PluginRowChange],
         insertedRowData: [Int: [String?]],
         deletedRowIndices: Set<Int>,
         insertedRowIndices: Set<Int>
     ) -> [(statement: String, parameters: [String?])]? {
-        pluginDriver.generateStatements(
-            table: table, columns: columns, changes: changes,
-            insertedRowData: insertedRowData,
+        let pluginRowData = insertedRowData.mapValues { row in
+            row.map(PluginCellValue.fromOptional)
+        }
+        let result = pluginDriver.generateStatements(
+            table: table, columns: columns, primaryKeyColumns: primaryKeyColumns, changes: changes,
+            insertedRowData: pluginRowData,
             deletedRowIndices: deletedRowIndices,
             insertedRowIndices: insertedRowIndices
         )
+        return result?.map { (statement: $0.statement, parameters: $0.parameters.map { $0.asText }) }
     }
 
     /// The underlying plugin driver, exposed for DDL schema generation delegation.
@@ -123,28 +128,30 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
     }
 
     func executeParameterized(query: String, parameters: [Any?]) async throws -> QueryResult {
-        let stringParams = parameters.map { param -> String? in
-            guard let p = param else { return nil }
-            return Self.stringValue(for: p)
+        let cellParams: [PluginCellValue] = parameters.map { param in
+            guard let p = param else { return .null }
+            if let data = p as? Data { return .bytes(data) }
+            return .text(Self.stringValue(for: p))
         }
-        let pluginResult = try await pluginDriver.executeParameterized(query: query, parameters: stringParams)
+        let pluginResult = try await pluginDriver.executeParameterized(query: query, parameters: cellParams)
         return mapQueryResult(pluginResult)
     }
 
     func executeUserQuery(query: String, rowCap: Int?, parameters: [Any?]?) async throws -> QueryResult {
-        let stringParams: [String?]?
+        let cellParams: [PluginCellValue]?
         if let parameters {
-            stringParams = parameters.map { param -> String? in
-                guard let p = param else { return nil }
-                return Self.stringValue(for: p)
+            cellParams = parameters.map { param -> PluginCellValue in
+                guard let p = param else { return .null }
+                if let data = p as? Data { return .bytes(data) }
+                return .text(Self.stringValue(for: p))
             }
         } else {
-            stringParams = nil
+            cellParams = nil
         }
         let pluginResult = try await pluginDriver.executeUserQuery(
             query: query,
             rowCap: rowCap,
-            parameters: stringParams
+            parameters: cellParams
         )
         return mapQueryResult(pluginResult)
     }
@@ -153,14 +160,38 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
 
     func fetchTables() async throws -> [TableInfo] {
         let pluginTables = try await pluginDriver.fetchTables(schema: pluginDriver.currentSchema)
-        return pluginTables.map { table in
-            let tableType: TableInfo.TableType = switch table.type.lowercased() {
-            case "view": .view
-            case "system table": .systemTable
-            default: .table
-            }
-            return TableInfo(name: table.name, type: tableType, rowCount: table.rowCount)
+        return pluginTables.map { mapPluginTable($0, schemaFallback: nil) }
+    }
+
+    func fetchTables(schema: String?) async throws -> [TableInfo] {
+        let resolvedSchema = schema ?? pluginDriver.currentSchema
+        let pluginTables = try await pluginDriver.fetchTables(schema: resolvedSchema)
+        return pluginTables.map { mapPluginTable($0, schemaFallback: resolvedSchema) }
+    }
+
+    private func mapPluginTable(_ table: PluginTableInfo, schemaFallback: String?) -> TableInfo {
+        let tableType: TableInfo.TableType
+        switch table.type.lowercased() {
+        case "table", "base table", "prefix":
+            tableType = .table
+        case "view":
+            tableType = .view
+        case "materialized view", "materialized_view":
+            tableType = .materializedView
+        case "foreign table", "foreign_table":
+            tableType = .foreignTable
+        case "system table", "system base table", "system view":
+            tableType = .systemTable
+        default:
+            Self.logger.warning("Unknown plugin table type \"\(table.type, privacy: .public)\" for \"\(table.name, privacy: .public)\"; defaulting to .table")
+            tableType = .table
         }
+        return TableInfo(
+            name: table.name,
+            type: tableType,
+            rowCount: table.rowCount,
+            schema: table.schema ?? schemaFallback
+        )
     }
 
     func fetchColumns(table: String) async throws -> [ColumnInfo] {
@@ -184,7 +215,8 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
                 extra: col.extra,
                 charset: col.charset,
                 collation: col.collation,
-                comment: col.comment
+                comment: col.comment,
+                allowedValues: col.allowedValues
             )
         }
     }
@@ -223,6 +255,17 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
         try await pluginDriver.fetchApproximateRowCount(table: table, schema: pluginDriver.currentSchema)
     }
 
+    func fetchFilteredRowCount(table: String, filters: [TableFilter], logicMode: FilterLogicMode) async throws -> Int? {
+        let tuples = filters
+            .filter { $0.isEnabled && !$0.columnName.isEmpty }
+            .map(\.asPluginFilterTuple)
+        return try await pluginDriver.fetchFilteredRowCount(
+            table: table,
+            filters: tuples,
+            logicMode: logicMode == .and ? "and" : "or"
+        )
+    }
+
     func fetchTableDDL(table: String) async throws -> String {
         try await pluginDriver.fetchTableDDL(table: table, schema: pluginDriver.currentSchema)
     }
@@ -249,13 +292,13 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
             dataSize: pluginMeta.dataSize,
             indexSize: pluginMeta.indexSize,
             totalSize: pluginMeta.totalSize,
-            avgRowLength: nil,
+            avgRowLength: pluginMeta.avgRowLength,
             rowCount: pluginMeta.rowCount,
             comment: pluginMeta.comment,
             engine: pluginMeta.engine,
-            collation: nil,
-            createTime: nil,
-            updateTime: nil
+            collation: pluginMeta.collation,
+            createTime: pluginMeta.createTime,
+            updateTime: pluginMeta.updateTime
         )
     }
 
@@ -265,6 +308,61 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
 
     func fetchSchemas() async throws -> [String] {
         try await pluginDriver.fetchSchemas()
+    }
+
+    func fetchProcedures(schema: String?) async throws -> [RoutineInfo] {
+        guard let support = pluginDriver as? PluginProcedureFunctionSupport else { return [] }
+        let resolvedSchema = schema ?? pluginDriver.currentSchema
+        do {
+            let pluginRoutines = try await support.fetchProcedures(schema: resolvedSchema)
+            return pluginRoutines.map { routine in
+                RoutineInfo(
+                    name: routine.name,
+                    schema: resolvedSchema,
+                    kind: .procedure,
+                    signature: routine.returnType
+                )
+            }
+        } catch {
+            Self.logger.warning("fetchProcedures failed: \(error.localizedDescription, privacy: .public)")
+            throw error
+        }
+    }
+
+    func fetchFunctions(schema: String?) async throws -> [RoutineInfo] {
+        guard let support = pluginDriver as? PluginProcedureFunctionSupport else { return [] }
+        let resolvedSchema = schema ?? pluginDriver.currentSchema
+        do {
+            let pluginRoutines = try await support.fetchFunctions(schema: resolvedSchema)
+            return pluginRoutines.map { routine in
+                RoutineInfo(
+                    name: routine.name,
+                    schema: resolvedSchema,
+                    kind: .function,
+                    signature: routine.returnType
+                )
+            }
+        } catch {
+            Self.logger.warning("fetchFunctions failed: \(error.localizedDescription, privacy: .public)")
+            throw error
+        }
+    }
+
+    func fetchRoutineDDL(routine: RoutineInfo) async throws -> String {
+        guard let support = pluginDriver as? PluginProcedureFunctionSupport else {
+            throw NSError(
+                domain: "PluginDriverAdapter",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: String(localized: "This driver does not expose routine DDL.")]
+            )
+        }
+        let resolvedSchema = routine.schema ?? pluginDriver.currentSchema
+        switch routine.kind {
+        case .procedure:
+            return try await support.fetchProcedureDDL(name: routine.name, schema: resolvedSchema)
+        case .function:
+            return try await support.fetchFunctionDDL(name: routine.name, schema: resolvedSchema)
+        }
     }
 
     func fetchDatabaseMetadata(_ database: String) async throws -> DatabaseMetadata {
@@ -303,7 +401,8 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
             result[table] = cols.map { col in
                 ColumnInfo(name: col.name, dataType: col.dataType, isNullable: col.isNullable,
                            isPrimaryKey: col.isPrimaryKey, defaultValue: col.defaultValue,
-                           extra: col.extra, charset: col.charset, collation: col.collation, comment: col.comment)
+                           extra: col.extra, charset: col.charset, collation: col.collation, comment: col.comment,
+                           allowedValues: col.allowedValues)
             }
         }
         return result

@@ -58,17 +58,17 @@ final class MongoDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         let effectiveHost = config.additionalFields["mongoHosts"].flatMap { hosts in
             hosts.isEmpty ? nil : hosts
         } ?? config.host
+        // mongodb+srv URIs require TLS per the spec; force it on if the user left it Disabled.
+        let effectiveSSL: SSLConfiguration = (useSrv && config.ssl.mode == .disabled)
+            ? SSLConfiguration(mode: .required)
+            : config.ssl
         let conn = MongoDBConnection(
             host: effectiveHost,
             port: config.port,
             user: config.username,
             password: config.password,
             database: currentDb,
-            sslMode: useSrv && (config.additionalFields["sslMode"] ?? "Disabled") == "Disabled"
-                ? "Required"
-                : config.additionalFields["sslMode"] ?? "Disabled",
-            sslCACertPath: config.additionalFields["sslCACertPath"] ?? "",
-            sslClientCertPath: config.additionalFields["sslClientCertPath"] ?? "",
+            ssl: effectiveSSL,
             authSource: config.additionalFields["mongoAuthSource"],
             readPreference: config.additionalFields["mongoReadPreference"],
             writeConcern: config.additionalFields["mongoWriteConcern"],
@@ -85,8 +85,7 @@ final class MongoDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 let dbs = try await conn.listDatabases()
                 currentDb = dbs.first { !Self.systemDatabases.contains($0) } ?? dbs.first ?? ""
             } catch {
-                conn.disconnect()
-                throw error
+                Self.logger.warning("listDatabases failed during connect, continuing without default database: \(error.localizedDescription, privacy: .public)")
             }
         }
 
@@ -129,7 +128,7 @@ final class MongoDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         return try await executeOperation(operation, connection: conn, startTime: startTime)
     }
 
-    func executeParameterized(query: String, parameters: [String?]) async throws -> PluginQueryResult {
+    func executeParameterized(query: String, parameters: [PluginCellValue]) async throws -> PluginQueryResult {
         try await execute(query: query)
     }
 
@@ -161,6 +160,8 @@ final class MongoDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             filter: "{}", sort: nil, projection: nil, skip: 0, limit: 50
         ).docs
 
+        let enumMap = (try? await fetchJsonSchemaEnums(conn: conn, table: table)) ?? [:]
+
         if docs.isEmpty {
             return [
                 PluginColumnInfo(
@@ -177,9 +178,43 @@ final class MongoDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             let typeName = bsonTypeToString(types[index])
             return PluginColumnInfo(
                 name: name, dataType: typeName, isNullable: name != "_id", isPrimaryKey: name == "_id",
-                defaultValue: nil, extra: nil, charset: nil, collation: nil, comment: nil
+                defaultValue: nil, extra: nil, charset: nil, collation: nil, comment: nil,
+                allowedValues: enumMap[name]
             )
         }
+    }
+
+    private func fetchJsonSchemaEnums(conn: MongoDBConnection, table: String) async throws -> [String: [String]] {
+        let escaped = escapeJsonString(table)
+        let result = try await conn.runCommand(
+            "{\"listCollections\": 1, \"filter\": {\"name\": \"\(escaped)\"}}",
+            database: currentDb
+        )
+        guard let firstDoc = result.first,
+              let cursor = firstDoc["cursor"] as? [String: Any],
+              let firstBatch = cursor["firstBatch"] as? [[String: Any]],
+              let collInfo = firstBatch.first,
+              let options = collInfo["options"] as? [String: Any],
+              let validator = options["validator"] as? [String: Any],
+              let jsonSchema = validator["$jsonSchema"] as? [String: Any],
+              let properties = jsonSchema["properties"] as? [String: Any]
+        else { return [:] }
+
+        var map: [String: [String]] = [:]
+        for (colName, spec) in properties {
+            guard let specDict = spec as? [String: Any] else { continue }
+            if let enumValues = extractStringEnum(specDict["enum"]) {
+                map[colName] = enumValues
+            }
+        }
+        return map
+    }
+
+    private func extractStringEnum(_ value: Any?) -> [String]? {
+        guard let array = value as? [Any], !array.isEmpty else { return nil }
+        guard array.allSatisfy({ $0 is String }) else { return nil }
+        let strings = array.compactMap { $0 as? String }
+        return strings.isEmpty ? nil : strings
     }
 
     func fetchAllColumns(schema: String?) async throws -> [String: [PluginColumnInfo]] {
@@ -253,6 +288,20 @@ final class MongoDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         }
 
         let count = try await conn.estimatedDocumentCount(database: currentDb, collection: table)
+        return Int(count)
+    }
+
+    func fetchFilteredRowCount(
+        table: String,
+        filters: [(column: String, op: String, value: String)],
+        logicMode: String
+    ) async throws -> Int? {
+        guard let conn = mongoConnection else {
+            throw MongoDBPluginError.notConnected
+        }
+
+        let filterJson = MongoDBQueryBuilder().buildFilterDocument(from: filters, logicMode: logicMode)
+        let count = try await conn.countDocuments(database: currentDb, collection: table, filter: filterJson)
         return Int(count)
     }
 
@@ -536,11 +585,12 @@ final class MongoDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     func generateStatements(
         table: String,
         columns: [String],
+        primaryKeyColumns: [String],
         changes: [PluginRowChange],
-        insertedRowData: [Int: [String?]],
+        insertedRowData: [Int: [PluginCellValue]],
         deletedRowIndices: Set<Int>,
         insertedRowIndices: Set<Int>
-    ) -> [(statement: String, parameters: [String?])]? {
+    ) -> [(statement: String, parameters: [PluginCellValue])]? {
         let generator = MongoDBStatementGenerator(collectionName: table, columns: columns)
         return generator.generateStatements(
             from: changes, insertedRowData: insertedRowData,
@@ -637,7 +687,7 @@ final class MongoDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             let count = try await conn.countDocuments(database: db, collection: collection, filter: filter)
             return PluginQueryResult(
                 columns: ["count"], columnTypeNames: ["Int64"],
-                rows: [[String(count)]], rowsAffected: 0,
+                rows: [[.text(String(count))]], rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
 
@@ -645,7 +695,7 @@ final class MongoDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             let insertedId = try await conn.insertOne(database: db, collection: collection, document: document)
             return PluginQueryResult(
                 columns: ["insertedId"], columnTypeNames: ["ObjectId"],
-                rows: [[insertedId ?? "null"]], rowsAffected: 1,
+                rows: [[.text(insertedId ?? "null")]], rowsAffected: 1,
                 executionTime: Date().timeIntervalSince(startTime)
             )
 
@@ -655,7 +705,7 @@ final class MongoDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             let inserted = (result.first?["n"] as? Int) ?? 0
             return PluginQueryResult(
                 columns: ["insertedCount"], columnTypeNames: ["Int32"],
-                rows: [[String(inserted)]], rowsAffected: inserted,
+                rows: [[.text(String(inserted))]], rowsAffected: inserted,
                 executionTime: Date().timeIntervalSince(startTime)
             )
 
@@ -663,7 +713,7 @@ final class MongoDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             let modified = try await conn.updateOne(database: db, collection: collection, filter: filter, update: update)
             return PluginQueryResult(
                 columns: ["modifiedCount"], columnTypeNames: ["Int64"],
-                rows: [[String(modified)]], rowsAffected: Int(modified),
+                rows: [[.text(String(modified))]], rowsAffected: Int(modified),
                 executionTime: Date().timeIntervalSince(startTime)
             )
 
@@ -677,7 +727,7 @@ final class MongoDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 ?? (result.first?["nModified"] as? Int).map(Int64.init) ?? 0
             return PluginQueryResult(
                 columns: ["modifiedCount"], columnTypeNames: ["Int64"],
-                rows: [[String(modified)]], rowsAffected: Int(modified),
+                rows: [[.text(String(modified))]], rowsAffected: Int(modified),
                 executionTime: Date().timeIntervalSince(startTime)
             )
 
@@ -691,7 +741,7 @@ final class MongoDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 ?? (result.first?["nModified"] as? Int).map(Int64.init) ?? 0
             return PluginQueryResult(
                 columns: ["modifiedCount"], columnTypeNames: ["Int64"],
-                rows: [[String(modified)]], rowsAffected: Int(modified),
+                rows: [[.text(String(modified))]], rowsAffected: Int(modified),
                 executionTime: Date().timeIntervalSince(startTime)
             )
 
@@ -699,7 +749,7 @@ final class MongoDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             let deleted = try await conn.deleteOne(database: db, collection: collection, filter: filter)
             return PluginQueryResult(
                 columns: ["deletedCount"], columnTypeNames: ["Int64"],
-                rows: [[String(deleted)]], rowsAffected: Int(deleted),
+                rows: [[.text(String(deleted))]], rowsAffected: Int(deleted),
                 executionTime: Date().timeIntervalSince(startTime)
             )
 
@@ -713,7 +763,7 @@ final class MongoDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 ?? (result.first?["n"] as? Int).map(Int64.init) ?? 0
             return PluginQueryResult(
                 columns: ["deletedCount"], columnTypeNames: ["Int64"],
-                rows: [[String(deleted)]], rowsAffected: Int(deleted),
+                rows: [[.text(String(deleted))]], rowsAffected: Int(deleted),
                 executionTime: Date().timeIntervalSince(startTime)
             )
 
@@ -767,7 +817,7 @@ final class MongoDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             let collections = try await conn.listCollections(database: db)
             return PluginQueryResult(
                 columns: ["collection"], columnTypeNames: ["String"],
-                rows: collections.map { [$0] }, rowsAffected: 0,
+                rows: collections.map { [.text($0)] }, rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
 
@@ -775,7 +825,7 @@ final class MongoDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             let databases = try await conn.listDatabases()
             return PluginQueryResult(
                 columns: ["database"], columnTypeNames: ["String"],
-                rows: databases.map { [$0] }, rowsAffected: 0,
+                rows: databases.map { [.text($0)] }, rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
 
@@ -858,7 +908,9 @@ final class MongoDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     }
 
     private func prettyJson(_ value: Any) -> String {
-        guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .prettyPrinted]),
+        let sanitized = BsonDocumentFlattener.sanitizeForJson(value)
+        guard JSONSerialization.isValidJSONObject(sanitized),
+              let data = try? JSONSerialization.data(withJSONObject: sanitized, options: [.sortedKeys, .prettyPrinted]),
               let json = String(data: data, encoding: .utf8) else {
             return String(describing: value)
         }

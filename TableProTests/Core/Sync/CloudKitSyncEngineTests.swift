@@ -11,10 +11,11 @@
 
 import CloudKit
 import Foundation
+import TableProPluginKit
 @testable import TablePro
 import Testing
 
-@Suite("CloudKitSyncEngine soft dependency")
+@Suite("CloudKitSyncEngine soft dependency", .disabled(if: CloudKitSyncEngine.hasICloudEntitlement(), "Test host has the iCloud entitlement"))
 struct CloudKitSyncEngineTests {
     private func skipIfEntitled() throws {
         try #require(!CloudKitSyncEngine.hasICloudEntitlement(), "Test host has the iCloud entitlement; skipping")

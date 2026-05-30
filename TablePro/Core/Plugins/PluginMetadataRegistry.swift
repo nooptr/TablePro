@@ -2,11 +2,6 @@
 //  PluginMetadataRegistry.swift
 //  TablePro
 //
-//  Thread-safe, non-actor metadata cache populated at compile time.
-//  All static plugin metadata is served from here, eliminating metatype
-//  dispatch on dynamically loaded bundles (which can crash due to
-//  missing witness table entries).
-//
 
 import Foundation
 import TableProPluginKit
@@ -59,6 +54,10 @@ struct PluginMetadataSnapshot: Sendable {
         var supportsAddIndex: Bool = true
         var supportsDropIndex: Bool = true
         var supportsModifyPrimaryKey: Bool = true
+        var defaultSSLMode: SSLMode = .disabled
+        var supportsOpportunisticTLS: Bool = true
+        var supportsCloudflareTunnel: Bool = true
+        var supportsClientKeyPassphrase: Bool = false
 
         static let defaults = CapabilityFlags(
             supportsSchemaSwitching: false,
@@ -78,7 +77,10 @@ struct PluginMetadataSnapshot: Sendable {
             supportsRenameColumn: false,
             supportsAddIndex: true,
             supportsDropIndex: true,
-            supportsModifyPrimaryKey: true
+            supportsModifyPrimaryKey: true,
+            defaultSSLMode: .disabled,
+            supportsOpportunisticTLS: true,
+            supportsCloudflareTunnel: true
         )
     }
 
@@ -153,6 +155,23 @@ struct PluginMetadataSnapshot: Sendable {
             supportsSchemaEditing: supportsSchemaEditing, isDownloadable: isDownloadable,
             primaryUrlScheme: primaryUrlScheme, parameterStyle: parameterStyle,
             navigationModel: navigationModel, explainVariants: explainVariants,
+            pathFieldRole: pathFieldRole, supportsHealthMonitor: supportsHealthMonitor,
+            urlSchemes: urlSchemes, postConnectActions: postConnectActions,
+            brandColorHex: brandColorHex, queryLanguageName: queryLanguageName,
+            editorLanguage: editorLanguage, connectionMode: connectionMode,
+            supportsDatabaseSwitching: supportsDatabaseSwitching,
+            supportsColumnReorder: supportsColumnReorder,
+            capabilities: capabilities, schema: schema, editor: editor, connection: connection
+        )
+    }
+
+    func withExplainVariants(_ newExplainVariants: [ExplainVariant]) -> PluginMetadataSnapshot {
+        PluginMetadataSnapshot(
+            displayName: displayName, iconName: iconName, defaultPort: defaultPort,
+            requiresAuthentication: requiresAuthentication, supportsForeignKeys: supportsForeignKeys,
+            supportsSchemaEditing: supportsSchemaEditing, isDownloadable: isDownloadable,
+            primaryUrlScheme: primaryUrlScheme, parameterStyle: parameterStyle,
+            navigationModel: navigationModel, explainVariants: newExplainVariants,
             pathFieldRole: pathFieldRole, supportsHealthMonitor: supportsHealthMonitor,
             urlSchemes: urlSchemes, postConnectActions: postConnectActions,
             brandColorHex: brandColorHex, queryLanguageName: queryLanguageName,
@@ -394,6 +413,67 @@ final class PluginMetadataRegistry: @unchecked Sendable {
             hidesPassword: true
         )
 
+        let connectionOptionsField = ConnectionField(
+            id: "connectionOptions",
+            label: String(localized: "Connection Options"),
+            placeholder: "--cluster=my-cluster",
+            fieldType: .text,
+            section: .advanced
+        )
+
+        let awsIAMFields: [ConnectionField] = [
+            ConnectionField(
+                id: "awsAuth",
+                label: String(localized: "Authentication"),
+                defaultValue: "off",
+                fieldType: .dropdown(options: [
+                    .init(value: "off", label: String(localized: "Password")),
+                    .init(value: "accessKey", label: String(localized: "AWS IAM (Access Key)")),
+                    .init(value: "profile", label: String(localized: "AWS IAM (Profile)")),
+                    .init(value: "sso", label: String(localized: "AWS IAM (SSO)"))
+                ]),
+                section: .authentication,
+                hidesPassword: true
+            ),
+            ConnectionField(
+                id: "awsRegion",
+                label: String(localized: "AWS Region"),
+                placeholder: "us-east-1",
+                section: .authentication,
+                visibleWhen: FieldVisibilityRule(fieldId: "awsAuth", values: ["accessKey", "profile", "sso"])
+            ),
+            ConnectionField(
+                id: "awsAccessKeyId",
+                label: String(localized: "Access Key ID"),
+                placeholder: "AKIA...",
+                section: .authentication,
+                visibleWhen: FieldVisibilityRule(fieldId: "awsAuth", values: ["accessKey"])
+            ),
+            ConnectionField(
+                id: "awsSecretAccessKey",
+                label: String(localized: "Secret Access Key"),
+                placeholder: "wJalr...",
+                fieldType: .secure,
+                section: .authentication,
+                visibleWhen: FieldVisibilityRule(fieldId: "awsAuth", values: ["accessKey"])
+            ),
+            ConnectionField(
+                id: "awsSessionToken",
+                label: String(localized: "Session Token"),
+                placeholder: String(localized: "Optional, for temporary credentials"),
+                fieldType: .secure,
+                section: .authentication,
+                visibleWhen: FieldVisibilityRule(fieldId: "awsAuth", values: ["accessKey"])
+            ),
+            ConnectionField(
+                id: "awsProfileName",
+                label: String(localized: "Profile Name"),
+                placeholder: "default",
+                section: .authentication,
+                visibleWhen: FieldVisibilityRule(fieldId: "awsAuth", values: ["profile", "sso"])
+            )
+        ]
+
         let defaults: [(typeId: String, snapshot: PluginMetadataSnapshot)] = [
             ("MySQL", PluginMetadataSnapshot(
                 displayName: "MySQL", iconName: "mysql-icon", defaultPort: 3_306,
@@ -417,7 +497,8 @@ final class PluginMetadataRegistry: @unchecked Sendable {
                     supportsQueryProgress: false,
                     requiresReconnectForDatabaseSwitch: false,
                     supportsDropDatabase: true,
-                    supportsRenameColumn: true
+                    supportsRenameColumn: true,
+                    defaultSSLMode: .preferred
                 ),
                 schema: PluginMetadataSnapshot.SchemaInfo(
                     defaultSchemaName: "public",
@@ -437,6 +518,7 @@ final class PluginMetadataRegistry: @unchecked Sendable {
                     columnTypesByCategory: mysqlColumnTypes
                 ),
                 connection: PluginMetadataSnapshot.ConnectionConfig(
+                    additionalConnectionFields: awsIAMFields,
                     category: .relational,
                     tagline: String(localized: "Most popular open-source SQL database")
                 )
@@ -463,7 +545,8 @@ final class PluginMetadataRegistry: @unchecked Sendable {
                     supportsQueryProgress: false,
                     requiresReconnectForDatabaseSwitch: false,
                     supportsDropDatabase: true,
-                    supportsRenameColumn: true
+                    supportsRenameColumn: true,
+                    defaultSSLMode: .preferred
                 ),
                 schema: PluginMetadataSnapshot.SchemaInfo(
                     defaultSchemaName: "public",
@@ -483,6 +566,7 @@ final class PluginMetadataRegistry: @unchecked Sendable {
                     columnTypesByCategory: mysqlColumnTypes
                 ),
                 connection: PluginMetadataSnapshot.ConnectionConfig(
+                    additionalConnectionFields: awsIAMFields,
                     category: .relational,
                     tagline: String(localized: "Open-source fork of MySQL")
                 )
@@ -510,7 +594,8 @@ final class PluginMetadataRegistry: @unchecked Sendable {
                     supportsQueryProgress: false,
                     requiresReconnectForDatabaseSwitch: true,
                     supportsDropDatabase: true,
-                    supportsRenameColumn: true
+                    supportsRenameColumn: true,
+                    defaultSSLMode: .preferred
                 ),
                 schema: PluginMetadataSnapshot.SchemaInfo(
                     defaultSchemaName: "public",
@@ -530,7 +615,7 @@ final class PluginMetadataRegistry: @unchecked Sendable {
                     columnTypesByCategory: postgresqlColumnTypes
                 ),
                 connection: PluginMetadataSnapshot.ConnectionConfig(
-                    additionalConnectionFields: [pgpassField],
+                    additionalConnectionFields: [pgpassField, connectionOptionsField] + awsIAMFields,
                     category: .relational,
                     tagline: String(localized: "Advanced object-relational SQL")
                 )
@@ -557,7 +642,8 @@ final class PluginMetadataRegistry: @unchecked Sendable {
                     supportsReadOnlyMode: true,
                     supportsQueryProgress: false,
                     requiresReconnectForDatabaseSwitch: true,
-                    supportsDropDatabase: true
+                    supportsDropDatabase: true,
+                    defaultSSLMode: .preferred
                 ),
                 schema: PluginMetadataSnapshot.SchemaInfo(
                     defaultSchemaName: "public",
@@ -577,9 +663,69 @@ final class PluginMetadataRegistry: @unchecked Sendable {
                     columnTypesByCategory: postgresqlColumnTypes
                 ),
                 connection: PluginMetadataSnapshot.ConnectionConfig(
-                    additionalConnectionFields: [pgpassField],
+                    additionalConnectionFields: [pgpassField, connectionOptionsField],
                     category: .analytical,
                     tagline: String(localized: "Amazon's columnar warehouse on Postgres")
+                )
+            )),
+            ("CockroachDB", PluginMetadataSnapshot(
+                displayName: "CockroachDB", iconName: "cockroachdb-icon", defaultPort: 26_257,
+                requiresAuthentication: true, supportsForeignKeys: true, supportsSchemaEditing: false,
+                isDownloadable: false, primaryUrlScheme: "cockroachdb", parameterStyle: .dollar,
+                navigationModel: .standard,
+                explainVariants: [
+                    ExplainVariant(id: "explain", label: "EXPLAIN", sqlPrefix: "EXPLAIN"),
+                    ExplainVariant(id: "analyze", label: "EXPLAIN ANALYZE", sqlPrefix: "EXPLAIN ANALYZE"),
+                ],
+                pathFieldRole: .database,
+                supportsHealthMonitor: true, urlSchemes: ["cockroachdb", "cockroach"],
+                postConnectActions: [.selectSchemaFromLastSession],
+                brandColorHex: "#6933FF",
+                queryLanguageName: "SQL", editorLanguage: .sql,
+                connectionMode: .network, supportsDatabaseSwitching: true,
+                supportsColumnReorder: false,
+                capabilities: PluginMetadataSnapshot.CapabilityFlags(
+                    supportsSchemaSwitching: true,
+                    supportsImport: true,
+                    supportsExport: true,
+                    supportsSSH: true,
+                    supportsSSL: true,
+                    supportsCascadeDrop: true,
+                    supportsForeignKeyDisable: false,
+                    supportsReadOnlyMode: true,
+                    supportsQueryProgress: false,
+                    requiresReconnectForDatabaseSwitch: true,
+                    supportsDropDatabase: true,
+                    supportsAddColumn: false,
+                    supportsModifyColumn: false,
+                    supportsDropColumn: false,
+                    supportsRenameColumn: false,
+                    supportsAddIndex: false,
+                    supportsDropIndex: false,
+                    supportsModifyPrimaryKey: false,
+                    defaultSSLMode: .preferred
+                ),
+                schema: PluginMetadataSnapshot.SchemaInfo(
+                    defaultSchemaName: "public",
+                    defaultGroupName: "main",
+                    tableEntityName: "Tables",
+                    defaultPrimaryKeyColumn: nil,
+                    immutableColumns: [],
+                    systemDatabaseNames: ["postgres", "system", "defaultdb"],
+                    systemSchemaNames: [],
+                    fileExtensions: [],
+                    databaseGroupingStrategy: .bySchema,
+                    structureColumnFields: [.name, .type, .nullable, .defaultValue, .autoIncrement, .comment]
+                ),
+                editor: PluginMetadataSnapshot.EditorConfig(
+                    sqlDialect: postgresqlDialect,
+                    statementCompletions: [],
+                    columnTypesByCategory: postgresqlColumnTypes
+                ),
+                connection: PluginMetadataSnapshot.ConnectionConfig(
+                    additionalConnectionFields: [pgpassField, connectionOptionsField],
+                    category: .relational,
+                    tagline: String(localized: "Distributed SQL, PostgreSQL-compatible")
                 )
             )),
             ("SQLite", PluginMetadataSnapshot(
@@ -606,7 +752,8 @@ final class PluginMetadataRegistry: @unchecked Sendable {
                     supportsDropDatabase: false,
                     supportsModifyColumn: false,
                     supportsRenameColumn: true,
-                    supportsModifyPrimaryKey: false
+                    supportsModifyPrimaryKey: false,
+                    supportsCloudflareTunnel: false
                 ),
                 schema: PluginMetadataSnapshot.SchemaInfo(
                     defaultSchemaName: "public",
@@ -616,7 +763,7 @@ final class PluginMetadataRegistry: @unchecked Sendable {
                     immutableColumns: [],
                     systemDatabaseNames: [],
                     systemSchemaNames: [],
-                    fileExtensions: ["db", "sqlite", "sqlite3"],
+                    fileExtensions: ["db", "db3", "s3db", "sl3", "sqlite", "sqlite3", "sqlitedb"],
                     databaseGroupingStrategy: .flat,
                     structureColumnFields: [.name, .type, .nullable, .defaultValue, .autoIncrement, .comment]
                 ),
@@ -641,9 +788,9 @@ final class PluginMetadataRegistry: @unchecked Sendable {
             }
         }
 
-        // Built-in type aliases: multi-type plugins where an alias maps to a primary plugin type ID
         reverseTypeIndex["MariaDB"] = "MySQL"
         reverseTypeIndex["Redshift"] = "PostgreSQL"
+        reverseTypeIndex["CockroachDB"] = "PostgreSQL"
         reverseTypeIndex["ScyllaDB"] = "Cassandra"
         reverseTypeIndex["Turso"] = "libSQL"
     }
@@ -789,7 +936,11 @@ final class PluginMetadataRegistry: @unchecked Sendable {
                 supportsRenameColumn: driverType.supportsRenameColumn,
                 supportsAddIndex: driverType.supportsAddIndex,
                 supportsDropIndex: driverType.supportsDropIndex,
-                supportsModifyPrimaryKey: driverType.supportsModifyPrimaryKey
+                supportsModifyPrimaryKey: driverType.supportsModifyPrimaryKey,
+                defaultSSLMode: existingSnapshot?.capabilities.defaultSSLMode ?? .disabled,
+                supportsOpportunisticTLS: existingSnapshot?.capabilities.supportsOpportunisticTLS ?? true,
+                supportsCloudflareTunnel: driverType.supportsSSH,
+                supportsClientKeyPassphrase: existingSnapshot?.capabilities.supportsClientKeyPassphrase ?? false
             ),
             schema: PluginMetadataSnapshot.SchemaInfo(
                 defaultSchemaName: driverType.defaultSchemaName,

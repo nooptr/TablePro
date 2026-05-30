@@ -53,6 +53,7 @@ extension DatabaseManager {
                 guard let self else { return false }
                 guard let session = await self.activeSessions[connectionId] else { return false }
                 await SchemaService.shared.invalidate(connectionId: connectionId)
+                await DatabaseTreeMetadataService.shared.handleReconnect(connectionId: connectionId)
                 do {
                     let result = try await self.trackOperation(sessionId: connectionId) {
                         try await self.reconnectDriver(for: session)
@@ -111,9 +112,9 @@ extension DatabaseManager {
         // Disconnect existing driver
         session.driver?.disconnect()
 
-        // Rebuild SSH tunnel if needed; otherwise reuse effective connection
+        // Rebuild the tunnel if needed; otherwise reuse effective connection
         let connectionForDriver: DatabaseConnection
-        if session.connection.resolvedSSHConfig.enabled {
+        if session.connection.resolvedSSHConfig.enabled || session.connection.isCloudflareEnabled {
             connectionForDriver = try await buildEffectiveConnection(for: session.connection)
         } else {
             connectionForDriver = session.effectiveConnection ?? session.connection
@@ -136,19 +137,23 @@ extension DatabaseManager {
                     Self.logger.warning("Failed to close SSH tunnel during reconnect: \(error.localizedDescription)")
                 }
             }
+            if session.connection.isCloudflareEnabled {
+                do {
+                    try await CloudflareTunnelManager.shared.closeTunnel(connectionId: session.connection.id)
+                } catch {
+                    Self.logger.warning("Failed to close Cloudflare tunnel during reconnect: \(error.localizedDescription)")
+                }
+            }
             throw error
         }
 
-        // Apply timeout (best-effort)
         let timeoutSeconds = AppSettingsManager.shared.general.queryTimeoutSeconds
-        if timeoutSeconds > 0 {
-            do {
-                try await driver.applyQueryTimeout(timeoutSeconds)
-            } catch {
-                Self.logger.warning(
-                    "Query timeout not supported for \(session.connection.name): \(error.localizedDescription)"
-                )
-            }
+        do {
+            try await driver.applyQueryTimeout(timeoutSeconds)
+        } catch {
+            Self.logger.warning(
+                "Query timeout not supported for \(session.connection.name): \(error.localizedDescription)"
+            )
         }
 
         await executeStartupCommands(
@@ -203,6 +208,7 @@ extension DatabaseManager {
         }
 
         await SchemaService.shared.invalidate(connectionId: sessionId)
+        await DatabaseTreeMetadataService.shared.handleReconnect(connectionId: sessionId)
 
         // Stop existing health monitor
         await stopHealthMonitor(for: sessionId)
@@ -237,16 +243,13 @@ extension DatabaseManager {
             )
             try await driver.connect()
 
-            // Apply timeout (best-effort)
             let timeoutSeconds = AppSettingsManager.shared.general.queryTimeoutSeconds
-            if timeoutSeconds > 0 {
-                do {
-                    try await driver.applyQueryTimeout(timeoutSeconds)
-                } catch {
-                    Self.logger.warning(
-                        "Query timeout not supported for \(session.connection.name): \(error.localizedDescription)"
-                    )
-                }
+            do {
+                try await driver.applyQueryTimeout(timeoutSeconds)
+            } catch {
+                Self.logger.warning(
+                    "Query timeout not supported for \(session.connection.name): \(error.localizedDescription)"
+                )
             }
 
             await executeStartupCommands(
@@ -277,7 +280,7 @@ extension DatabaseManager {
                 session.driver = driver
                 session.status = .connected
                 session.effectiveConnection = effectiveConnection
-                if let passwordOverride {
+                if let passwordOverride, !session.connection.usesAWSIAM {
                     session.cachedPassword = passwordOverride
                 }
             }

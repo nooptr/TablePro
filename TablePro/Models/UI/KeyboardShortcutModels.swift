@@ -47,23 +47,26 @@ enum ShortcutAction: String, Codable, CaseIterable, Identifiable {
     case closeTab
     case refresh
     case executeQuery
+    case executeAllStatements
+    case cancelQuery
     case explainQuery
     case formatQuery
     case export
     case importData
     case quickSwitcher
 
-    case openTerminal
-
     // Navigation
     case previousPage
     case nextPage
+    case firstPage
+    case lastPage
 
     // Edit
     case undo
     case redo
     case cut
     case copy
+    case copyRowsExplicit
     case copyWithHeaders
     case copyAsJson
     case paste
@@ -85,6 +88,9 @@ enum ShortcutAction: String, Codable, CaseIterable, Identifiable {
     case previousResultTab
     case nextResultTab
     case closeResultTab
+    case focusSidebarSearch
+    case showSidebarTables
+    case showSidebarFavorites
 
     // Tabs
     case showPreviousTab
@@ -100,15 +106,17 @@ enum ShortcutAction: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .manageConnections, .newTab, .openDatabase, .openFile, .switchConnection,
              .saveChanges, .saveAs, .previewSQL, .closeTab, .refresh,
-             .executeQuery, .explainQuery, .formatQuery, .export, .importData, .quickSwitcher,
-             .previousPage, .nextPage, .saveAsFavorite, .openTerminal:
+             .executeQuery, .executeAllStatements, .cancelQuery, .explainQuery, .formatQuery,
+             .export, .importData, .quickSwitcher,
+             .previousPage, .nextPage, .firstPage, .lastPage, .saveAsFavorite:
             return .file
-        case .undo, .redo, .cut, .copy, .copyWithHeaders, .copyAsJson, .paste,
+        case .undo, .redo, .cut, .copy, .copyRowsExplicit, .copyWithHeaders, .copyAsJson, .paste,
              .delete, .selectAll, .clearSelection, .addRow,
              .duplicateRow, .truncateTable, .previewFKReference:
             return .edit
         case .toggleTableBrowser, .toggleInspector, .toggleFilters, .toggleHistory,
-             .toggleResults, .previousResultTab, .nextResultTab, .closeResultTab:
+             .toggleResults, .previousResultTab, .nextResultTab, .closeResultTab,
+             .focusSidebarSearch, .showSidebarTables, .showSidebarFavorites:
             return .view
         case .showPreviousTab, .showNextTab:
             return .tabs
@@ -117,10 +125,21 @@ enum ShortcutAction: String, Codable, CaseIterable, Identifiable {
         }
     }
 
+    var allowsBareKey: Bool {
+        switch self {
+        case .previewFKReference, .clearSelection, .delete:
+            return true
+        default:
+            return false
+        }
+    }
+
     var displayName: String {
         switch self {
         case .manageConnections: return String(localized: "Manage Connections")
         case .executeQuery: return String(localized: "Execute Query")
+        case .executeAllStatements: return String(localized: "Execute All Statements")
+        case .cancelQuery: return String(localized: "Cancel Query")
         case .newTab: return String(localized: "New Tab")
         case .openDatabase: return String(localized: "Open Database")
         case .openFile: return String(localized: "Open File")
@@ -135,13 +154,15 @@ enum ShortcutAction: String, Codable, CaseIterable, Identifiable {
         case .export: return String(localized: "Export")
         case .importData: return String(localized: "Import")
         case .quickSwitcher: return String(localized: "Quick Switcher")
-        case .openTerminal: return String(localized: "Open Terminal")
         case .previousPage: return String(localized: "Previous Page")
         case .nextPage: return String(localized: "Next Page")
+        case .firstPage: return String(localized: "First Page")
+        case .lastPage: return String(localized: "Last Page")
         case .undo: return String(localized: "Undo")
         case .redo: return String(localized: "Redo")
         case .cut: return String(localized: "Cut")
         case .copy: return String(localized: "Copy")
+        case .copyRowsExplicit: return String(localized: "Copy Rows")
         case .copyWithHeaders: return String(localized: "Copy with Headers")
         case .copyAsJson: return String(localized: "Copy as JSON")
         case .paste: return String(localized: "Paste")
@@ -161,6 +182,9 @@ enum ShortcutAction: String, Codable, CaseIterable, Identifiable {
         case .previousResultTab: return String(localized: "Previous Result")
         case .nextResultTab: return String(localized: "Next Result")
         case .closeResultTab: return String(localized: "Close Result Tab")
+        case .focusSidebarSearch: return String(localized: "Focus Sidebar Filter")
+        case .showSidebarTables: return String(localized: "Show Tables Sidebar")
+        case .showSidebarFavorites: return String(localized: "Show Favorites Sidebar")
         case .showPreviousTab: return String(localized: "Show Previous Tab")
         case .showNextTab: return String(localized: "Show Next Tab")
         case .aiExplainQuery: return String(localized: "Explain with AI")
@@ -278,6 +302,10 @@ struct KeyCombo: Codable, Equatable, Hashable {
         if option { modifiers.insert(.option) }
         if control { modifiers.insert(.control) }
         return modifiers
+    }
+
+    var hasModifier: Bool {
+        command || shift || option || control
     }
 
     /// Human-readable display string (e.g. "⌘S", "⇧⌘P")
@@ -443,6 +471,19 @@ struct KeyboardSettings: Codable, Equatable {
         shortcuts.removeValue(forKey: action.rawValue)
     }
 
+    /// Drop overrides that can never dispatch (bare keys on menu-driven actions),
+    /// reverting them to their default. Cleared and unknown overrides are kept.
+    func sanitized() -> KeyboardSettings {
+        var cleaned = shortcuts
+        for (rawValue, combo) in shortcuts {
+            guard let action = ShortcutAction(rawValue: rawValue), !combo.isCleared else { continue }
+            if !combo.hasModifier, !action.allowsBareKey {
+                cleaned.removeValue(forKey: rawValue)
+            }
+        }
+        return KeyboardSettings(shortcuts: cleaned)
+    }
+
     /// Build a SwiftUI KeyboardShortcut for the given action.
     /// Returns nil if the user has cleared (unassigned) the shortcut.
     func keyboardShortcut(for action: ShortcutAction) -> KeyboardShortcut? {
@@ -459,6 +500,8 @@ struct KeyboardSettings: Codable, Equatable {
         // File
         .manageConnections: KeyCombo(key: "n", command: true),
         .executeQuery: KeyCombo(key: "return", command: true, isSpecialKey: true),
+        .executeAllStatements: KeyCombo(key: "return", command: true, shift: true, isSpecialKey: true),
+        .cancelQuery: KeyCombo(key: ".", command: true),
         .newTab: KeyCombo(key: "t", command: true),
         .openDatabase: KeyCombo(key: "k", command: true),
         .openFile: KeyCombo(key: "o", command: true),
@@ -473,7 +516,6 @@ struct KeyboardSettings: Codable, Equatable {
         .export: KeyCombo(key: "e", command: true, shift: true),
         .importData: KeyCombo(key: "i", command: true, shift: true),
         .quickSwitcher: KeyCombo(key: "o", command: true, shift: true),
-        .openTerminal: KeyCombo(key: "`", command: true, control: true),
         .previousPage: KeyCombo(key: "[", command: true),
         .nextPage: KeyCombo(key: "]", command: true),
 
@@ -482,7 +524,8 @@ struct KeyboardSettings: Codable, Equatable {
         .redo: KeyCombo(key: "z", command: true, shift: true),
         .cut: KeyCombo(key: "x", command: true),
         .copy: KeyCombo(key: "c", command: true),
-        .copyWithHeaders: KeyCombo(key: "c", command: true, shift: true),
+        .copyRowsExplicit: KeyCombo(key: "c", command: true, shift: true),
+        .copyWithHeaders: KeyCombo(key: "c", command: true, option: true),
         .copyAsJson: KeyCombo(key: "j", command: true, option: true),
         .paste: KeyCombo(key: "v", command: true),
         .delete: KeyCombo(key: "delete", command: true, isSpecialKey: true),
@@ -492,17 +535,20 @@ struct KeyboardSettings: Codable, Equatable {
         .duplicateRow: KeyCombo(key: "d", command: true, shift: true),
         .truncateTable: KeyCombo(key: "delete", option: true, isSpecialKey: true),
         .previewFKReference: KeyCombo(key: "space", isSpecialKey: true),
-        .saveAsFavorite: KeyCombo(key: "d", command: true),
+        .saveAsFavorite: KeyCombo(key: "d", command: true, control: true),
 
         // View
         .toggleTableBrowser: KeyCombo(key: "0", command: true),
         .toggleInspector: KeyCombo(key: "i", command: true, option: true),
-        .toggleFilters: KeyCombo(key: "f", command: true, shift: true),
+        .toggleFilters: KeyCombo(key: "f", command: true),
         .toggleHistory: KeyCombo(key: "y", command: true),
         .toggleResults: KeyCombo(key: "r", command: true, option: true),
         .previousResultTab: KeyCombo(key: "[", command: true, option: true),
         .nextResultTab: KeyCombo(key: "]", command: true, option: true),
         .closeResultTab: KeyCombo(key: "w", command: true, shift: true),
+        .focusSidebarSearch: KeyCombo(key: "f", command: true, option: true),
+        .showSidebarTables: KeyCombo(key: "1", control: true),
+        .showSidebarFavorites: KeyCombo(key: "2", control: true),
 
         // Tabs
         .showPreviousTab: KeyCombo(key: "[", command: true, shift: true),

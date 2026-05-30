@@ -110,7 +110,8 @@ final class SQLEditorCoordinator: TextViewCoordinator, TextViewDelegate {
                 // Auto-focus: make the editor first responder, then ensure a
                 // cursor exists. Order matters — setCursorPositions calls
                 // updateSelectionViews which guards on isFirstResponder.
-                if let window = textView.window {
+                if !self.isDestroyed, let window = textView.window,
+                   window.firstResponder == nil || window.firstResponder === window {
                     window.makeFirstResponder(textView)
                 }
                 if controller.cursorPositions.isEmpty {
@@ -398,6 +399,15 @@ final class SQLEditorCoordinator: TextViewCoordinator, TextViewDelegate {
         } else if !enabled && vimKeyInterceptor != nil {
             uninstallVimKeyInterceptor()
         }
+    }
+
+    // MARK: - Vim External Escape Routing
+
+    /// Called by the menu's "Clear Selection" (Esc) shortcut so a SwiftUI key
+    /// equivalent that preempts the local event monitor still flips Vim back to
+    /// normal mode instead of getting silently swallowed.
+    func handleVimEscapeFromMenu() -> Bool {
+        vimKeyInterceptor?.handleEscapeFromExternalSource() ?? false
     }
 
     // MARK: - First Responder Tracking

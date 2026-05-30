@@ -69,12 +69,16 @@ final class DataTabGridDelegate: DataGridViewDelegate {
         AppCommands.shared.exportQueryResults.send(())
     }
 
-    func dataGridUndo() {}
+    func dataGridClearResults() {
+        coordinator?.clearActiveQueryResults()
+    }
 
-    func dataGridRedo() {}
+    func dataGridCanClearResults() -> Bool {
+        coordinator?.canClearActiveQueryResults ?? false
+    }
 
-    func dataGridNavigateFK(value: String, fkInfo: ForeignKeyInfo) {
-        coordinator?.navigateToFKReference(value: value, fkInfo: fkInfo)
+    func dataGridNavigateFK(value: String, fkInfo: ForeignKeyInfo, openInNewTab: Bool) {
+        coordinator?.navigateToFKReference(value: value, fkInfo: fkInfo, openInNewTab: openInNewTab)
     }
 
     func dataGridHideColumn(_ columnName: String) {

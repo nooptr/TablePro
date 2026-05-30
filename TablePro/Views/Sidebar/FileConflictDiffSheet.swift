@@ -76,12 +76,12 @@ internal struct FileConflictDiffSheet: View {
     private func tint(for kind: DiffPair.Kind, side: Side) -> Color? {
         switch (kind, side) {
         case (.unchanged, _): return nil
-        case (.removed, .mine): return Color(nsColor: .systemRed).opacity(0.18)
+        case (.removed, .mine): return .red.opacity(0.18)
         case (.removed, .disk): return Color.gray.opacity(0.06)
         case (.added, .mine): return Color.gray.opacity(0.06)
-        case (.added, .disk): return Color(nsColor: .systemGreen).opacity(0.18)
-        case (.changed, .mine): return Color(nsColor: .systemRed).opacity(0.18)
-        case (.changed, .disk): return Color(nsColor: .systemGreen).opacity(0.18)
+        case (.added, .disk): return .green.opacity(0.18)
+        case (.changed, .mine): return .red.opacity(0.18)
+        case (.changed, .disk): return .green.opacity(0.18)
         }
     }
 
@@ -136,7 +136,7 @@ private struct DiffColumnView: View {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
                         HStack(alignment: .top, spacing: 8) {
-                            Text("\(index + 1)")
+                            Text(verbatim: "\(index + 1)")
                                 .font(.system(.caption2, design: .monospaced))
                                 .foregroundStyle(.tertiary)
                                 .frame(width: 32, alignment: .trailing)

@@ -14,6 +14,7 @@ import Observation
 import os
 import SwiftUI
 import TableProPluginKit
+import UniformTypeIdentifiers
 
 /// Provides command actions for MainContentView, accessible via @FocusedValue
 @MainActor
@@ -157,39 +158,31 @@ final class MainContentCommandActions {
         setupFileOpenObservers()
     }
 
-    /// Observers for notifications still posted by non-menu views (DataGrid, SidebarView,
-    /// context menus, QueryEditorView, ConnectionStatusView). These bridge AppKit/non-menu
-    /// notification posts to the same command action methods used by @FocusedValue callers.
     private func setupNonMenuNotificationObservers() {
-        observeKeyWindowOnly(AppCommands.shared.addNewRow) { [weak self] _ in self?.addNewRow() }
-
-        observeKeyWindowOnly(AppCommands.shared.deleteSelectedRows) { [weak self] _ in
-            self?.deleteSelectedRows()
-        }
-
-        observeKeyWindowOnly(AppCommands.shared.duplicateRow) { [weak self] _ in self?.duplicateRow() }
-
         observeKeyWindowOnly(AppCommands.shared.exportQueryResults) { [weak self] _ in self?.exportQueryResults() }
-
-        observeKeyWindowOnly(AppCommands.shared.copySelectedRows) { [weak self] _ in
-            guard let self else { return }
-            let indices = self.selectionState.indices
-            self.coordinator?.copySelectedRowsToClipboard(indices: indices)
-        }
-
-        observeKeyWindowOnly(AppCommands.shared.pasteRows) { [weak self] _ in
-            self?.coordinator?.pasteRows()
-        }
     }
 
     // MARK: - Row Operations (Group A — Called Directly)
 
     func addNewRow() {
-        coordinator?.addNewRow()
+        // The structure tab routes through StructureGridDelegate, which inserts
+        // a column / index / FK row depending on the active Structure sub-tab.
+        // The data tab routes through MainContentCoordinator.addNewRow which
+        // calls RowEditingCoordinator.addNewRow (data-only).
+        if coordinator?.tabManager.selectedTab?.display.resultsViewMode == .structure {
+            coordinator?.structureActions?.addRow?()
+        } else {
+            coordinator?.addNewRow()
+        }
     }
 
     func deleteSelectedRows(rowIndices: Set<Int>? = nil) {
         let fromDataGrid = rowIndices != nil
+
+        if coordinator?.tabManager.selectedTab?.display.resultsViewMode == .structure {
+            coordinator?.structureActions?.removeRow?()
+            return
+        }
 
         let indices = rowIndices ?? selectionState.indices
         if !indices.isEmpty {
@@ -252,7 +245,7 @@ final class MainContentCommandActions {
     var isConnected: Bool { coordinator != nil }
     var isQueryExecuting: Bool { coordinator?.toolbarState.isExecuting ?? false }
 
-    var safeModeLevel: SafeModeLevel { connection.safeModeLevel }
+    var safeModeLevel: SafeModeLevel { coordinator?.toolbarState.safeModeLevel ?? connection.safeModeLevel }
 
     var isReadOnly: Bool { safeModeLevel.blocksAllWrites }
 
@@ -264,6 +257,18 @@ final class MainContentCommandActions {
 
     var supportsDatabaseSwitching: Bool {
         PluginManager.shared.supportsDatabaseSwitching(for: connection.type)
+    }
+
+    var canSwitchSidebarLayout: Bool {
+        PluginManager.shared.supportsDatabaseTree(for: connection.type)
+    }
+
+    var sidebarLayout: SidebarLayout {
+        SharedSidebarState.forConnection(connection.id).sidebarLayout
+    }
+
+    func setSidebarLayout(_ layout: SidebarLayout) {
+        SharedSidebarState.forConnection(connection.id).sidebarLayout = layout
     }
 
     var isCurrentTabEditable: Bool {
@@ -540,10 +545,6 @@ final class MainContentCommandActions {
         coordinator?.showServerDashboard()
     }
 
-    func openTerminal() {
-        coordinator?.openTerminal()
-    }
-
     var supportsServerDashboard: Bool {
         guard let type = coordinator?.connection.type else { return false }
         return ServerDashboardQueryProviderFactory.provider(for: type) != nil
@@ -680,6 +681,49 @@ final class MainContentCommandActions {
         coordinator?.openImportDialog()
     }
 
+    func backupDatabase() {
+        coordinator?.activeSheet = .backupDatabase
+    }
+
+    var supportsBackup: Bool {
+        connection.type == .postgresql || connection.type == .redshift
+    }
+
+    var supportsRestore: Bool { supportsBackup }
+
+    func restoreDatabase() {
+        Task { @MainActor [weak self] in
+            await self?.presentRestoreSourcePicker()
+        }
+    }
+
+    private func presentRestoreSourcePicker() async {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = Self.restoreSourceContentTypes
+        panel.title = String(localized: "Choose Dump File")
+        panel.prompt = String(localized: "Choose")
+        panel.message = String(localized: "Select a dump file produced by pg_dump in custom archive format.")
+
+        let response: NSApplication.ModalResponse
+        if let window = NSApp.keyWindow {
+            response = await panel.beginSheetModal(for: window)
+        } else {
+            response = panel.runModal()
+        }
+        guard response == .OK, let url = panel.url else { return }
+        coordinator?.activeSheet = .restoreDatabase(fileURL: url)
+    }
+
+    private static var restoreSourceContentTypes: [UTType] {
+        if let dumpType = UTType(filenameExtension: "dump") {
+            return [dumpType, .data]
+        }
+        return [.data]
+    }
+
     func saveAsFavorite() {
         coordinator?.saveCurrentQueryAsFavorite()
     }
@@ -739,6 +783,30 @@ final class MainContentCommandActions {
         coordinator?.inspectorProxy?.toggleInspector()
     }
 
+    func goToPreviousPage() {
+        coordinator?.goToPreviousPage()
+    }
+
+    func goToNextPage() {
+        coordinator?.goToNextPage()
+    }
+
+    func goToFirstPage() {
+        coordinator?.goToFirstPage()
+    }
+
+    func goToLastPage() {
+        coordinator?.goToLastPage()
+    }
+
+    func focusSidebarSearch() {
+        coordinator?.splitViewController?.focusSidebarSearch()
+    }
+
+    func showSidebarTab(_ tab: SidebarTab) {
+        coordinator?.splitViewController?.setSidebarTab(tab)
+    }
+
     func toggleResults() {
         guard let coordinator,
               let (_, tabIndex) = coordinator.tabManager.selectedTabAndIndex else { return }
@@ -776,7 +844,11 @@ final class MainContentCommandActions {
     // MARK: - Database Operations (Group A — Called Directly)
 
     func openDatabaseSwitcher() {
-        coordinator?.activeSheet = .databaseSwitcher
+        guard let coordinator else { return }
+        let type = coordinator.connection.type
+        guard PluginManager.shared.supportsDatabaseSwitching(for: type) else { return }
+        guard PluginManager.shared.connectionMode(for: type) != .fileBased else { return }
+        coordinator.isDatabaseSwitcherShown = true
     }
 
     func openQuickSwitcher() {
@@ -784,7 +856,7 @@ final class MainContentCommandActions {
     }
 
     func openConnectionSwitcher() {
-        coordinator?.toolbarState.showConnectionSwitcher = true
+        coordinator?.isConnectionSwitcherShown = true
     }
 
     // MARK: - Undo/Redo (Group A — Called Directly)
@@ -792,17 +864,23 @@ final class MainContentCommandActions {
     func undoChange() {
         if coordinator?.tabManager.selectedTab?.display.resultsViewMode == .structure {
             coordinator?.structureActions?.undo?()
-        } else {
-            coordinator?.contentWindow?.undoManager?.undo()
+            return
         }
+        if NSApp.sendAction(NSSelectorFromString("undo:"), to: nil, from: nil) {
+            return
+        }
+        coordinator?.contentWindow?.undoManager?.undo()
     }
 
     func redoChange() {
         if coordinator?.tabManager.selectedTab?.display.resultsViewMode == .structure {
             coordinator?.structureActions?.redo?()
-        } else {
-            coordinator?.contentWindow?.undoManager?.redo()
+            return
         }
+        if NSApp.sendAction(NSSelectorFromString("redo:"), to: nil, from: nil) {
+            return
+        }
+        coordinator?.contentWindow?.undoManager?.redo()
     }
 
     // MARK: - Group B Broadcast Subscribers
@@ -859,16 +937,19 @@ final class MainContentCommandActions {
     }
 
     private func handleDatabaseDidConnect() {
-        Task {
-            if let driver = DatabaseManager.shared.driver(for: self.connection.id) {
-                coordinator?.toolbarState.databaseVersion = driver.serverVersion
+        Task { [weak coordinator] in
+            guard let coordinator, !coordinator.isTearingDown else { return }
+            if let driver = DatabaseManager.shared.driver(for: coordinator.connection.id) {
+                coordinator.toolbarState.databaseVersion = driver.serverVersion
             }
-            if case .loading = SchemaService.shared.state(for: self.connection.id) {
-                coordinator?.initRedisKeyTreeIfNeeded()
+            if case .loading = SchemaService.shared.state(for: coordinator.connection.id) {
+                coordinator.initRedisKeyTreeIfNeeded()
                 return
             }
-            await coordinator?.refreshTables()
-            coordinator?.initRedisKeyTreeIfNeeded()
+            await coordinator.refreshTables()
+            // Re-check after await: the user may have disconnected mid-fetch.
+            guard !coordinator.isTearingDown else { return }
+            coordinator.initRedisKeyTreeIfNeeded()
         }
     }
 

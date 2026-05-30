@@ -10,6 +10,7 @@ struct FilterPanelView: View {
     let columns: [String]
     let primaryKeyColumn: String?
     let databaseType: DatabaseType
+    let enumValuesByColumn: [String: [String]]
     let onApply: ([TableFilter]) -> Void
     let onUnset: () -> Void
 
@@ -19,6 +20,7 @@ struct FilterPanelView: View {
     @State private var showSavePresetAlert = false
     @State private var newPresetName = ""
     @State private var focusedFilterId: UUID?
+    @State private var rawSQLCompletionProvider: RawSQLFilterCompletionProvider?
 
     private let estimatedFilterRowHeight: CGFloat = 32
     private let maxFilterListHeight: CGFloat = 200
@@ -38,17 +40,26 @@ struct FilterPanelView: View {
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .focusSection()
+        .onExitCommand {
+            closePanelAndFocusGrid()
+        }
         .onAppear {
             if filterState.filters.isEmpty && !columns.isEmpty {
                 coordinator.addFilter(columns: columns, primaryKeyColumn: primaryKeyColumn)
             }
             focusedFilterId = filterState.filters.last?.id
+            refreshRawSQLCompletionProvider()
         }
         .onChange(of: columns) { _, newColumns in
             if filterState.filters.isEmpty && !newColumns.isEmpty && filterState.isVisible {
                 coordinator.addFilter(columns: newColumns, primaryKeyColumn: primaryKeyColumn)
                 focusedFilterId = filterState.filters.last?.id
             }
+            refreshRawSQLCompletionProvider()
+        }
+        .onChange(of: coordinator.currentTableName) { _, _ in
+            refreshRawSQLCompletionProvider()
         }
         .sheet(isPresented: $showSQLSheet) {
             SQLPreviewSheet(sql: generatedSQL)
@@ -78,6 +89,7 @@ struct FilterPanelView: View {
             Button("Unset") {
                 coordinator.clearFilterState()
                 onUnset()
+                coordinator.focusActiveGrid()
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
@@ -89,6 +101,7 @@ struct FilterPanelView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
+            .keyboardShortcut(.defaultAction)
             .disabled(validFilterCount == 0)
             .help(String(localized: "Apply filters"))
         }
@@ -130,7 +143,7 @@ struct FilterPanelView: View {
                             if !presetColumnsMatch(preset) {
                                 Spacer()
                                 Image(systemName: "exclamationmark.triangle.fill")
-                                    .foregroundStyle(Color(nsColor: .systemYellow))
+                                    .foregroundStyle(.yellow)
                                     .help(String(localized: "Some columns in this preset don't exist in the current table"))
                             }
                         }
@@ -181,6 +194,8 @@ struct FilterPanelView: View {
                     filter: coordinator.filterBinding(for: filter),
                     columns: columns,
                     completions: completionItems(),
+                    enumValuesByColumn: enumValuesByColumn,
+                    rawSQLCompletionProvider: rawSQLCompletionProvider,
                     onAdd: {
                         coordinator.addFilter(columns: columns, primaryKeyColumn: primaryKeyColumn)
                         focusedFilterId = filterState.filters.last?.id
@@ -190,18 +205,14 @@ struct FilterPanelView: View {
                         focusedFilterId = filterState.filters.last?.id
                     },
                     onRemove: {
-                        let hadAppliedFilters = filterState.hasAppliedFilters
-                        coordinator.removeFilter(filter)
+                        coordinator.removeFilterAndReload(filter)
                         if filterState.filters.isEmpty {
-                            if hadAppliedFilters {
-                                coordinator.clearFilterState()
-                                onUnset()
-                            } else {
-                                coordinator.closeFilterPanel()
-                            }
+                            coordinator.closeFilterPanel()
+                            coordinator.focusActiveGrid()
                         }
                     },
                     onSubmit: { applyAllValidFilters() },
+                    onCancel: { closePanelAndFocusGrid() },
                     focusedFilterId: $focusedFilterId
                 )
             }
@@ -234,16 +245,38 @@ struct FilterPanelView: View {
     private func applyAllValidFilters() {
         coordinator.applyAllFilters()
         onApply(coordinator.selectedTabFilterState.appliedFilters)
+        coordinator.focusActiveGrid()
+    }
+
+    private func closePanelAndFocusGrid() {
+        coordinator.closeFilterPanel()
+        coordinator.focusActiveGrid()
+    }
+
+    private var isSQLDialect: Bool {
+        let langName = PluginManager.shared.queryLanguageName(for: databaseType)
+        return langName == "SQL" || langName == "CQL" || langName == "PartiQL"
     }
 
     private func completionItems() -> [String] {
-        let langName = PluginManager.shared.queryLanguageName(for: databaseType)
-        let isSQLDialect = langName == "SQL" || langName == "CQL" || langName == "PartiQL"
         let sqlKeywords = [
             "AND", "OR", "NOT", "IN", "LIKE", "BETWEEN",
             "IS NULL", "IS NOT NULL", "EXISTS",
             "CASE", "WHEN", "THEN", "ELSE", "END",
         ]
         return isSQLDialect ? columns + sqlKeywords : columns
+    }
+
+    private func refreshRawSQLCompletionProvider() {
+        guard isSQLDialect, let tableName = coordinator.currentTableName else {
+            rawSQLCompletionProvider = nil
+            return
+        }
+        let schemaProvider = SchemaProviderRegistry.shared.getOrCreate(for: coordinator.connection.id)
+        rawSQLCompletionProvider = RawSQLFilterCompletionProvider(
+            schemaProvider: schemaProvider,
+            databaseType: databaseType,
+            tableName: tableName
+        )
     }
 }

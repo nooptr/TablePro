@@ -57,7 +57,7 @@ struct ConnectionImportPreviewList: View {
                     }
                 }
                 HStack(spacing: 0) {
-                    Text("\(item.connection.host):\(item.connection.port)")
+                    Text(verbatim: item.connection.displaySubtitle)
                     warningText(for: item.status)
                 }
                 .font(.subheadline)
@@ -95,11 +95,11 @@ struct ConnectionImportPreviewList: View {
         case .ready:
             Image(systemName: "checkmark.circle.fill")
                 .font(.callout)
-                .foregroundStyle(Color(nsColor: .systemGreen))
+                .foregroundStyle(.green)
         case .warnings:
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.callout)
-                .foregroundStyle(Color(nsColor: .systemYellow))
+                .foregroundStyle(.yellow)
         case .duplicate:
             EmptyView()
         }
@@ -109,7 +109,7 @@ struct ConnectionImportPreviewList: View {
     private func warningText(for status: ImportItemStatus) -> some View {
         if case .warnings(let messages) = status, let first = messages.first {
             Text(" — \(first)")
-                .foregroundStyle(Color(nsColor: .systemOrange))
+                .foregroundStyle(.orange)
         }
     }
 }

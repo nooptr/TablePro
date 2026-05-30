@@ -3,6 +3,957 @@
     <channel>
         <title>TablePro</title>
         <item>
+            <title>0.46.0</title>
+            <pubDate>Thu, 28 May 2026 15:22:43 +0000</pubDate>
+            <sparkle:version>92</sparkle:version>
+            <sparkle:shortVersionString>0.46.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<h3>Added</h3>
+<ul>
+<li>Rectangular cell selection in the data grid, with Shift and Cmd modifiers to extend or add cells, and Cmd+C to copy as TSV. (#1446)</li>
+<li>BigQuery datasets show as expandable nodes in the sidebar instead of one at a time behind a picker.</li>
+<li>OpenCode Zen as an AI provider, with free models when no key is set. (#1400)</li>
+<li>Oracle Database 11g (11.1 and 11.2) now connects. (#1425)</li>
+<li>Oracle connections can use a SID instead of a service name. (#1425)</li>
+<li>Cmd-click a foreign key arrow (or pick Open in New Tab from the right-click menu) to open the referenced table in a new tab. (#1421)</li>
+<li>Favorite a connection from the welcome screen; starred connections appear in a Favorites section at the top of the list. (#1302)</li>
+<li>Text-column cells holding JSON or PHP serialized values open in the structured viewer automatically.</li>
+<li>Add and remove buttons in the table structure editor (Cmd+Shift+N to add, Cmd+Delete to remove), and a labelled add button on empty Indexes or Foreign Keys tabs. (#1319)</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>The query trash button clears results too, and a Clear Results item on the right-click menu clears results alone. (#1256)</li>
+<li>Inserting SQL from AI Chat opens a new query tab, or fills an empty editor in place. (#1257)</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Toolbar customizations persist after closing and reopening a session window. (#1455)</li>
+<li>Pasting rows with commas in a cell keeps each value in its own column and preserves NULL vs the literal text "NULL".</li>
+<li>BigQuery: switching to another table loads its data immediately instead of leaving the grid empty.</li>
+<li>Custom and OpenAI-compatible AI providers work when the base URL ends in `/v1`. (#1400)</li>
+<li>MongoDB: opening a collection no longer crashes on documents containing NaN or infinite numbers. (#1418)</li>
+<li>Connecting after an app update waits for in-progress plugin updates; when no compatible plugin build exists yet, the message asks you to update TablePro. (#1380)</li>
+<li>Failed saved connections show the Test Connection troubleshooting dialog instead of a generic alert. (#1425, #483)</li>
+<li>Oracle connection errors explain the cause in plain language instead of the driver's raw message. (#483)</li>
+<li>AWS IAM authentication with a named profile reads `~/.aws/config` and supports `credential_process`, so SSO, IAM Identity Center, and assume-role profiles work. (#1291)</li>
+<li>Opening a table no longer runs the initial query multiple times before data arrives.</li>
+<li>iOS: Safe Mode setting survives relaunch instead of reverting to Off after iCloud sync.</li>
+<li>iOS: large query results no longer crash the app; the editor keeps the rows it loaded and suggests adding LIMIT.</li>
+<li>iOS: Safe Mode "Confirm Writes" prompts before grid edits and inserts, matching the query editor.</li>
+<li>Redshift: schema switching, table search, and contains/starts with/ends with filters now work. (#1439)</li>
+<li>MCP server: turning on Require Authentication no longer hangs the first request, generates a default token if needed, and shows it once. (#1093)</li>
+<li>The Generate Token sheet focuses the Token Name field on first open. (#1093)</li>
+<li>Double-clicking a CSV or TSV file when TablePro is closed opens the file directly. (#1443)</li>
+<li>Opening a `.sql` file names the tab after the file instead of "SQL Query". (#1220)</li>
+<li>Server Dashboard shows the Slow Queries panel, with a draggable vertical split and remembered divider positions. (#1464)</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.46.0/TablePro-0.46.0-arm64.zip" length="18357432" type="application/octet-stream" sparkle:edSignature="AwHlQCAaJvX/KJThzAKugmJnFSCdb42E9tG19QPujozubxxRV+FIuTHD5wRGO2JYHHmcO3+gCXywSHga2StBBg=="/>
+        </item>
+        <item>
+            <title>0.46.0</title>
+            <pubDate>Thu, 28 May 2026 15:22:44 +0000</pubDate>
+            <sparkle:version>92</sparkle:version>
+            <sparkle:shortVersionString>0.46.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h3>Added</h3>
+<ul>
+<li>Rectangular cell selection in the data grid, with Shift and Cmd modifiers to extend or add cells, and Cmd+C to copy as TSV. (#1446)</li>
+<li>BigQuery datasets show as expandable nodes in the sidebar instead of one at a time behind a picker.</li>
+<li>OpenCode Zen as an AI provider, with free models when no key is set. (#1400)</li>
+<li>Oracle Database 11g (11.1 and 11.2) now connects. (#1425)</li>
+<li>Oracle connections can use a SID instead of a service name. (#1425)</li>
+<li>Cmd-click a foreign key arrow (or pick Open in New Tab from the right-click menu) to open the referenced table in a new tab. (#1421)</li>
+<li>Favorite a connection from the welcome screen; starred connections appear in a Favorites section at the top of the list. (#1302)</li>
+<li>Text-column cells holding JSON or PHP serialized values open in the structured viewer automatically.</li>
+<li>Add and remove buttons in the table structure editor (Cmd+Shift+N to add, Cmd+Delete to remove), and a labelled add button on empty Indexes or Foreign Keys tabs. (#1319)</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>The query trash button clears results too, and a Clear Results item on the right-click menu clears results alone. (#1256)</li>
+<li>Inserting SQL from AI Chat opens a new query tab, or fills an empty editor in place. (#1257)</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Toolbar customizations persist after closing and reopening a session window. (#1455)</li>
+<li>Pasting rows with commas in a cell keeps each value in its own column and preserves NULL vs the literal text "NULL".</li>
+<li>BigQuery: switching to another table loads its data immediately instead of leaving the grid empty.</li>
+<li>Custom and OpenAI-compatible AI providers work when the base URL ends in `/v1`. (#1400)</li>
+<li>MongoDB: opening a collection no longer crashes on documents containing NaN or infinite numbers. (#1418)</li>
+<li>Connecting after an app update waits for in-progress plugin updates; when no compatible plugin build exists yet, the message asks you to update TablePro. (#1380)</li>
+<li>Failed saved connections show the Test Connection troubleshooting dialog instead of a generic alert. (#1425, #483)</li>
+<li>Oracle connection errors explain the cause in plain language instead of the driver's raw message. (#483)</li>
+<li>AWS IAM authentication with a named profile reads `~/.aws/config` and supports `credential_process`, so SSO, IAM Identity Center, and assume-role profiles work. (#1291)</li>
+<li>Opening a table no longer runs the initial query multiple times before data arrives.</li>
+<li>iOS: Safe Mode setting survives relaunch instead of reverting to Off after iCloud sync.</li>
+<li>iOS: large query results no longer crash the app; the editor keeps the rows it loaded and suggests adding LIMIT.</li>
+<li>iOS: Safe Mode "Confirm Writes" prompts before grid edits and inserts, matching the query editor.</li>
+<li>Redshift: schema switching, table search, and contains/starts with/ends with filters now work. (#1439)</li>
+<li>MCP server: turning on Require Authentication no longer hangs the first request, generates a default token if needed, and shows it once. (#1093)</li>
+<li>The Generate Token sheet focuses the Token Name field on first open. (#1093)</li>
+<li>Double-clicking a CSV or TSV file when TablePro is closed opens the file directly. (#1443)</li>
+<li>Opening a `.sql` file names the tab after the file instead of "SQL Query". (#1220)</li>
+<li>Server Dashboard shows the Slow Queries panel, with a draggable vertical split and remembered divider positions. (#1464)</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.46.0/TablePro-0.46.0-x86_64.zip" length="19371195" type="application/octet-stream" sparkle:edSignature="Cs7UZTXKjJu6OVhKf7/SVx14n3v6/+x19PrZ1038Y0EZz+VMht8usSK0ZIJCL9pPXLNzWNgGZpTT5F+UGZhYCg=="/>
+        </item>
+        <item>
+            <title>0.45.0</title>
+            <pubDate>Tue, 26 May 2026 01:02:36 +0000</pubDate>
+            <sparkle:version>91</sparkle:version>
+            <sparkle:shortVersionString>0.45.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<h3>Added</h3>
+<ul>
+<li>Cloudflare Tunnel: connect to a database behind Cloudflare Access. TablePro starts and stops `cloudflared access tcp` per connection, the same way it manages SSH tunnels, with browser sign-in or a service token. Needs cloudflared (`brew install cloudflared`). (#1285)</li>
+<li>Fill Column: right-click a column header to set one value across all loaded rows. The fill is staged like a normal edit, and one undo reverts it. Not available on primary key columns. (#1304)</li>
+<li>AWS IAM authentication for PostgreSQL and MySQL on RDS and Aurora. Pick AWS IAM in the connection's Authentication field with an access key, named profile, or SSO. TablePro generates a fresh token on every connect and requires SSL. (#1291)</li>
+<li>Date picker for date, datetime, timestamp, and time cells, from the chevron button. Double-clicking still edits the cell as text, and the picker keeps the value's format, fractional seconds, and timezone offset. (#1405)</li>
+<li>Pagination bar for table tabs with a rows-per-page menu (5, 10, 20, 100, 500, 1,000, All rows, or custom) and First, Previous, Next, and Last buttons. (#1364)</li>
+<li>Click the page indicator in the pagination bar to jump to a specific page. (#1364)</li>
+<li>Pagination now appears for filtered tables with an unknown total row count, instead of showing only the first page. (#1364)</li>
+<li>First Page and Last Page keyboard actions, unbound by default and assignable in Settings > Keyboard. (#1364)</li>
+<li>JSON and JSONB cells display pretty-printed by default, keeping your key order and exact numbers. Viewing or reformatting no longer marks the row changed, and saving no longer reorders keys or rounds large integers.</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Changing the editor or data grid font size in Appearance settings now applies immediately and persists across relaunch, with no orphan custom themes left behind. (#1381)</li>
+<li>Installing or updating a plugin right after updating TablePro now refetches the plugin list first, so it no longer fails against a stale cached list. (#1380)</li>
+<li>Pressing Esc to close the Raw SQL filter suggestions, or to clear a search field, no longer also exits fullscreen. (#1403)</li>
+<li>Connecting an OAuth-capable MCP client like Claude Code with an invalid or expired token now shows a clear error instead of "Invalid OAuth error response". (#1409)</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.45.0/TablePro-0.45.0-arm64.zip" length="18214729" type="application/octet-stream" sparkle:edSignature="5Umo2HWkq0Xl55S0hjlDPUCGBScG8ckgPDBtNOCg109frVmaruWbjq4Y4R0lnT7HrscQYC2BDUQrWm4cPzSOAQ=="/>
+        </item>
+        <item>
+            <title>0.45.0</title>
+            <pubDate>Tue, 26 May 2026 01:02:36 +0000</pubDate>
+            <sparkle:version>91</sparkle:version>
+            <sparkle:shortVersionString>0.45.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h3>Added</h3>
+<ul>
+<li>Cloudflare Tunnel: connect to a database behind Cloudflare Access. TablePro starts and stops `cloudflared access tcp` per connection, the same way it manages SSH tunnels, with browser sign-in or a service token. Needs cloudflared (`brew install cloudflared`). (#1285)</li>
+<li>Fill Column: right-click a column header to set one value across all loaded rows. The fill is staged like a normal edit, and one undo reverts it. Not available on primary key columns. (#1304)</li>
+<li>AWS IAM authentication for PostgreSQL and MySQL on RDS and Aurora. Pick AWS IAM in the connection's Authentication field with an access key, named profile, or SSO. TablePro generates a fresh token on every connect and requires SSL. (#1291)</li>
+<li>Date picker for date, datetime, timestamp, and time cells, from the chevron button. Double-clicking still edits the cell as text, and the picker keeps the value's format, fractional seconds, and timezone offset. (#1405)</li>
+<li>Pagination bar for table tabs with a rows-per-page menu (5, 10, 20, 100, 500, 1,000, All rows, or custom) and First, Previous, Next, and Last buttons. (#1364)</li>
+<li>Click the page indicator in the pagination bar to jump to a specific page. (#1364)</li>
+<li>Pagination now appears for filtered tables with an unknown total row count, instead of showing only the first page. (#1364)</li>
+<li>First Page and Last Page keyboard actions, unbound by default and assignable in Settings > Keyboard. (#1364)</li>
+<li>JSON and JSONB cells display pretty-printed by default, keeping your key order and exact numbers. Viewing or reformatting no longer marks the row changed, and saving no longer reorders keys or rounds large integers.</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Changing the editor or data grid font size in Appearance settings now applies immediately and persists across relaunch, with no orphan custom themes left behind. (#1381)</li>
+<li>Installing or updating a plugin right after updating TablePro now refetches the plugin list first, so it no longer fails against a stale cached list. (#1380)</li>
+<li>Pressing Esc to close the Raw SQL filter suggestions, or to clear a search field, no longer also exits fullscreen. (#1403)</li>
+<li>Connecting an OAuth-capable MCP client like Claude Code with an invalid or expired token now shows a clear error instead of "Invalid OAuth error response". (#1409)</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.45.0/TablePro-0.45.0-x86_64.zip" length="19201117" type="application/octet-stream" sparkle:edSignature="TD7ArKWPvhDL2UC05+rWhh+Rg7R0lBWpuaPRWlFqrdKIcLf/Oj4wzrBVReBXKsxhly2IAXRABoMPH6zf6x5TAg=="/>
+        </item>
+        <item>
+            <title>0.44.0</title>
+            <pubDate>Fri, 22 May 2026 17:58:29 +0000</pubDate>
+            <sparkle:version>90</sparkle:version>
+            <sparkle:shortVersionString>0.44.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<h3>Added</h3>
+<ul>
+<li>Import connections and passwords from DataGrip, including SSH tunnels and SSL settings. The source app doesn't need to be running. (#1374)</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>Active Connections is now a searchable toolbar popover instead of a modal dialog. (#1350)</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Connecting to a PostgreSQL-compatible engine without the pg_matviews catalog (such as db9.ai) no longer fails to load tables. (#1383)</li>
+<li>Filtering a table now updates the row and page counts to match the filtered result, instead of the whole-table totals.</li>
+<li>Reopening a table restores the filter you had applied, per connection. Removing or clearing a filter is remembered too, so an unfiltered table reopens with no filter. (#1347)</li>
+<li>Quick switcher panel height now fits its results instead of leaving empty space below short lists. (#1349)</li>
+<li>Importing connections from TablePlus brings over saved passwords again, after a recent release looked under the wrong keychain name.</li>
+<li>Importing an SSH connection from TablePlus no longer fills in a fake private key path when no key was selected, and skips empty TLS certificate paths.</li>
+<li>Importing from DBeaver no longer shows an unnecessary keychain permission warning, since DBeaver stores passwords in its own file.</li>
+<li>Raw SQL filter now suggests columns and keywords at every position, including after AND and OR, instead of only the first. (#1346)</li>
+<li>Plugins left incompatible after a TablePro update now update quietly in the background instead of showing a premature "could not be loaded" alert. You are notified only when no compatible version exists yet. (#1322)</li>
+<li>A plugin you download and install by hand is no longer blocked by macOS Gatekeeper once its signature is verified. (#1322)</li>
+<li>Clicking a table now replaces the active tab instead of opening a new one when you have multiple tabs open. A new tab still opens for unsaved edits, an applied filter, or sorting; double-click always opens a new tab. (#1348)</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.44.0/TablePro-0.44.0-arm64.zip" length="18102107" type="application/octet-stream" sparkle:edSignature="eJCYVjYy3MT4186wjyS/Xp3AUAH0pS2WxgS+UHjTkjHm9OeP8LMcDSn6QYlWTm2Nq0L+Fs7A9d0wiNTED20OBw=="/>
+        </item>
+        <item>
+            <title>0.44.0</title>
+            <pubDate>Fri, 22 May 2026 17:58:29 +0000</pubDate>
+            <sparkle:version>90</sparkle:version>
+            <sparkle:shortVersionString>0.44.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h3>Added</h3>
+<ul>
+<li>Import connections and passwords from DataGrip, including SSH tunnels and SSL settings. The source app doesn't need to be running. (#1374)</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>Active Connections is now a searchable toolbar popover instead of a modal dialog. (#1350)</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Connecting to a PostgreSQL-compatible engine without the pg_matviews catalog (such as db9.ai) no longer fails to load tables. (#1383)</li>
+<li>Filtering a table now updates the row and page counts to match the filtered result, instead of the whole-table totals.</li>
+<li>Reopening a table restores the filter you had applied, per connection. Removing or clearing a filter is remembered too, so an unfiltered table reopens with no filter. (#1347)</li>
+<li>Quick switcher panel height now fits its results instead of leaving empty space below short lists. (#1349)</li>
+<li>Importing connections from TablePlus brings over saved passwords again, after a recent release looked under the wrong keychain name.</li>
+<li>Importing an SSH connection from TablePlus no longer fills in a fake private key path when no key was selected, and skips empty TLS certificate paths.</li>
+<li>Importing from DBeaver no longer shows an unnecessary keychain permission warning, since DBeaver stores passwords in its own file.</li>
+<li>Raw SQL filter now suggests columns and keywords at every position, including after AND and OR, instead of only the first. (#1346)</li>
+<li>Plugins left incompatible after a TablePro update now update quietly in the background instead of showing a premature "could not be loaded" alert. You are notified only when no compatible version exists yet. (#1322)</li>
+<li>A plugin you download and install by hand is no longer blocked by macOS Gatekeeper once its signature is verified. (#1322)</li>
+<li>Clicking a table now replaces the active tab instead of opening a new one when you have multiple tabs open. A new tab still opens for unsaved edits, an applied filter, or sorting; double-click always opens a new tab. (#1348)</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.44.0/TablePro-0.44.0-x86_64.zip" length="19090612" type="application/octet-stream" sparkle:edSignature="y1JdtLJQSZujIKETdWJy18d61IgblmKCEjjsvY2G7As637aDAhpEsCnpVJ4E9eYoeWbvR2EMhM0eMrnIJnIDAQ=="/>
+        </item>
+        <item>
+            <title>0.43.3</title>
+            <pubDate>Fri, 22 May 2026 08:28:56 +0000</pubDate>
+            <sparkle:version>89</sparkle:version>
+            <sparkle:shortVersionString>0.43.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<h3>Fixed</h3>
+<ul>
+<li>Fixed a crash when adding a row while a cell editor or value viewer was open (#1378)</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.43.3/TablePro-0.43.3-arm64.zip" length="18067071" type="application/octet-stream" sparkle:edSignature="IUr2nMUqpRT2yaifFxRaQQfe1owlHUzbUiE0W88EG5God8FFK9wnJEEVRPHJnentpDUHQZhPZBqmiT7tDJRRBA=="/>
+        </item>
+        <item>
+            <title>0.43.3</title>
+            <pubDate>Fri, 22 May 2026 08:28:56 +0000</pubDate>
+            <sparkle:version>89</sparkle:version>
+            <sparkle:shortVersionString>0.43.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h3>Fixed</h3>
+<ul>
+<li>Fixed a crash when adding a row while a cell editor or value viewer was open (#1378)</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.43.3/TablePro-0.43.3-x86_64.zip" length="19044179" type="application/octet-stream" sparkle:edSignature="g3Y6MKhJ/nZBj+Gb1tK1OKqOZhpAdiTfEh/adS4m+q6deSdqtDTLLhFxTpHNNt54+B0XjrpKgNKi54ruAQLsDg=="/>
+        </item>
+        <item>
+            <title>0.43.2</title>
+            <pubDate>Fri, 22 May 2026 03:54:07 +0000</pubDate>
+            <sparkle:version>88</sparkle:version>
+            <sparkle:shortVersionString>0.43.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<h3>Changed</h3>
+<ul>
+<li>Hiding a column now also drops it from the query, so tables with one heavy column load faster. The primary key is always fetched so editing still works</li>
+</ul>
+<h3>Removed</h3>
+<ul>
+<li>Removed the embedded database CLI terminal. Use your system terminal for command-line access to your databases.</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Opening a connection no longer crashes when its database plugin is older than the app; outdated plugins now update automatically (#1371)</li>
+<li>Safe mode no longer resets when you open another table; it stays set for the connection until you change it (#1351)</li>
+<li>Reassigning the Execute Query, Execute All Statements, and Cancel Query shortcuts now takes effect and shows in the Query menu (#1357)</li>
+<li>Custom shortcuts now require a modifier key, so a plain key like Space is no longer silently ignored (#1357)</li>
+<li>Cancelling a pending connection no longer lets the abandoned attempt overwrite a later successful one to the same database (#1358)</li>
+<li>Cancelling a pending SSH connection now closes its tunnel instead of leaving the port open (#1369)</li>
+<li>Importing connections from DBeaver now brings over the username (#1355)</li>
+<li>Copying rows now includes only the visible columns, in their current order (#1354)</li>
+<li>The query shown in the editor when you open a table now matches the query that actually runs</li>
+<li>Large text columns are no longer truncated to 256 characters when browsing a table, so editing a cell can't save a shortened value</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.43.2/TablePro-0.43.2-arm64.zip" length="18067387" type="application/octet-stream" sparkle:edSignature="fPQsiMESe00NDoRV6IPCL2pNqFKVsuPOiL4Tzm9DHcSzz4rNHaQ/Z/k/i5ZAxKtVeNRU3z4tuCwIV2ibG3t0DQ=="/>
+        </item>
+        <item>
+            <title>0.43.2</title>
+            <pubDate>Fri, 22 May 2026 03:54:08 +0000</pubDate>
+            <sparkle:version>88</sparkle:version>
+            <sparkle:shortVersionString>0.43.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h3>Changed</h3>
+<ul>
+<li>Hiding a column now also drops it from the query, so tables with one heavy column load faster. The primary key is always fetched so editing still works</li>
+</ul>
+<h3>Removed</h3>
+<ul>
+<li>Removed the embedded database CLI terminal. Use your system terminal for command-line access to your databases.</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Opening a connection no longer crashes when its database plugin is older than the app; outdated plugins now update automatically (#1371)</li>
+<li>Safe mode no longer resets when you open another table; it stays set for the connection until you change it (#1351)</li>
+<li>Reassigning the Execute Query, Execute All Statements, and Cancel Query shortcuts now takes effect and shows in the Query menu (#1357)</li>
+<li>Custom shortcuts now require a modifier key, so a plain key like Space is no longer silently ignored (#1357)</li>
+<li>Cancelling a pending connection no longer lets the abandoned attempt overwrite a later successful one to the same database (#1358)</li>
+<li>Cancelling a pending SSH connection now closes its tunnel instead of leaving the port open (#1369)</li>
+<li>Importing connections from DBeaver now brings over the username (#1355)</li>
+<li>Copying rows now includes only the visible columns, in their current order (#1354)</li>
+<li>The query shown in the editor when you open a table now matches the query that actually runs</li>
+<li>Large text columns are no longer truncated to 256 characters when browsing a table, so editing a cell can't save a shortened value</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.43.2/TablePro-0.43.2-x86_64.zip" length="19044053" type="application/octet-stream" sparkle:edSignature="ddiAMRY5NTNDnXhz+0ZVpZ0fTWOPVY5WxlrkWuLRek63sdQyF5JM8I1yXR6EJvSBMkKHjLiWW08wVGLXVS5uAw=="/>
+        </item>
+        <item>
+            <title>0.43.1</title>
+            <pubDate>Wed, 20 May 2026 16:44:05 +0000</pubDate>
+            <sparkle:version>87</sparkle:version>
+            <sparkle:shortVersionString>0.43.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<h3>Added</h3>
+<ul>
+<li>Right-click a column header to copy all its loaded values (#1325)</li>
+<li>The row "Copy as" submenu adds CSV, CSV with Headers, Markdown table, and an IN clause for `WHERE id IN (...)` lookups (#1325)</li>
+<li>A plugin update that arrives while a connection is open installs when you close the connection or quit, instead of being blocked</li>
+<li>Settings > Plugins shows a badge with the count of rejected plugins and available updates</li>
+<li>Connections whose driver plugin failed to load show a yellow warning triangle in the welcome list</li>
+<li>A rejected driver plugin shows an inline banner with an Update Plugin button in the connection form</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>A plugin that fails to load no longer interrupts launch with an alert. The app posts a notification and lists rejected plugins in Settings > Plugins with Update Now and Remove buttons (#1322)</li>
+<li>Rejected plugins auto-update from the registry in the background, retrying with backoff until they load (#1322)</li>
+<li>The app installs the plugin binary built for its own version, even when the registry holds binaries for other versions (#1322)</li>
+<li>Double-click or press Return on a read-only result cell to open a selectable text viewer. JSON columns open a viewer popover and BLOB columns open the hex viewer (#1336)</li>
+<li>`Cmd+C` copies the focused cell when one row is selected and a cell has focus; otherwise it copies the selected row(s) as TSV. `Cmd+Shift+C` always copies row(s) as TSV. "Copy with Headers" stays in the Edit and row context menus (#1332)</li>
+<li>`Cmd+F` toggles the filter panel on a table and opens Find in the SQL editor. The old `Cmd+Shift+F` filter shortcut is removed</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Fixes the recurring "Plugin was built with PluginKit version N, but version M is required" error after app updates. Rejected plugins now recover without manual steps (#1322, #1237, #923, #912, #443)</li>
+<li>DuckDB spatial `GEOMETRY` columns show as WKT instead of NULL (#1324)</li>
+<li>DuckDB `HUGEINT` and `UHUGEINT` keep full precision and no longer crash on negative values</li>
+<li>DuckDB streaming results respect the row cap and show `TIMESTAMPTZ`, `TIMETZ`, and `GEOMETRY` instead of NULL</li>
+<li>DuckDB schema reads handle apostrophes and concurrent schema switches</li>
+<li>DuckDB ENUMs in schemas other than `main` resolve correctly</li>
+<li>DuckDB `DATE` and `TIMESTAMP` BC years show a leading minus</li>
+<li>`.db`, `.db3`, `.s3db`, `.sl3`, and `.sqlitedb` files open from Finder (#1327)</li>
+<li>DynamoDB SSO connections work with `sso-session` profiles right after `aws sso login`, with no extra AWS CLI command (#1333)</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.43.1/TablePro-0.43.1-arm64.zip" length="21509655" type="application/octet-stream" sparkle:edSignature="2X/b17C5ockObQxRC+iomg4s56rTZtroSbFwMBCdpJAcsP4bLukDrLQknPxtxXf8mtIrgFaZEPrCQCPCua2QDA=="/>
+        </item>
+        <item>
+            <title>0.43.1</title>
+            <pubDate>Wed, 20 May 2026 16:44:06 +0000</pubDate>
+            <sparkle:version>87</sparkle:version>
+            <sparkle:shortVersionString>0.43.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h3>Added</h3>
+<ul>
+<li>Right-click a column header to copy all its loaded values (#1325)</li>
+<li>The row "Copy as" submenu adds CSV, CSV with Headers, Markdown table, and an IN clause for `WHERE id IN (...)` lookups (#1325)</li>
+<li>A plugin update that arrives while a connection is open installs when you close the connection or quit, instead of being blocked</li>
+<li>Settings > Plugins shows a badge with the count of rejected plugins and available updates</li>
+<li>Connections whose driver plugin failed to load show a yellow warning triangle in the welcome list</li>
+<li>A rejected driver plugin shows an inline banner with an Update Plugin button in the connection form</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>A plugin that fails to load no longer interrupts launch with an alert. The app posts a notification and lists rejected plugins in Settings > Plugins with Update Now and Remove buttons (#1322)</li>
+<li>Rejected plugins auto-update from the registry in the background, retrying with backoff until they load (#1322)</li>
+<li>The app installs the plugin binary built for its own version, even when the registry holds binaries for other versions (#1322)</li>
+<li>Double-click or press Return on a read-only result cell to open a selectable text viewer. JSON columns open a viewer popover and BLOB columns open the hex viewer (#1336)</li>
+<li>`Cmd+C` copies the focused cell when one row is selected and a cell has focus; otherwise it copies the selected row(s) as TSV. `Cmd+Shift+C` always copies row(s) as TSV. "Copy with Headers" stays in the Edit and row context menus (#1332)</li>
+<li>`Cmd+F` toggles the filter panel on a table and opens Find in the SQL editor. The old `Cmd+Shift+F` filter shortcut is removed</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Fixes the recurring "Plugin was built with PluginKit version N, but version M is required" error after app updates. Rejected plugins now recover without manual steps (#1322, #1237, #923, #912, #443)</li>
+<li>DuckDB spatial `GEOMETRY` columns show as WKT instead of NULL (#1324)</li>
+<li>DuckDB `HUGEINT` and `UHUGEINT` keep full precision and no longer crash on negative values</li>
+<li>DuckDB streaming results respect the row cap and show `TIMESTAMPTZ`, `TIMETZ`, and `GEOMETRY` instead of NULL</li>
+<li>DuckDB schema reads handle apostrophes and concurrent schema switches</li>
+<li>DuckDB ENUMs in schemas other than `main` resolve correctly</li>
+<li>DuckDB `DATE` and `TIMESTAMP` BC years show a leading minus</li>
+<li>`.db`, `.db3`, `.s3db`, `.sl3`, and `.sqlitedb` files open from Finder (#1327)</li>
+<li>DynamoDB SSO connections work with `sso-session` profiles right after `aws sso login`, with no extra AWS CLI command (#1333)</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.43.1/TablePro-0.43.1-x86_64.zip" length="22790983" type="application/octet-stream" sparkle:edSignature="6l99P9FnTLZK1no/cjLSHTnQNUbaZtwIh5+aUl/cUT3YNigvfpfvveh44htTUICqepTA749XD8cZWEgysRPVDw=="/>
+        </item>
+        <item>
+            <title>0.43.0</title>
+            <pubDate>Mon, 18 May 2026 12:08:28 +0000</pubDate>
+            <sparkle:version>86</sparkle:version>
+            <sparkle:shortVersionString>0.43.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<h3>Added</h3>
+<ul>
+<li>Import connections from Beekeeper Studio, including encrypted passwords and SSH bastion hosts</li>
+<li>Schema picker at the bottom of the Tables sidebar to switch the active schema (#1296)</li>
+<li>Inline dropdown picker when editing ENUM and SET columns across MySQL, MariaDB, PostgreSQL, ClickHouse, DuckDB, and MongoDB JSON-schema enums (#1283)</li>
+<li>Filter rows show an enum dropdown for `=` and `!=` operators on enum columns (#1283)</li>
+<li>CSV/TSV inspector: edit cells, filter, sort, add/remove/rename columns, undo/redo, auto-reload on external changes; large files stream from disk (#1259)</li>
+<li>iOS: SQL Server connections via FreeTDS over TDS 7.4, with schema browsing, data browser, search, filter, pagination, and explicit transactions</li>
+<li>iOS: Settings > Sync shows last sync time with Sync Now and Refresh from iCloud actions</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>Drivers populate allowed enum values directly in column metadata instead of parsing them downstream</li>
+<li>PluginKit ABI bumped to version 13; all registry plugins need to be re-tagged</li>
+<li>New PostgreSQL, MySQL, MariaDB, SQL Server, Redshift, and CockroachDB connections default to Preferred SSL mode, matching the native client library defaults</li>
+<li>MySQL and MariaDB Preferred mode now does a 2-pass connect: tries TLS first, falls back to plaintext only on SSL handshake errors (auth and network errors are not retried)</li>
+<li>SSL pane shows per-engine guidance and warns inline when the driver has no TLS fallback for Preferred mode</li>
+<li>Connection failures caused by SSL handshake errors now show a structured message naming the cause and recommending an SSL Mode to switch to, with credentials redacted from the raw driver response</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Import from other apps now detects TablePlus, Sequel Ace, and DBeaver via LaunchServices, so newly installed apps are picked up before they have been opened (#1305)</li>
+<li>ClickHouse and other HTTP-based drivers can now connect to plain-HTTP servers addressed by DNS hostname (#1316)</li>
+<li>Import from TablePlus now reads passwords from the keychain correctly instead of returning empty</li>
+<li>Port numbers no longer render with a thousand separator under locales that use a dot as a digit separator</li>
+<li>New query tab (Cmd+T) no longer jumps focus back to the previous table tab on SQLite and other file-based databases (#1313)</li>
+<li>File-based databases (SQLite, DuckDB) no longer flash the sidebar table list on window focus; external changes are picked up via the file watcher instead</li>
+<li>PostgreSQL connections to AWS RDS, Cloud SQL, Azure, and other hosted Postgres no longer fail with "no pg_hba.conf entry for host" (#1298)</li>
+<li>Oracle SSL/TCPS settings from the SSL pane are now respected; previously every Oracle connection was plain TCP</li>
+<li>Cassandra SSL settings from the SSL pane are now respected; previously every Cassandra connection was plain TCP</li>
+<li>MySQL and MariaDB Preferred mode no longer fails against Cloud SQL, Azure Database, and other hosted MySQL servers that require TLS</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.43.0/TablePro-0.43.0-arm64.zip" length="21466498" type="application/octet-stream" sparkle:edSignature="lxV17IhynOmNfircQwwVypEOnydqaeLw0uENCxBvCveXUjD+6ZH84oVMbHltGOHtLjmT3yu1YOH0A+O40ArBCQ=="/>
+        </item>
+        <item>
+            <title>0.43.0</title>
+            <pubDate>Mon, 18 May 2026 12:08:30 +0000</pubDate>
+            <sparkle:version>86</sparkle:version>
+            <sparkle:shortVersionString>0.43.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h3>Added</h3>
+<ul>
+<li>Import connections from Beekeeper Studio, including encrypted passwords and SSH bastion hosts</li>
+<li>Schema picker at the bottom of the Tables sidebar to switch the active schema (#1296)</li>
+<li>Inline dropdown picker when editing ENUM and SET columns across MySQL, MariaDB, PostgreSQL, ClickHouse, DuckDB, and MongoDB JSON-schema enums (#1283)</li>
+<li>Filter rows show an enum dropdown for `=` and `!=` operators on enum columns (#1283)</li>
+<li>CSV/TSV inspector: edit cells, filter, sort, add/remove/rename columns, undo/redo, auto-reload on external changes; large files stream from disk (#1259)</li>
+<li>iOS: SQL Server connections via FreeTDS over TDS 7.4, with schema browsing, data browser, search, filter, pagination, and explicit transactions</li>
+<li>iOS: Settings > Sync shows last sync time with Sync Now and Refresh from iCloud actions</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>Drivers populate allowed enum values directly in column metadata instead of parsing them downstream</li>
+<li>PluginKit ABI bumped to version 13; all registry plugins need to be re-tagged</li>
+<li>New PostgreSQL, MySQL, MariaDB, SQL Server, Redshift, and CockroachDB connections default to Preferred SSL mode, matching the native client library defaults</li>
+<li>MySQL and MariaDB Preferred mode now does a 2-pass connect: tries TLS first, falls back to plaintext only on SSL handshake errors (auth and network errors are not retried)</li>
+<li>SSL pane shows per-engine guidance and warns inline when the driver has no TLS fallback for Preferred mode</li>
+<li>Connection failures caused by SSL handshake errors now show a structured message naming the cause and recommending an SSL Mode to switch to, with credentials redacted from the raw driver response</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Import from other apps now detects TablePlus, Sequel Ace, and DBeaver via LaunchServices, so newly installed apps are picked up before they have been opened (#1305)</li>
+<li>ClickHouse and other HTTP-based drivers can now connect to plain-HTTP servers addressed by DNS hostname (#1316)</li>
+<li>Import from TablePlus now reads passwords from the keychain correctly instead of returning empty</li>
+<li>Port numbers no longer render with a thousand separator under locales that use a dot as a digit separator</li>
+<li>New query tab (Cmd+T) no longer jumps focus back to the previous table tab on SQLite and other file-based databases (#1313)</li>
+<li>File-based databases (SQLite, DuckDB) no longer flash the sidebar table list on window focus; external changes are picked up via the file watcher instead</li>
+<li>PostgreSQL connections to AWS RDS, Cloud SQL, Azure, and other hosted Postgres no longer fail with "no pg_hba.conf entry for host" (#1298)</li>
+<li>Oracle SSL/TCPS settings from the SSL pane are now respected; previously every Oracle connection was plain TCP</li>
+<li>Cassandra SSL settings from the SSL pane are now respected; previously every Cassandra connection was plain TCP</li>
+<li>MySQL and MariaDB Preferred mode no longer fails against Cloud SQL, Azure Database, and other hosted MySQL servers that require TLS</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.43.0/TablePro-0.43.0-x86_64.zip" length="22743912" type="application/octet-stream" sparkle:edSignature="OR4zeBY7cafy++iEZR7TUSbcc1xtc1tCNhxFTy8uca6rQQBkZyhXwNovFuRa1GUFBG5k+mz/9aDRL5K7JAEHCA=="/>
+        </item>
+        <item>
+            <title>0.42.0</title>
+            <pubDate>Sat, 16 May 2026 14:19:38 +0000</pubDate>
+            <sparkle:version>85</sparkle:version>
+            <sparkle:shortVersionString>0.42.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<h3>Added</h3>
+<ul>
+<li>CockroachDB support over the PostgreSQL wire protocol, with a Connection Options field for libpq routing (#1226)</li>
+<li>AI Chat: OpenAI Responses API for GPT-5 and Codex with a collapsible Thinking panel, reasoning effort picker, curated model picker, strict tool schemas by default, and image input via paste or drop (HEIC/TIFF/BMP converted, EXIF/GPS stripped) (#1112)</li>
+<li>AI Chat: Claude extended thinking on Opus 4.7, Sonnet 4.6, and Haiku 4.5 (#1112)</li>
+<li>iOS: SQL Server connections via FreeTDS over TDS 7.4, including data browser, search, filter, and pagination with SQL Server syntax</li>
+<li>iOS: Settings > Sync shows last sync time with Sync Now and Refresh from iCloud</li>
+<li>Settings > Data Grid > Default row sort opens tables sorted by primary key or first column (#1284)</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>Database switcher is now a toolbar popover with active-row checkmark, search, Refresh, and an engine-aware New Database footer (⌘N and ⌘R bound globally)</li>
+<li>New Database and Drop Database use native sheet and confirmation dialogs</li>
+</ul>
+<h3>Security</h3>
+<ul>
+<li>AI Chat: destructive operations (DROP, TRUNCATE, ALTER...DROP) always prompt for approval; Silent mode and Always Allow no longer bypass the check</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>AI Chat: Gemini tool calls no longer fail with 400, `thoughtSignature` round-trips after tool runs, and DeepSeek V4 thinking is captured across turns</li>
+<li>AI Chat: GitHub Copilot tool registration accepts optional fields</li>
+<li>MySQL/MariaDB: `BIT(N)` columns display as decimal numbers instead of raw bytes (#1272)</li>
+<li>Structure tab: Refresh and ⌘R show external schema changes on Columns, DDL, and ClickHouse Parts (#1281)</li>
+<li>Query editor: Enter and ⌘+Enter work after accepting an autocomplete suggestion, and double-click no longer closes the window (#1278)</li>
+<li>Query editor autocomplete reflects external column renames after Refresh</li>
+<li>ClickHouse, BigQuery, CloudflareD1, LibSQL, Etcd, and DynamoDB: long-running queries honor Settings > Query timeout instead of failing at 30 seconds (#1267)</li>
+<li>MongoDB: connection form shows the Username field so auth-enabled servers stop failing with "requires authentication"</li>
+<li>MongoDB: deleting a host from the multi-host editor keeps the list interactive (#1293)</li>
+<li>SQL import: PostgreSQL dollar-quoted function bodies parse correctly, and statements are no longer dropped when the database is slower than the parser (#1264)</li>
+<li>SQL export: views, materialized views, and foreign tables emit the matching `DROP` (#1264)</li>
+<li>iOS: connections, groups, and tags survive TestFlight and App Store updates</li>
+</ul>
+<h3>Removed</h3>
+<ul>
+<li>Help > Report an Issue; the menu item opens GitHub Issues in a browser</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.42.0/TablePro-0.42.0-arm64.zip" length="21284405" type="application/octet-stream" sparkle:edSignature="3ljJwmQYJcKg4UzVZcF38oGXLr+zxJMerkhGIc6s8dpfhLT23A5ClU9nP3Zs7THVf5PELqId8e0LfuHa9H7wDA=="/>
+        </item>
+        <item>
+            <title>0.42.0</title>
+            <pubDate>Sat, 16 May 2026 14:19:39 +0000</pubDate>
+            <sparkle:version>85</sparkle:version>
+            <sparkle:shortVersionString>0.42.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h3>Added</h3>
+<ul>
+<li>CockroachDB support over the PostgreSQL wire protocol, with a Connection Options field for libpq routing (#1226)</li>
+<li>AI Chat: OpenAI Responses API for GPT-5 and Codex with a collapsible Thinking panel, reasoning effort picker, curated model picker, strict tool schemas by default, and image input via paste or drop (HEIC/TIFF/BMP converted, EXIF/GPS stripped) (#1112)</li>
+<li>AI Chat: Claude extended thinking on Opus 4.7, Sonnet 4.6, and Haiku 4.5 (#1112)</li>
+<li>iOS: SQL Server connections via FreeTDS over TDS 7.4, including data browser, search, filter, and pagination with SQL Server syntax</li>
+<li>iOS: Settings > Sync shows last sync time with Sync Now and Refresh from iCloud</li>
+<li>Settings > Data Grid > Default row sort opens tables sorted by primary key or first column (#1284)</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>Database switcher is now a toolbar popover with active-row checkmark, search, Refresh, and an engine-aware New Database footer (⌘N and ⌘R bound globally)</li>
+<li>New Database and Drop Database use native sheet and confirmation dialogs</li>
+</ul>
+<h3>Security</h3>
+<ul>
+<li>AI Chat: destructive operations (DROP, TRUNCATE, ALTER...DROP) always prompt for approval; Silent mode and Always Allow no longer bypass the check</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>AI Chat: Gemini tool calls no longer fail with 400, `thoughtSignature` round-trips after tool runs, and DeepSeek V4 thinking is captured across turns</li>
+<li>AI Chat: GitHub Copilot tool registration accepts optional fields</li>
+<li>MySQL/MariaDB: `BIT(N)` columns display as decimal numbers instead of raw bytes (#1272)</li>
+<li>Structure tab: Refresh and ⌘R show external schema changes on Columns, DDL, and ClickHouse Parts (#1281)</li>
+<li>Query editor: Enter and ⌘+Enter work after accepting an autocomplete suggestion, and double-click no longer closes the window (#1278)</li>
+<li>Query editor autocomplete reflects external column renames after Refresh</li>
+<li>ClickHouse, BigQuery, CloudflareD1, LibSQL, Etcd, and DynamoDB: long-running queries honor Settings > Query timeout instead of failing at 30 seconds (#1267)</li>
+<li>MongoDB: connection form shows the Username field so auth-enabled servers stop failing with "requires authentication"</li>
+<li>MongoDB: deleting a host from the multi-host editor keeps the list interactive (#1293)</li>
+<li>SQL import: PostgreSQL dollar-quoted function bodies parse correctly, and statements are no longer dropped when the database is slower than the parser (#1264)</li>
+<li>SQL export: views, materialized views, and foreign tables emit the matching `DROP` (#1264)</li>
+<li>iOS: connections, groups, and tags survive TestFlight and App Store updates</li>
+</ul>
+<h3>Removed</h3>
+<ul>
+<li>Help > Report an Issue; the menu item opens GitHub Issues in a browser</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.42.0/TablePro-0.42.0-x86_64.zip" length="22547352" type="application/octet-stream" sparkle:edSignature="ClCgvrU+kIjweERtNj8vCNjexU1vV3tNaCiuNVrljOpZ7byfvwe+FjIkxP1a3TZX2y+/bvA8BM+C0EO2p/okAg=="/>
+        </item>
+        <item>
+            <title>0.41.0</title>
+            <pubDate>Wed, 13 May 2026 08:52:30 +0000</pubDate>
+            <sparkle:version>84</sparkle:version>
+            <sparkle:shortVersionString>0.41.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<h3>Added</h3>
+<ul>
+<li>File > Backup Dump… and Restore Dump… for PostgreSQL and Redshift, with live progress, cancel, and SSH tunnel reuse (#1211).</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>Plugin format updated. Older plugin builds no longer load; reinstall plugins from the registry after updating.</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Redis: "Required (skip verify)" SSL mode now actually skips certificate verification, so Upstash and other untrusted-CA endpoints connect (#1247).</li>
+<li>MSSQL: SSL mode setting now affects the connection. Previously every mode was silently ignored.</li>
+<li>MongoDB: "Required" and "Verify CA" SSL modes connect to self-signed and untrusted-CA servers instead of failing.</li>
+<li>MongoDB: connecting no longer crashes with `dispatch_sync called on queue already owned by current thread` (#1249).</li>
+<li>MongoDB: TLS handshake to Atlas no longer fails with `internal error (-9838)` on macOS 26.</li>
+<li>MongoDB: importing a connection URL with no database path now works for Atlas users restricted to one database.</li>
+<li>MySQL: CA certificate is no longer loaded when the SSL mode skips verification, matching PostgreSQL.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.41.0/TablePro-0.41.0-arm64.zip" length="20938745" type="application/octet-stream" sparkle:edSignature="kN0zs3i+oBFaeSpRDbCWWWj8E5lhgBtyBOaRHy2slb7Bffe2R4UeKLtyQp9Im6G+teA0dc3ksz8aFfmulGp2CQ=="/>
+        </item>
+        <item>
+            <title>0.41.0</title>
+            <pubDate>Wed, 13 May 2026 08:52:31 +0000</pubDate>
+            <sparkle:version>84</sparkle:version>
+            <sparkle:shortVersionString>0.41.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h3>Added</h3>
+<ul>
+<li>File > Backup Dump… and Restore Dump… for PostgreSQL and Redshift, with live progress, cancel, and SSH tunnel reuse (#1211).</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>Plugin format updated. Older plugin builds no longer load; reinstall plugins from the registry after updating.</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Redis: "Required (skip verify)" SSL mode now actually skips certificate verification, so Upstash and other untrusted-CA endpoints connect (#1247).</li>
+<li>MSSQL: SSL mode setting now affects the connection. Previously every mode was silently ignored.</li>
+<li>MongoDB: "Required" and "Verify CA" SSL modes connect to self-signed and untrusted-CA servers instead of failing.</li>
+<li>MongoDB: connecting no longer crashes with `dispatch_sync called on queue already owned by current thread` (#1249).</li>
+<li>MongoDB: TLS handshake to Atlas no longer fails with `internal error (-9838)` on macOS 26.</li>
+<li>MongoDB: importing a connection URL with no database path now works for Atlas users restricted to one database.</li>
+<li>MySQL: CA certificate is no longer loaded when the SSL mode skips verification, matching PostgreSQL.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.41.0/TablePro-0.41.0-x86_64.zip" length="22189374" type="application/octet-stream" sparkle:edSignature="MHYFSxTaskh8m6U8M8L6V5VME3vPsCICh647g57H5uwB0xpMdx7ZKsr4vijT9uQXHOAW5UvEKNqPx8WrM4AUCg=="/>
+        </item>
+        <item>
+            <title>0.40.3</title>
+            <pubDate>Wed, 13 May 2026 03:13:19 +0000</pubDate>
+            <sparkle:version>83</sparkle:version>
+            <sparkle:shortVersionString>0.40.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<h3>Fixed</h3>
+<ul>
+<li>AI Chat: scrolling stays smooth on long conversations and stream completion no longer briefly hides the chat. (#1239)</li>
+<li>AI Chat: starting a new conversation no longer carries context from the previous one.</li>
+<li>PostgreSQL: connecting to servers older than 9.3 no longer fails on schema load. (#1240)</li>
+<li>MySQL: EXPLAIN now offers a plain variant that works on every version.</li>
+<li>MSSQL: editing a view on SQL Server 2014 or earlier no longer fails with a syntax error.</li>
+<li>Cassandra: connecting to a 2.x server now shows a clear unsupported-version message instead of failing on sidebar load.</li>
+<li>MongoDB: connecting to servers older than 3.4 no longer fails on the database listing.</li>
+<li>ClickHouse: the index sidebar no longer fails on versions older than 19.17.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.40.3/TablePro-0.40.3-arm64.zip" length="20864292" type="application/octet-stream" sparkle:edSignature="Kp61TugT3u1yi6niZwPlo3bAzS8bHfhcqhCBThnUAg9RWir8xW3KTwFzO0MgBrj+khYgsXpUTgE+W4MlL4G8Cw=="/>
+        </item>
+        <item>
+            <title>0.40.3</title>
+            <pubDate>Wed, 13 May 2026 03:13:19 +0000</pubDate>
+            <sparkle:version>83</sparkle:version>
+            <sparkle:shortVersionString>0.40.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h3>Fixed</h3>
+<ul>
+<li>AI Chat: scrolling stays smooth on long conversations and stream completion no longer briefly hides the chat. (#1239)</li>
+<li>AI Chat: starting a new conversation no longer carries context from the previous one.</li>
+<li>PostgreSQL: connecting to servers older than 9.3 no longer fails on schema load. (#1240)</li>
+<li>MySQL: EXPLAIN now offers a plain variant that works on every version.</li>
+<li>MSSQL: editing a view on SQL Server 2014 or earlier no longer fails with a syntax error.</li>
+<li>Cassandra: connecting to a 2.x server now shows a clear unsupported-version message instead of failing on sidebar load.</li>
+<li>MongoDB: connecting to servers older than 3.4 no longer fails on the database listing.</li>
+<li>ClickHouse: the index sidebar no longer fails on versions older than 19.17.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.40.3/TablePro-0.40.3-x86_64.zip" length="22109667" type="application/octet-stream" sparkle:edSignature="mG9gGdUJKbG8QIpVQWO4BWJcyQ6HzoY60Qhmb29ziLcjT0kKg5Eu2wzd3WrAKADe8DRNBjIeKmduAvYjYBjgDw=="/>
+        </item>
+        <item>
+            <title>0.40.2</title>
+            <pubDate>Tue, 12 May 2026 13:39:58 +0000</pubDate>
+            <sparkle:version>82</sparkle:version>
+            <sparkle:shortVersionString>0.40.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<h3>Added</h3>
+<ul>
+<li>Right-click Set Value on date, datetime, and timestamp cells now offers `CURRENT_DATE`, `CURRENT_TIME`, `NOW()`, and `CURRENT_TIMESTAMP`, filtered by column type.</li>
+<li>Welcome screen left pane gains an Import from Other App button.</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>Row numbers in the data grid continue across pages and the `#` column auto-sizes to fit the widest visible number.</li>
+<li>Date, datetime, and timestamp cells use the standard inline text editor; the popover date picker is removed.</li>
+<li>Foreign key preview popover follows the selected row as you arrow up or down.</li>
+<li>The connection window shows the connecting state inline with a Cancel button.</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Closing the connection window during a slow connect no longer leaves a stuck "Connecting…" window or a stray failure alert (#1185).</li>
+<li>Cmd+Z while editing a cell now undoes typing in the editor; pressing it after dismissing the editor no longer crashes.</li>
+<li>Cmd+Z right after Add Row no longer leaves a stranded editor floating over the removed row.</li>
+<li>Editing a NULL cell and dismissing without typing no longer flips the value to an empty string.</li>
+<li>Double-clicking another cell while editing no longer delays the new editor or drops pending changes on the previous one.</li>
+<li>Double-clicking an enum, set, or boolean cell now opens the inline text editor; the chevron still opens the picker popover.</li>
+<li>Chevron-accessory cells (enum, boolean, JSON, blob) no longer truncate short values that fit the full cell width.</li>
+<li>DATE columns no longer render a phantom `00:00:00` time suffix.</li>
+<li>Adding a new row no longer renders the row on top of the auto-opened cell editor mid-animation.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.40.2/TablePro-0.40.2-arm64.zip" length="20859947" type="application/octet-stream" sparkle:edSignature="WdCliaccGeJi4vP6dKQ94f98IOk4nxifqD32eLo3E//uOsBQKPFfOg2xFHmmbfQfwCGYE5jXpIvO/k5rtRlVDQ=="/>
+        </item>
+        <item>
+            <title>0.40.2</title>
+            <pubDate>Tue, 12 May 2026 13:39:59 +0000</pubDate>
+            <sparkle:version>82</sparkle:version>
+            <sparkle:shortVersionString>0.40.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h3>Added</h3>
+<ul>
+<li>Right-click Set Value on date, datetime, and timestamp cells now offers `CURRENT_DATE`, `CURRENT_TIME`, `NOW()`, and `CURRENT_TIMESTAMP`, filtered by column type.</li>
+<li>Welcome screen left pane gains an Import from Other App button.</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>Row numbers in the data grid continue across pages and the `#` column auto-sizes to fit the widest visible number.</li>
+<li>Date, datetime, and timestamp cells use the standard inline text editor; the popover date picker is removed.</li>
+<li>Foreign key preview popover follows the selected row as you arrow up or down.</li>
+<li>The connection window shows the connecting state inline with a Cancel button.</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Closing the connection window during a slow connect no longer leaves a stuck "Connecting…" window or a stray failure alert (#1185).</li>
+<li>Cmd+Z while editing a cell now undoes typing in the editor; pressing it after dismissing the editor no longer crashes.</li>
+<li>Cmd+Z right after Add Row no longer leaves a stranded editor floating over the removed row.</li>
+<li>Editing a NULL cell and dismissing without typing no longer flips the value to an empty string.</li>
+<li>Double-clicking another cell while editing no longer delays the new editor or drops pending changes on the previous one.</li>
+<li>Double-clicking an enum, set, or boolean cell now opens the inline text editor; the chevron still opens the picker popover.</li>
+<li>Chevron-accessory cells (enum, boolean, JSON, blob) no longer truncate short values that fit the full cell width.</li>
+<li>DATE columns no longer render a phantom `00:00:00` time suffix.</li>
+<li>Adding a new row no longer renders the row on top of the auto-opened cell editor mid-animation.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.40.2/TablePro-0.40.2-x86_64.zip" length="22104518" type="application/octet-stream" sparkle:edSignature="DsPPoCITf8i5HWoD/6ifeWjDnJXqCKbOg4H+rc6hUSXHJF4ZhX37oP+73VpVZrM6GFI+gagoIrewpbMbbMH+Ag=="/>
+        </item>
+        <item>
+            <title>0.40.1</title>
+            <pubDate>Tue, 12 May 2026 06:27:15 +0000</pubDate>
+            <sparkle:version>81</sparkle:version>
+            <sparkle:shortVersionString>0.40.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<h3>Changed</h3>
+<ul>
+<li>Quick Switcher matches the Open Database dialog and shows a Recent section per connection.</li>
+<li>Connection Switcher and SQL Preview open as sheets so they work from the toolbar, overflow menu, and keyboard shortcuts.</li>
+<li>Filters button moved out of the toolbar; the bottom-bar Filters control remains.</li>
+<li>Welcome screen drops the Import Connections button; both import flows remain in the + menu.</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Toolbar overflow menu entries now fire their action when the window is narrowed.</li>
+<li>SQL Preview no longer freezes when previewing a very large batch.</li>
+<li>Quick Switcher crash on macOS 26.</li>
+<li>Registry updates for bundled drivers (ClickHouse, Redis) now persist after restart.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.40.1/TablePro-0.40.1-arm64.zip" length="20849463" type="application/octet-stream" sparkle:edSignature="cGyMlou/Kad39luVXnLrIdLUiXXs+8tuKssEeXZGLxp04Bw6X1De2piaD3eE5h/8Pq96mqx6yR3L5XenJzIHBg=="/>
+        </item>
+        <item>
+            <title>0.40.1</title>
+            <pubDate>Tue, 12 May 2026 06:27:16 +0000</pubDate>
+            <sparkle:version>81</sparkle:version>
+            <sparkle:shortVersionString>0.40.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h3>Changed</h3>
+<ul>
+<li>Quick Switcher matches the Open Database dialog and shows a Recent section per connection.</li>
+<li>Connection Switcher and SQL Preview open as sheets so they work from the toolbar, overflow menu, and keyboard shortcuts.</li>
+<li>Filters button moved out of the toolbar; the bottom-bar Filters control remains.</li>
+<li>Welcome screen drops the Import Connections button; both import flows remain in the + menu.</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Toolbar overflow menu entries now fire their action when the window is narrowed.</li>
+<li>SQL Preview no longer freezes when previewing a very large batch.</li>
+<li>Quick Switcher crash on macOS 26.</li>
+<li>Registry updates for bundled drivers (ClickHouse, Redis) now persist after restart.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.40.1/TablePro-0.40.1-x86_64.zip" length="22085709" type="application/octet-stream" sparkle:edSignature="QG1xzuQVMj2JIAA7bmCRx8Zp0HFgGrM2UtKCACTNC07gcDuZAImt2ymTO4DeEQGogRGygYoM8DWLK49Ink+MAg=="/>
+        </item>
+        <item>
+            <title>0.40.0</title>
+            <pubDate>Mon, 11 May 2026 17:38:50 +0000</pubDate>
+            <sparkle:version>80</sparkle:version>
+            <sparkle:shortVersionString>0.40.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<h3>Added</h3>
+<ul>
+<li>Vim mode in the SQL editor (motions, operators, text objects, registers, macros, marks, search)</li>
+<li>Sidebar groups views, materialized views, foreign tables, procedures, and functions; Show DDL opens in a new tab (#1038)</li>
+<li>iOS: Live Activity for running queries</li>
+<li>iOS: multi-window on iPad</li>
+<li>iOS: Face ID / Touch ID / Optic ID app lock with idle timeout</li>
+<li>iOS: background iCloud sync</li>
+<li>iOS: Connection Info tab</li>
+<li>iOS: Cmd+F focuses search; search text persists across kill</li>
+<li>iOS: VoiceOver delete actions; Create button on empty Groups/Tags; No Results empty state; alert when active connection is deleted mid-session</li>
+<li>iOS Settings: iCloud Sync, Rows per Page, Default Safe Mode, Hide query in Live Activities</li>
+<li>MCP Setup adds Zed</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>Wide-table scroll faster (max main-thread stall 3.5s to 1.3s); display cache 50k rows / 64 MB</li>
+<li>Sidebar: white tint on selected row; per-section count removed</li>
+<li>Edits in one window no longer refresh unrelated windows (favorites, history, linked folders)</li>
+<li>iOS: Vietnamese localization complete</li>
+<li>iOS: centered nav title dropped on connection tabs</li>
+<li>iOS accessibility: combined VoiceOver row labels, icon-button labels, badge size caps</li>
+<li>iOS: SQL editor uses the system keyboard input view; Edit Connection moved to the nav bar</li>
+<li>PostgreSQL SQL export round-trips foreign keys and sequences cleanly (#1114)</li>
+<li>SQL import parser streams large files (#1114)</li>
+<li>AI inline-suggestion debounce configurable (default 500 ms)</li>
+<li>Copilot LSP: 10s shutdown cap; quarantine attribute stripped</li>
+<li>MCP HTTP: 30-second SSE keep-alive</li>
+<li>AI providers: 5s timeout, known-model fallback, model list through Claude 4.7</li>
+<li>AI Chat: per-tool access modes; duplicate slash command names rejected</li>
+<li>AI Chat views: native button styles, semantic colors, 8-pt grid, a11y labels</li>
+<li>Translucent surfaces honor Reduce Transparency and Increase Contrast</li>
+<li>Result grid: direct-draw cells on a layer-backed view</li>
+<li>Plugin contract: typed binary cells across all engines (#1188)</li>
+<li>Double-click and Return on a binary cell open the hex editor</li>
+<li>Plugin registry cache moved to `~/Library/Caches`</li>
+<li>Plugin install off the main actor; signing reads team id at runtime</li>
+<li>Restart TablePro banner gains Quit & Reopen; state in-memory only</li>
+<li>Default PluginKit escape no longer escapes backslashes</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Vim: Shift+J joins lines; `w`/`W` no longer overshoot; Esc switches mode after `;` (#1222)</li>
+<li>AI Chat: Copilot Agent mode persists across turns</li>
+<li>AI Chat: streaming no longer hangs at 100% CPU; pre-tool text shows above the tool card; native Markdown renderer (#1205)</li>
+<li>AI Chat: `@` mentions handle emoji at the cursor</li>
+<li>AI Chat: Fix Error prompt uses the database display name</li>
+<li>iOS: data browser no longer flashes No Data during reload</li>
+<li>iOS: row detail pager crash on filter</li>
+<li>MySQL/MariaDB: `BINARY(N)`/`VARBINARY(N)` route to blob editor; numeric/date/time render as values; stable JSON detection</li>
+<li>Data grid chevrons refresh on editability change and dim on deleted rows</li>
+<li>Welcome window opens reliably on launch and Dock click</li>
+<li>Plugin upgrades for built-in drivers persist after restart (#1192)</li>
+<li>Plugin install: end-to-end install lock; no continuation leak; multi-bundle ZIP rejected; auto-update preserves concurrent rejections</li>
+<li>Built-in plugins enforce the PluginKit version check</li>
+<li>Query cancelled alert no longer appears on tab supersession, refresh, or teardown</li>
+<li>Structure tab: tinting repaints on edit, delete, undo, save, discard; right-click Undo Delete; dropdown columns enter inline edit; Cmd+Shift+N adds a row</li>
+<li>Structure view: switching Columns / Indexes / Foreign Keys no longer shows stale data (#1110)</li>
+<li>Create Table: foreign-key and index-type columns render as dropdowns</li>
+<li>Sidebar tables load after a slow connect</li>
+<li>SQL Server: `USE <database>` switches DB; IDENTITY skipped on INSERT; default schema from `SELECT SCHEMA_NAME()`; DATETIME round-trips as ISO 8601</li>
+<li>Toolbar database/schema chip correct on connect</li>
+<li>Safe Mode silent: Cmd+Return no longer double-fires</li>
+<li>LSP `cancelRequest` no longer leaks continuations</li>
+<li>Schema provider no longer leaks via throwaway coordinator</li>
+<li>Reconnect-then-disconnect no longer writes into a tearing-down coordinator</li>
+<li>Sync coordinator: no overlapping tasks; `syncNow` is re-entrant-safe</li>
+<li>Failed connections-file save aborts dependent steps; form stays open with error</li>
+<li>iCloud sync: decode failures skip the record/category and log; cloud copy preserved</li>
+<li>Keychain reads distinguish cancelled prompts, failed biometrics, and not-found</li>
+<li>Terminal PTY writes retry on `EINTR`</li>
+<li>MCP HTTP: structured internal-error envelope on encode failure</li>
+<li>Closing the last window no longer flashes Connection lost</li>
+<li>Smart-quote and dash substitution in cell editors and filter inputs</li>
+<li>Connecting one window no longer fetches tables in unrelated windows</li>
+<li>Foreign-key navigation from a tab with unsaved edits opens in a new tab without wiping the original</li>
+<li>SQL import: tables sidebar refreshes; PostgreSQL Disable foreign key checks; identity columns and dollar-quoted blocks round-trip (#1114)</li>
+<li>PostgreSQL/Redshift: schema picker no longer hides `pg*` user schemas</li>
+<li>Connection-only payloads no longer create an empty `Query 1` tab</li>
+<li>Import from Other App: Cancel button stops the keychain prompt loop (#1134)</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.40.0/TablePro-0.40.0-arm64.zip" length="20837564" type="application/octet-stream" sparkle:edSignature="gA17JJkIWrSfDgnYMpCnIeGkKBMJCSCIODIlxGgnqT1NArBCaQWT9E2dwv6209KWKgA9cwQsET+XZwpkdssHDA=="/>
+        </item>
+        <item>
+            <title>0.40.0</title>
+            <pubDate>Mon, 11 May 2026 17:38:51 +0000</pubDate>
+            <sparkle:version>80</sparkle:version>
+            <sparkle:shortVersionString>0.40.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h3>Added</h3>
+<ul>
+<li>Vim mode in the SQL editor (motions, operators, text objects, registers, macros, marks, search)</li>
+<li>Sidebar groups views, materialized views, foreign tables, procedures, and functions; Show DDL opens in a new tab (#1038)</li>
+<li>iOS: Live Activity for running queries</li>
+<li>iOS: multi-window on iPad</li>
+<li>iOS: Face ID / Touch ID / Optic ID app lock with idle timeout</li>
+<li>iOS: background iCloud sync</li>
+<li>iOS: Connection Info tab</li>
+<li>iOS: Cmd+F focuses search; search text persists across kill</li>
+<li>iOS: VoiceOver delete actions; Create button on empty Groups/Tags; No Results empty state; alert when active connection is deleted mid-session</li>
+<li>iOS Settings: iCloud Sync, Rows per Page, Default Safe Mode, Hide query in Live Activities</li>
+<li>MCP Setup adds Zed</li>
+</ul>
+<h3>Changed</h3>
+<ul>
+<li>Wide-table scroll faster (max main-thread stall 3.5s to 1.3s); display cache 50k rows / 64 MB</li>
+<li>Sidebar: white tint on selected row; per-section count removed</li>
+<li>Edits in one window no longer refresh unrelated windows (favorites, history, linked folders)</li>
+<li>iOS: Vietnamese localization complete</li>
+<li>iOS: centered nav title dropped on connection tabs</li>
+<li>iOS accessibility: combined VoiceOver row labels, icon-button labels, badge size caps</li>
+<li>iOS: SQL editor uses the system keyboard input view; Edit Connection moved to the nav bar</li>
+<li>PostgreSQL SQL export round-trips foreign keys and sequences cleanly (#1114)</li>
+<li>SQL import parser streams large files (#1114)</li>
+<li>AI inline-suggestion debounce configurable (default 500 ms)</li>
+<li>Copilot LSP: 10s shutdown cap; quarantine attribute stripped</li>
+<li>MCP HTTP: 30-second SSE keep-alive</li>
+<li>AI providers: 5s timeout, known-model fallback, model list through Claude 4.7</li>
+<li>AI Chat: per-tool access modes; duplicate slash command names rejected</li>
+<li>AI Chat views: native button styles, semantic colors, 8-pt grid, a11y labels</li>
+<li>Translucent surfaces honor Reduce Transparency and Increase Contrast</li>
+<li>Result grid: direct-draw cells on a layer-backed view</li>
+<li>Plugin contract: typed binary cells across all engines (#1188)</li>
+<li>Double-click and Return on a binary cell open the hex editor</li>
+<li>Plugin registry cache moved to `~/Library/Caches`</li>
+<li>Plugin install off the main actor; signing reads team id at runtime</li>
+<li>Restart TablePro banner gains Quit & Reopen; state in-memory only</li>
+<li>Default PluginKit escape no longer escapes backslashes</li>
+</ul>
+<h3>Fixed</h3>
+<ul>
+<li>Vim: Shift+J joins lines; `w`/`W` no longer overshoot; Esc switches mode after `;` (#1222)</li>
+<li>AI Chat: Copilot Agent mode persists across turns</li>
+<li>AI Chat: streaming no longer hangs at 100% CPU; pre-tool text shows above the tool card; native Markdown renderer (#1205)</li>
+<li>AI Chat: `@` mentions handle emoji at the cursor</li>
+<li>AI Chat: Fix Error prompt uses the database display name</li>
+<li>iOS: data browser no longer flashes No Data during reload</li>
+<li>iOS: row detail pager crash on filter</li>
+<li>MySQL/MariaDB: `BINARY(N)`/`VARBINARY(N)` route to blob editor; numeric/date/time render as values; stable JSON detection</li>
+<li>Data grid chevrons refresh on editability change and dim on deleted rows</li>
+<li>Welcome window opens reliably on launch and Dock click</li>
+<li>Plugin upgrades for built-in drivers persist after restart (#1192)</li>
+<li>Plugin install: end-to-end install lock; no continuation leak; multi-bundle ZIP rejected; auto-update preserves concurrent rejections</li>
+<li>Built-in plugins enforce the PluginKit version check</li>
+<li>Query cancelled alert no longer appears on tab supersession, refresh, or teardown</li>
+<li>Structure tab: tinting repaints on edit, delete, undo, save, discard; right-click Undo Delete; dropdown columns enter inline edit; Cmd+Shift+N adds a row</li>
+<li>Structure view: switching Columns / Indexes / Foreign Keys no longer shows stale data (#1110)</li>
+<li>Create Table: foreign-key and index-type columns render as dropdowns</li>
+<li>Sidebar tables load after a slow connect</li>
+<li>SQL Server: `USE <database>` switches DB; IDENTITY skipped on INSERT; default schema from `SELECT SCHEMA_NAME()`; DATETIME round-trips as ISO 8601</li>
+<li>Toolbar database/schema chip correct on connect</li>
+<li>Safe Mode silent: Cmd+Return no longer double-fires</li>
+<li>LSP `cancelRequest` no longer leaks continuations</li>
+<li>Schema provider no longer leaks via throwaway coordinator</li>
+<li>Reconnect-then-disconnect no longer writes into a tearing-down coordinator</li>
+<li>Sync coordinator: no overlapping tasks; `syncNow` is re-entrant-safe</li>
+<li>Failed connections-file save aborts dependent steps; form stays open with error</li>
+<li>iCloud sync: decode failures skip the record/category and log; cloud copy preserved</li>
+<li>Keychain reads distinguish cancelled prompts, failed biometrics, and not-found</li>
+<li>Terminal PTY writes retry on `EINTR`</li>
+<li>MCP HTTP: structured internal-error envelope on encode failure</li>
+<li>Closing the last window no longer flashes Connection lost</li>
+<li>Smart-quote and dash substitution in cell editors and filter inputs</li>
+<li>Connecting one window no longer fetches tables in unrelated windows</li>
+<li>Foreign-key navigation from a tab with unsaved edits opens in a new tab without wiping the original</li>
+<li>SQL import: tables sidebar refreshes; PostgreSQL Disable foreign key checks; identity columns and dollar-quoted blocks round-trip (#1114)</li>
+<li>PostgreSQL/Redshift: schema picker no longer hides `pg*` user schemas</li>
+<li>Connection-only payloads no longer create an empty `Query 1` tab</li>
+<li>Import from Other App: Cancel button stops the keychain prompt loop (#1134)</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/TableProApp/TablePro/releases/download/v0.40.0/TablePro-0.40.0-x86_64.zip" length="22078267" type="application/octet-stream" sparkle:edSignature="m3fxx804+LGUPvBDFMio4gy1mykMRa50/aiKPHxzOvesKkNktqCOCsEkDSuJ9qu5japSmIL9FXyJNEloVNBTBQ=="/>
+        </item>
+        <item>
             <title>0.39.1</title>
             <pubDate>Thu, 07 May 2026 19:08:49 +0000</pubDate>
             <sparkle:version>79</sparkle:version>

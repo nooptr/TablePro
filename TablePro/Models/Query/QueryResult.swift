@@ -6,12 +6,12 @@
 //
 
 import Foundation
+import TableProPluginKit
 
-/// Result of a database query execution
 struct QueryResult {
     let columns: [String]
-    let columnTypes: [ColumnType]  // NEW: Type metadata for each column
-    let rows: [[String?]]
+    let columnTypes: [ColumnType]
+    let rows: [[PluginCellValue]]
     let rowsAffected: Int
     let executionTime: TimeInterval
     let error: DatabaseError?
@@ -73,24 +73,40 @@ enum DatabaseError: Error, LocalizedError {
 
 /// Information about a database table
 struct TableInfo: Identifiable, Hashable, Sendable {
-    var id: String { "\(name)_\(type.rawValue)" }
+    var id: String {
+        if let schema, !schema.isEmpty {
+            return "\(schema).\(name)_\(type.rawValue)"
+        }
+        return "\(name)_\(type.rawValue)"
+    }
     let name: String
     let type: TableType
     let rowCount: Int?
+    let schema: String?
 
     enum TableType: String, Sendable {
         case table = "TABLE"
         case view = "VIEW"
+        case materializedView = "MATERIALIZED VIEW"
+        case foreignTable = "FOREIGN TABLE"
         case systemTable = "SYSTEM TABLE"
     }
 
+    init(name: String, type: TableType, rowCount: Int?, schema: String? = nil) {
+        self.name = name
+        self.type = type
+        self.rowCount = rowCount
+        self.schema = schema
+    }
+
     static func == (lhs: TableInfo, rhs: TableInfo) -> Bool {
-        lhs.name == rhs.name && lhs.type == rhs.type
+        lhs.name == rhs.name && lhs.type == rhs.type && lhs.schema == rhs.schema
     }
 
     func hash(into hasher: inout Hasher) {
         hasher.combine(name)
         hasher.combine(type)
+        hasher.combine(schema)
     }
 }
 
@@ -106,6 +122,31 @@ struct ColumnInfo: Identifiable, Hashable {
     let charset: String?
     let collation: String?
     let comment: String?
+    let allowedValues: [String]?
+
+    init(
+        name: String,
+        dataType: String,
+        isNullable: Bool,
+        isPrimaryKey: Bool,
+        defaultValue: String? = nil,
+        extra: String? = nil,
+        charset: String? = nil,
+        collation: String? = nil,
+        comment: String? = nil,
+        allowedValues: [String]? = nil
+    ) {
+        self.name = name
+        self.dataType = dataType
+        self.isNullable = isNullable
+        self.isPrimaryKey = isPrimaryKey
+        self.defaultValue = defaultValue
+        self.extra = extra
+        self.charset = charset
+        self.collation = collation
+        self.comment = comment
+        self.allowedValues = allowedValues
+    }
 }
 
 /// Information about a table index

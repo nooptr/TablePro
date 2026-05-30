@@ -18,7 +18,7 @@ extension PluginManager {
 
         if let driver = instance as? any DriverPlugin {
             if !declared.contains(.databaseDriver) {
-                Self.logger.warning("Plugin '\(pluginId)' conforms to DriverPlugin but does not declare .databaseDriver capability — registering anyway")
+                Self.logger.warning("Plugin '\(pluginId)' conforms to DriverPlugin but does not declare .databaseDriver capability - registering anyway")
             }
             do {
                 try validateDriverDescriptor(type(of: driver), pluginId: pluginId)
@@ -41,7 +41,12 @@ extension PluginManager {
                 )
                 PluginMetadataRegistry.shared.register(snapshot: snapshot, forTypeId: typeId, preserveIcon: true)
                 for additionalId in driverType.additionalDatabaseTypeIds {
-                    PluginMetadataRegistry.shared.register(snapshot: snapshot, forTypeId: additionalId, preserveIcon: true)
+                    var additionalSnapshot = snapshot
+                    if let existingDefault = PluginMetadataRegistry.shared.snapshot(forTypeId: additionalId),
+                       !existingDefault.explainVariants.isEmpty {
+                        additionalSnapshot = snapshot.withExplainVariants(existingDefault.explainVariants)
+                    }
+                    PluginMetadataRegistry.shared.register(snapshot: additionalSnapshot, forTypeId: additionalId, preserveIcon: true)
                     PluginMetadataRegistry.shared.registerTypeAlias(additionalId, primaryTypeId: typeId)
                 }
 
@@ -52,7 +57,7 @@ extension PluginManager {
 
         if let exportPlugin = instance as? any ExportFormatPlugin {
             if !declared.contains(.exportFormat) {
-                Self.logger.warning("Plugin '\(pluginId)' conforms to ExportFormatPlugin but does not declare .exportFormat capability — registering anyway")
+                Self.logger.warning("Plugin '\(pluginId)' conforms to ExportFormatPlugin but does not declare .exportFormat capability - registering anyway")
             }
             let formatId = type(of: exportPlugin).formatId
             exportPlugins[formatId] = exportPlugin
@@ -62,11 +67,21 @@ extension PluginManager {
 
         if let importPlugin = instance as? any ImportFormatPlugin {
             if !declared.contains(.importFormat) {
-                Self.logger.warning("Plugin '\(pluginId)' conforms to ImportFormatPlugin but does not declare .importFormat capability — registering anyway")
+                Self.logger.warning("Plugin '\(pluginId)' conforms to ImportFormatPlugin but does not declare .importFormat capability - registering anyway")
             }
             let formatId = type(of: importPlugin).formatId
             importPlugins[formatId] = importPlugin
             Self.logger.debug("Registered import plugin '\(pluginId)' for format '\(formatId)'")
+            registeredAny = true
+        }
+
+        if let inspectorPlugin = instance as? any DocumentInspectorPlugin {
+            if !declared.contains(.documentInspector) {
+                Self.logger.warning("Plugin '\(pluginId)' conforms to DocumentInspectorPlugin but does not declare .documentInspector capability - registering anyway")
+            }
+            let inspectorId = type(of: inspectorPlugin).inspectorId
+            inspectorPlugins[inspectorId] = inspectorPlugin
+            Self.logger.debug("Registered inspector plugin '\(pluginId)' for id '\(inspectorId)'")
             registeredAny = true
         }
 
@@ -80,6 +95,7 @@ extension PluginManager {
         let isDriver = pluginType is any DriverPlugin.Type
         let isExporter = pluginType is any ExportFormatPlugin.Type
         let isImporter = pluginType is any ImportFormatPlugin.Type
+        let isInspector = pluginType is any DocumentInspectorPlugin.Type
 
         if declared.contains(.databaseDriver) && !isDriver {
             Self.logger.warning("Plugin '\(pluginId)' declares .databaseDriver but does not conform to DriverPlugin")
@@ -89,6 +105,9 @@ extension PluginManager {
         }
         if declared.contains(.importFormat) && !isImporter {
             Self.logger.warning("Plugin '\(pluginId)' declares .importFormat but does not conform to ImportFormatPlugin")
+        }
+        if declared.contains(.documentInspector) && !isInspector {
+            Self.logger.warning("Plugin '\(pluginId)' declares .documentInspector but does not conform to DocumentInspectorPlugin")
         }
     }
 
@@ -387,6 +406,11 @@ extension PluginManager {
             .capabilities.supportsSSL ?? true
     }
 
+    func supportsCloudflareTunnel(for databaseType: DatabaseType) -> Bool {
+        PluginMetadataRegistry.shared.snapshot(forTypeId: databaseType.pluginTypeId)?
+            .capabilities.supportsCloudflareTunnel ?? true
+    }
+
     func supportsColumnReorder(for databaseType: DatabaseType) -> Bool {
         PluginMetadataRegistry.shared.snapshot(forTypeId: databaseType.pluginTypeId)?
             .supportsColumnReorder ?? false
@@ -422,6 +446,15 @@ extension PluginManager {
             .schema.databaseGroupingStrategy ?? .byDatabase
     }
 
+    func supportsDatabaseTree(for databaseType: DatabaseType) -> Bool {
+        guard connectionMode(for: databaseType) == .network,
+              supportsDatabaseSwitching(for: databaseType) else {
+            return false
+        }
+        let grouping = databaseGroupingStrategy(for: databaseType)
+        return grouping == .byDatabase || grouping == .bySchema
+    }
+
     func defaultGroupName(for databaseType: DatabaseType) -> String {
         PluginMetadataRegistry.shared.snapshot(forTypeId: databaseType.pluginTypeId)?
             .schema.defaultGroupName ?? "main"
@@ -451,7 +484,6 @@ extension PluginManager {
         }) {
             if !existingEntry.isEnabled {
                 setEnabled(true, pluginId: existingEntry.id)
-                await loadPendingPluginsAsync()
             }
             if driverPlugins[pluginTypeId] != nil {
                 Self.logger.info("Re-enabled existing plugin '\(existingEntry.name)' for '\(databaseType.rawValue)'")
@@ -460,7 +492,7 @@ extension PluginManager {
             Self.logger.warning("Plugin '\(existingEntry.id)' exists but driver not registered, reinstalling")
             if existingEntry.source == .userInstalled {
                 do {
-                    try uninstallPlugin(id: existingEntry.id)
+                    try await uninstallPlugin(id: existingEntry.id)
                 } catch {
                     Self.logger.warning("Failed to uninstall plugin '\(existingEntry.id)' before reinstall: \(error.localizedDescription)")
                 }

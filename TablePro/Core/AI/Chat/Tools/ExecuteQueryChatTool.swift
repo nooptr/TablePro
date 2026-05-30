@@ -17,15 +17,22 @@ struct ExecuteQueryChatTool: ChatTool {
             "connection_id": ChatToolSchemaBuilder.connectionId,
             "query": ChatToolSchemaBuilder.string(description: "SQL or NoSQL query text"),
             "max_rows": ChatToolSchemaBuilder.integer(
-                description: "Maximum rows to return (default 500, max 10000)"
+                description: "Maximum rows to return (default 500, max 10000). Pass null to use default.",
+                optional: true
             ),
             "timeout_seconds": ChatToolSchemaBuilder.integer(
-                description: "Query timeout in seconds (default 30, max 300)"
+                description: "Query timeout in seconds (default 30, max 300). Pass null to use default.",
+                optional: true
             ),
-            "database": ChatToolSchemaBuilder.string(description: "Switch to this database before executing"),
-            "schema": ChatToolSchemaBuilder.string(description: "Switch to this schema before executing")
-        ],
-        required: ["connection_id", "query"]
+            "database": ChatToolSchemaBuilder.string(
+                description: "Switch to this database before executing. Pass null to use current.",
+                optional: true
+            ),
+            "schema": ChatToolSchemaBuilder.string(
+                description: "Switch to this schema before executing. Pass null to use current.",
+                optional: true
+            )
+        ]
     )
     let mode: ChatToolMode = .write
 
@@ -75,6 +82,13 @@ struct ExecuteQueryChatTool: ChatTool {
         if let schema {
             _ = try await context.bridge.switchSchema(connectionId: connectionId, schema: schema)
         }
+
+        try await context.authPolicy.checkSafeModeDialog(
+            sql: query,
+            connectionId: connectionId,
+            databaseType: meta.databaseType,
+            capabilities: [.mayWrite, .mayRunDestructive, .confirmationPreCleared]
+        )
 
         let services = MCPToolServices(connectionBridge: context.bridge, authPolicy: context.authPolicy)
         let payload = try await ToolQueryExecutor.executeAndLog(

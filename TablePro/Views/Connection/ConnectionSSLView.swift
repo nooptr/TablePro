@@ -6,13 +6,25 @@
 //
 
 import SwiftUI
+import TableProPluginKit
 import UniformTypeIdentifiers
 
 struct ConnectionSSLView: View {
+    let databaseType: DatabaseType
     @Binding var sslMode: SSLMode
     @Binding var sslCaCertPath: String
     @Binding var sslClientCertPath: String
     @Binding var sslClientKeyPath: String
+    @Binding var sslClientKeyPassphrase: String
+
+    private var supportsPerConnectionCertPaths: Bool { databaseType != .mssql }
+
+    private var noOpportunisticTLSWarning: String {
+        if databaseType == .oracle {
+            return String(localized: "Preferred connects in plain TCP for this driver. Use Required to enforce TCPS.")
+        }
+        return String(localized: "This driver has no TLS fallback. Preferred forces TLS, same as Required.")
+    }
 
     var body: some View {
         Form {
@@ -22,16 +34,38 @@ struct ConnectionSSLView: View {
                         Text(mode.displayLabel).tag(mode)
                     }
                 }
-            } footer: {
-                if sslMode != .disabled {
-                    Text(sslMode.description)
+                if sslMode == .preferred, !databaseType.supportsOpportunisticTLS {
+                    Label(noOpportunisticTLSWarning, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(databaseType == .oracle ? .red : .orange)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
+            } footer: {
+                VStack(alignment: .leading, spacing: 6) {
+                    if !databaseType.sslPaneTooltip.isEmpty {
+                        Text(databaseType.sslPaneTooltip)
+                    }
+                    if sslMode != .disabled {
+                        Text(sslMode.description)
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
 
             if sslMode != .disabled {
-                if sslMode == .verifyCa || sslMode == .verifyIdentity {
+                if !supportsPerConnectionCertPaths {
+                    Section {
+                        Text(String(localized: """
+                            SQL Server connections use the system trust store. Per-connection CA and client certificate \
+                            paths are not supported by FreeTDS dblib; configure them in `freetds.conf` if you need a \
+                            custom trust anchor.
+                            """))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } header: {
+                        Text(String(localized: "Certificate Trust"))
+                    }
+                } else if sslMode == .verifyCa || sslMode == .verifyIdentity {
                     Section(String(localized: "CA Certificate")) {
                         LabeledContent(String(localized: "Certificate")) {
                             HStack {
@@ -46,35 +80,45 @@ struct ConnectionSSLView: View {
                     }
                 }
 
-                Section {
-                    LabeledContent(String(localized: "Client Certificate")) {
-                        HStack {
-                            TextField(
-                                "", text: $sslClientCertPath,
-                                prompt: Text(String(localized: "Optional")))
-                            Button(String(localized: "Browse")) {
-                                browseForCertificate(binding: $sslClientCertPath)
+                if supportsPerConnectionCertPaths {
+                    Section {
+                        LabeledContent(String(localized: "Client Certificate")) {
+                            HStack {
+                                TextField(
+                                    "", text: $sslClientCertPath,
+                                    prompt: Text(String(localized: "Optional")))
+                                Button(String(localized: "Browse")) {
+                                    browseForCertificate(binding: $sslClientCertPath)
+                                }
+                                .controlSize(.small)
                             }
-                            .controlSize(.small)
                         }
-                    }
-                    LabeledContent(String(localized: "Client Key")) {
-                        HStack {
-                            TextField(
-                                "", text: $sslClientKeyPath,
-                                prompt: Text(String(localized: "Optional")))
-                            Button(String(localized: "Browse")) {
-                                browseForCertificate(binding: $sslClientKeyPath)
+                        LabeledContent(String(localized: "Client Key")) {
+                            HStack {
+                                TextField(
+                                    "", text: $sslClientKeyPath,
+                                    prompt: Text(String(localized: "Optional")))
+                                Button(String(localized: "Browse")) {
+                                    browseForCertificate(binding: $sslClientKeyPath)
+                                }
+                                .controlSize(.small)
                             }
-                            .controlSize(.small)
                         }
+                        if databaseType.supportsClientKeyPassphrase,
+                           !sslClientKeyPath.trimmingCharacters(in: .whitespaces).isEmpty {
+                            LabeledContent(String(localized: "Key Passphrase")) {
+                                SecureField(
+                                    "", text: $sslClientKeyPassphrase,
+                                    prompt: Text(String(localized: "Required only for an encrypted key")))
+                            }
+                        }
+                    } header: {
+                        Text(String(localized: "Client Certificates"))
+                    } footer: {
+                        Text(String(localized: "Required only when the server enforces mutual TLS authentication."))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                } header: {
-                    Text(String(localized: "Client Certificates"))
-                } footer: {
-                    Text(String(localized: "Required only when the server enforces mutual TLS authentication."))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
             }
         }

@@ -7,6 +7,7 @@
 
 import os
 import SwiftUI
+import TableProPluginKit
 
 struct ClickHousePartsView: View {
     private static let logger = Logger(subsystem: "com.TablePro", category: "ClickHousePartsView")
@@ -28,7 +29,7 @@ struct ClickHousePartsView: View {
                 VStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle")
                         .font(.largeTitle)
-                        .foregroundStyle(Color(nsColor: .systemOrange))
+                        .foregroundStyle(.orange)
                         .accessibilityHidden(true)
                     Text(error)
                         .foregroundStyle(.secondary)
@@ -50,6 +51,9 @@ struct ClickHousePartsView: View {
             }
         }
         .task { await loadParts() }
+        .onReceive(AppCommands.shared.refreshData) { _ in
+            Task { await loadParts() }
+        }
     }
 
     private var partsToolbar: some View {
@@ -97,7 +101,7 @@ struct ClickHousePartsView: View {
                 .width(min: 100, ideal: 160)
             TableColumn("Active") { part in
                 Image(systemName: part.active ? "checkmark.circle.fill" : "xmark.circle")
-                    .foregroundStyle(part.active ? Color(nsColor: .systemGreen) : .secondary)
+                    .foregroundStyle(part.active ? .green : .secondary)
             }
             .width(min: 50, ideal: 60)
         }
@@ -108,8 +112,7 @@ struct ClickHousePartsView: View {
     private func optimizeTable() {
         Task {
             guard let driver = DatabaseManager.shared.driver(for: connectionId) else { return }
-            let escapedTable = tableName.replacingOccurrences(of: "`", with: "``")
-            let sql = "OPTIMIZE TABLE `\(escapedTable)` FINAL"
+            let sql = "OPTIMIZE TABLE \(driver.quoteIdentifier(tableName)) FINAL"
             do {
                 _ = try await driver.execute(query: sql)
                 await loadParts()
@@ -134,8 +137,7 @@ struct ClickHousePartsView: View {
             guard confirmed else { return }
 
             guard let driver = DatabaseManager.shared.driver(for: connectionId) else { return }
-            let escapedTable = tableName.replacingOccurrences(of: "`", with: "``")
-            let sql = "ALTER TABLE `\(escapedTable)` DROP PARTITION '\(partitionValue.replacingOccurrences(of: "'", with: "''"))'"
+            let sql = "ALTER TABLE \(driver.quoteIdentifier(tableName)) DROP PARTITION '\(driver.escapeStringLiteral(partitionValue))'"
             do {
                 _ = try await driver.execute(query: sql)
                 selection.removeAll()
@@ -161,8 +163,7 @@ struct ClickHousePartsView: View {
             guard confirmed else { return }
 
             guard let driver = DatabaseManager.shared.driver(for: connectionId) else { return }
-            let escapedTable = tableName.replacingOccurrences(of: "`", with: "``")
-            let sql = "ALTER TABLE `\(escapedTable)` DETACH PARTITION '\(partitionValue.replacingOccurrences(of: "'", with: "''"))'"
+            let sql = "ALTER TABLE \(driver.quoteIdentifier(tableName)) DETACH PARTITION '\(driver.escapeStringLiteral(partitionValue))'"
             do {
                 _ = try await driver.execute(query: sql)
                 selection.removeAll()
@@ -193,22 +194,21 @@ struct ClickHousePartsView: View {
         }
 
         do {
-            let escapedTable = tableName.replacingOccurrences(of: "'", with: "''")
             let sql = """
                 SELECT partition, name, rows, bytes_on_disk,
                        toString(modification_time) AS mod_time, active
                 FROM system.parts
-                WHERE database = currentDatabase() AND table = '\(escapedTable)'
+                WHERE database = currentDatabase() AND table = '\(driver.escapeStringLiteral(tableName))'
                 ORDER BY partition, name
                 """
             let result = try await driver.execute(query: sql)
             parts = result.rows.compactMap { row -> ClickHousePartInfo? in
-                guard let name = row[safe: 1] ?? nil else { return nil }
-                let partition = (row[safe: 0] ?? nil) ?? ""
-                let rows = (row[safe: 2] ?? nil).flatMap { UInt64($0) } ?? 0
-                let bytesOnDisk = (row[safe: 3] ?? nil).flatMap { UInt64($0) } ?? 0
-                let modTime = (row[safe: 4] ?? nil) ?? ""
-                let active = (row[safe: 5] ?? nil) == "1"
+                guard let name = row[safe: 1]?.asText else { return nil }
+                let partition = row[safe: 0]?.asText ?? ""
+                let rows = row[safe: 2]?.asText.flatMap { UInt64($0) } ?? 0
+                let bytesOnDisk = row[safe: 3]?.asText.flatMap { UInt64($0) } ?? 0
+                let modTime = row[safe: 4]?.asText ?? ""
+                let active = row[safe: 5]?.asText == "1"
                 return ClickHousePartInfo(
                     partition: partition,
                     name: name,

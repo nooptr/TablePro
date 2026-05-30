@@ -24,6 +24,9 @@
 		5AB9F3EB2F7C1D03001F3337 /* TableProModels in Frameworks */ = {isa = PBXBuildFile; productRef = 5AB9F3EA2F7C1D03001F3337 /* TableProModels */; };
 		5AB9F3ED2F7C1D03001F3337 /* TableProPluginKit in Frameworks */ = {isa = PBXBuildFile; productRef = 5AB9F3EC2F7C1D03001F3337 /* TableProPluginKit */; };
 		5AB9F3EF2F7C1D03001F3337 /* TableProQuery in Frameworks */ = {isa = PBXBuildFile; productRef = 5AB9F3EE2F7C1D03001F3337 /* TableProQuery */; };
+		5AD1F1B62FB4455700296783 /* TableProMSSQLCore in Frameworks */ = {isa = PBXBuildFile; productRef = 5AD1F1B52FB4455700296783 /* TableProMSSQLCore */; };
+		5AD1F1B82FB4456900296783 /* FreeTDS.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5AD1F1B72FB4456900296783 /* FreeTDS.xcframework */; };
+		5AD1F2002FB5500000000002 /* FreeTDSConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AD1F2002FB5500000000001 /* FreeTDSConnection.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -123,7 +126,6 @@
 		5A87ED242F7F88F200D028D0 /* ClipboardService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardService.swift; sourceTree = "<group>"; };
 		5A87ED252F7F88F200D028D0 /* DeeplinkHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeeplinkHandler.swift; sourceTree = "<group>"; };
 		5A87ED262F7F88F200D028D0 /* PreConnectHookRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreConnectHookRunner.swift; sourceTree = "<group>"; };
-		5A87ED272F7F88F200D028D0 /* SafeModeGuard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafeModeGuard.swift; sourceTree = "<group>"; };
 		5A87ED282F7F88F200D028D0 /* SessionStateFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionStateFactory.swift; sourceTree = "<group>"; };
 		5A87ED292F7F88F200D028D0 /* SettingsNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsNotifications.swift; sourceTree = "<group>"; };
 		5A87ED2A2F7F88F200D028D0 /* SettingsValidation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsValidation.swift; sourceTree = "<group>"; };
@@ -526,6 +528,8 @@
 		5AA313532F7EC188008EBA97 /* LibSSH2.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = LibSSH2.xcframework; path = ../Libs/ios/LibSSH2.xcframework; sourceTree = "<group>"; };
 		5AB9F3D92F7C1C12001F3337 /* TableProMobile.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TableProMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		5AC8A8F82FAFC99F005DE2A3 /* TableProMobileTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TableProMobileTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		5AD1F1B72FB4456900296783 /* FreeTDS.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = FreeTDS.xcframework; path = ../Libs/ios/FreeTDS.xcframework; sourceTree = "<group>"; };
+		5AD1F2002FB5500000000001 /* FreeTDSConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = FreeTDSConnection.swift; path = ../Plugins/MSSQLDriverPlugin/FreeTDSConnection.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -539,6 +543,7 @@
 		5AA136302F82660900ADCD58 /* Exceptions for "TableProWidget" folder in "TableProMobile" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				Shared/QueryActivityAttributes.swift,
 				Shared/SharedConnectionStore.swift,
 				Shared/WidgetConnectionItem.swift,
 			);
@@ -603,6 +608,8 @@
 				5AA3133E2F7EA5B4008EBA97 /* OpenSSL-Crypto.xcframework in Frameworks */,
 				5AA313442F7EA5B4008EBA97 /* OpenSSL-SSL.xcframework in Frameworks */,
 				5AB9F3ED2F7C1D03001F3337 /* TableProPluginKit in Frameworks */,
+				5AD1F1B82FB4456900296783 /* FreeTDS.xcframework in Frameworks */,
+				5AD1F1B62FB4455700296783 /* TableProMSSQLCore in Frameworks */,
 				5A87EEED2F7F893000D028D0 /* TableProSync in Frameworks */,
 				5AB9F3EB2F7C1D03001F3337 /* TableProModels in Frameworks */,
 			);
@@ -756,7 +763,6 @@
 				5A87ED242F7F88F200D028D0 /* ClipboardService.swift */,
 				5A87ED252F7F88F200D028D0 /* DeeplinkHandler.swift */,
 				5A87ED262F7F88F200D028D0 /* PreConnectHookRunner.swift */,
-				5A87ED272F7F88F200D028D0 /* SafeModeGuard.swift */,
 				5A87ED282F7F88F200D028D0 /* SessionStateFactory.swift */,
 				5A87ED292F7F88F200D028D0 /* SettingsNotifications.swift */,
 				5A87ED2A2F7F88F200D028D0 /* SettingsValidation.swift */,
@@ -1627,6 +1633,7 @@
 		5AA313332F7EA5B4008EBA97 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				5AD1F1B72FB4456900296783 /* FreeTDS.xcframework */,
 				5A87EEEB2F7F891F00D028D0 /* TableProSync */,
 				5A87EEE42F7F88F200D028D0 /* TablePro */,
 				5AA313532F7EC188008EBA97 /* LibSSH2.xcframework */,
@@ -1652,6 +1659,7 @@
 				5AA313332F7EA5B4008EBA97 /* Frameworks */,
 				5AB9F3DA2F7C1C12001F3337 /* Products */,
 				5A72D6222F97A69500E2ADE0 /* Secrets.xcconfig */,
+				5ABBE0152FB5554100A78382 /* Recovered References */,
 			);
 			sourceTree = "<group>";
 		};
@@ -1663,6 +1671,14 @@
 				5AC8A8F82FAFC99F005DE2A3 /* TableProMobileTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		5ABBE0152FB5554100A78382 /* Recovered References */ = {
+			isa = PBXGroup;
+			children = (
+				5AD1F2002FB5500000000001 /* FreeTDSConnection.swift */,
+			);
+			name = "Recovered References";
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -1715,6 +1731,7 @@
 				5AB9F3EE2F7C1D03001F3337 /* TableProQuery */,
 				5A87EEEC2F7F893000D028D0 /* TableProSync */,
 				5A87EEED2F7F893000D028D1 /* TableProAnalytics */,
+				5AD1F1B52FB4455700296783 /* TableProMSSQLCore */,
 			);
 			productName = TableProMobile;
 			productReference = 5AB9F3D92F7C1C12001F3337 /* TableProMobile.app */;
@@ -1826,6 +1843,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				5AD1F2002FB5500000000002 /* FreeTDSConnection.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1859,7 +1877,8 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
 				CODE_SIGN_ENTITLEMENTS = TableProWidgetExtension.entitlements;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 15;
+				CURRENT_PROJECT_VERSION = 14;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = TableProWidget/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = TableProWidget;
@@ -1890,7 +1909,8 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
 				CODE_SIGN_ENTITLEMENTS = TableProWidgetExtension.entitlements;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 15;
+				CURRENT_PROJECT_VERSION = 14;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = TableProWidget/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = TableProWidget;
@@ -2047,7 +2067,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGN_ENTITLEMENTS = TableProMobile/TableProMobileRelease.entitlements;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 15;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = TableProMobile/Info.plist;
@@ -2074,7 +2094,7 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/TableProMobile/CBridges/CMariaDB $(SRCROOT)/TableProMobile/CBridges/CLibPQ $(SRCROOT)/TableProMobile/CBridges/CRedis $(SRCROOT)/TableProMobile/CBridges/CLibSSH2";
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/TableProMobile/CBridges/CMariaDB $(SRCROOT)/TableProMobile/CBridges/CLibPQ $(SRCROOT)/TableProMobile/CBridges/CRedis $(SRCROOT)/TableProMobile/CBridges/CLibSSH2 $(SRCROOT)/TableProMobile/CBridges/CFreeTDS";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -2089,7 +2109,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGN_ENTITLEMENTS = TableProMobile/TableProMobileRelease.entitlements;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 15;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = TableProMobile/Info.plist;
@@ -2116,7 +2136,7 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/TableProMobile/CBridges/CMariaDB $(SRCROOT)/TableProMobile/CBridges/CLibPQ $(SRCROOT)/TableProMobile/CBridges/CRedis $(SRCROOT)/TableProMobile/CBridges/CLibSSH2";
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/TableProMobile/CBridges/CMariaDB $(SRCROOT)/TableProMobile/CBridges/CLibPQ $(SRCROOT)/TableProMobile/CBridges/CRedis $(SRCROOT)/TableProMobile/CBridges/CLibSSH2 $(SRCROOT)/TableProMobile/CBridges/CFreeTDS";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -2131,14 +2151,14 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = D7HJ5TFYCU;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.4;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = vn.nqd.TableProMobileTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/TableProMobile/CBridges/CMariaDB $(SRCROOT)/TableProMobile/CBridges/CLibPQ $(SRCROOT)/TableProMobile/CBridges/CRedis $(SRCROOT)/TableProMobile/CBridges/CLibSSH2";
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/TableProMobile/CBridges/CMariaDB $(SRCROOT)/TableProMobile/CBridges/CLibPQ $(SRCROOT)/TableProMobile/CBridges/CRedis $(SRCROOT)/TableProMobile/CBridges/CLibSSH2 $(SRCROOT)/TableProMobile/CBridges/CFreeTDS";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -2154,14 +2174,14 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = D7HJ5TFYCU;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.4;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = vn.nqd.TableProMobileTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/TableProMobile/CBridges/CMariaDB $(SRCROOT)/TableProMobile/CBridges/CLibPQ $(SRCROOT)/TableProMobile/CBridges/CRedis $(SRCROOT)/TableProMobile/CBridges/CLibSSH2";
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/TableProMobile/CBridges/CMariaDB $(SRCROOT)/TableProMobile/CBridges/CLibPQ $(SRCROOT)/TableProMobile/CBridges/CRedis $(SRCROOT)/TableProMobile/CBridges/CLibSSH2 $(SRCROOT)/TableProMobile/CBridges/CFreeTDS";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -2247,6 +2267,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 5AB9F3E72F7C1D03001F3337 /* XCLocalSwiftPackageReference "../Packages/TableProCore" */;
 			productName = TableProQuery;
+		};
+		5AD1F1B52FB4455700296783 /* TableProMSSQLCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5AB9F3E72F7C1D03001F3337 /* XCLocalSwiftPackageReference "../Packages/TableProCore" */;
+			productName = TableProMSSQLCore;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

@@ -29,6 +29,7 @@ final class ConnectionFormCoordinator {
     var network: NetworkPaneViewModel
     var auth: AuthPaneViewModel
     var ssh: SSHPaneViewModel
+    var cloudflareTunnel: CloudflareTunnelPaneViewModel
     var ssl: SSLPaneViewModel
     var customization: CustomizationPaneViewModel
     var advanced: AdvancedPaneViewModel
@@ -65,6 +66,9 @@ final class ConnectionFormCoordinator {
         if services.pluginManager.supportsSSH(for: network.type) {
             panes.append(.ssh)
         }
+        if services.pluginManager.supportsCloudflareTunnel(for: network.type) {
+            panes.append(.cloudflareTunnel)
+        }
         if services.pluginManager.supportsSSL(for: network.type) {
             panes.append(.ssl)
         }
@@ -78,6 +82,7 @@ final class ConnectionFormCoordinator {
         network.validationIssues.isEmpty
             && auth.validationIssues.isEmpty
             && ssh.validationIssues.isEmpty
+            && cloudflareTunnel.validationIssues.isEmpty
             && ssl.validationIssues.isEmpty
             && customization.validationIssues.isEmpty
             && advanced.validationIssues.isEmpty
@@ -99,6 +104,7 @@ final class ConnectionFormCoordinator {
         self.network = NetworkPaneViewModel()
         self.auth = AuthPaneViewModel()
         self.ssh = SSHPaneViewModel()
+        self.cloudflareTunnel = CloudflareTunnelPaneViewModel()
         self.ssl = SSLPaneViewModel()
         self.customization = CustomizationPaneViewModel()
         self.advanced = AdvancedPaneViewModel()
@@ -108,6 +114,7 @@ final class ConnectionFormCoordinator {
         network.coordinator = ref
         auth.coordinator = ref
         ssh.coordinator = ref
+        cloudflareTunnel.coordinator = ref
         ssl.coordinator = ref
         customization.coordinator = ref
         advanced.coordinator = ref
@@ -152,6 +159,7 @@ final class ConnectionFormCoordinator {
             network.load(from: existing)
             auth.load(from: existing, storage: storage)
             ssh.load(from: existing, storage: storage)
+            cloudflareTunnel.load(from: existing, storage: storage)
             ssl.load(from: existing)
             customization.load(from: existing)
             advanced.load(from: existing)
@@ -192,6 +200,7 @@ final class ConnectionFormCoordinator {
         if includeNetwork {
             network.applyTypeDefaults(forNewType: newType)
         }
+        ssl.resetForType(newType)
     }
 
     // MARK: - Save
@@ -254,6 +263,7 @@ final class ConnectionFormCoordinator {
         }
 
         let sshTunnelMode = ssh.state.buildTunnelMode()
+        let cloudflareTunnelMode = cloudflareTunnel.state.buildTunnelMode()
         let connectionToSave = DatabaseConnection(
             id: finalId,
             name: network.name,
@@ -269,6 +279,7 @@ final class ConnectionFormCoordinator {
             groupId: customization.groupId,
             sshProfileId: ssh.state.enabled ? ssh.state.profileId : nil,
             sshTunnelMode: sshTunnelMode,
+            cloudflareTunnelMode: cloudflareTunnelMode,
             safeModeLevel: customization.safeModeLevel,
             aiPolicy: advanced.aiPolicy,
             aiRules: aiRules.trimmedRules,
@@ -277,6 +288,7 @@ final class ConnectionFormCoordinator {
             startupCommands: advanced.startupCommands.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? nil : advanced.startupCommands,
             localOnly: advanced.localOnly,
+            passwordSource: originalConnection?.passwordSource,
             additionalFields: finalAdditionalFields.isEmpty ? nil : finalAdditionalFields
         )
 
@@ -305,6 +317,14 @@ final class ConnectionFormCoordinator {
             storage.deleteKeyPassphrase(for: connectionToSave.id)
             storage.deleteTOTPSecret(for: connectionToSave.id)
         }
+
+        if !ssl.clientKeyPassphrase.isEmpty && !ssl.clientKeyPath.trimmingCharacters(in: .whitespaces).isEmpty {
+            storage.saveSSLClientKeyPassphrase(ssl.clientKeyPassphrase, for: connectionToSave.id)
+        } else {
+            storage.deleteSSLClientKeyPassphrase(for: connectionToSave.id)
+        }
+
+        cloudflareTunnel.save(to: connectionToSave.id, storage: storage)
 
         var savedConnections = storage.loadConnections()
         if isNew {
@@ -351,25 +371,27 @@ final class ConnectionFormCoordinator {
     }
 
     func handleConnectError(_ error: Error, connection: DatabaseConnection) {
-        if case PluginError.pluginNotInstalled = error {
-            handleMissingPlugin(connection: connection)
+        if error is CancellationError {
+            Self.logger.info("Connection attempt cancelled for \(connection.name, privacy: .public)")
             return
         }
-        closeConnectionWindows(for: connection.id)
-        WindowOpener.shared.openWelcome()
-        guard !(error is CancellationError) else { return }
-        Self.logger.error("Failed to connect: \(error.localizedDescription, privacy: .public)")
-        AlertHelper.showErrorSheet(
-            title: String(localized: "Connection Failed"),
-            message: error.localizedDescription,
-            window: nil
-        )
-    }
 
-    func handleMissingPlugin(connection: DatabaseConnection) {
-        closeConnectionWindows(for: connection.id)
-        WindowOpener.shared.openWelcome()
-        pluginInstallConnection = connection
+        if !WindowManager.shared.hasOpenWindow(for: connection.id) {
+            Self.logger.info(
+                "Connection failed after window was closed: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+
+        WindowManager.shared.closeWindow(for: connection.id)
+
+        if case PluginError.pluginNotInstalled = error {
+            Self.logger.info("Plugin not installed for \(connection.type.rawValue, privacy: .public)")
+            WelcomeRouter.shared.routePluginInstall(connection)
+            return
+        }
+
+        Self.logger.error("Failed to connect: \(error.localizedDescription, privacy: .public)")
+        WelcomeRouter.shared.routeError(error, for: connection)
     }
 
     func connectAfterInstall(_ connection: DatabaseConnection) {
@@ -380,12 +402,6 @@ final class ConnectionFormCoordinator {
             } catch {
                 handleConnectError(error, connection: connection)
             }
-        }
-    }
-
-    private func closeConnectionWindows(for connectionId: UUID) {
-        for window in WindowLifecycleMonitor.shared.windows(for: connectionId) {
-            window.close()
         }
     }
 
@@ -431,6 +447,7 @@ final class ConnectionFormCoordinator {
         }
 
         let testTunnelMode = ssh.state.buildTunnelMode()
+        let testCloudflareMode = cloudflareTunnel.state.buildTunnelMode()
         let testConn = DatabaseConnection(
             name: network.name,
             host: testHost,
@@ -445,9 +462,11 @@ final class ConnectionFormCoordinator {
             groupId: customization.groupId,
             sshProfileId: ssh.state.enabled ? ssh.state.profileId : nil,
             sshTunnelMode: testTunnelMode,
+            cloudflareTunnelMode: testCloudflareMode,
             redisDatabase: advanced.additionalFieldValues["redisDatabase"].map { Int($0) ?? 0 },
             startupCommands: advanced.startupCommands.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? nil : advanced.startupCommands,
+            passwordSource: auth.password.isEmpty ? originalConnection?.passwordSource : nil,
             additionalFields: finalAdditionalFields.isEmpty ? nil : finalAdditionalFields
         )
         temporaryTestIds.insert(testConn.id)
@@ -457,37 +476,25 @@ final class ConnectionFormCoordinator {
         let connectionType = network.type
         let displayName = network.name.isEmpty ? network.host : network.name
         let sshState = ssh.state
+        let cloudflareState = cloudflareTunnel.state
+        let sslClientKeyPassphrase = ssl.clientKeyPassphrase
+        let sslClientKeyPath = ssl.clientKeyPath
         let additionalFieldValues = finalAdditionalFields
+
+        persistTestSecrets(
+            for: testConn.id,
+            password: password,
+            promptForPassword: promptForPassword,
+            sshState: sshState,
+            sslClientKeyPassphrase: sslClientKeyPassphrase,
+            sslClientKeyPath: sslClientKeyPath,
+            cloudflareState: cloudflareState,
+            connectionType: connectionType,
+            additionalFieldValues: additionalFieldValues
+        )
 
         testTask = Task { [weak self] in
             do {
-                if !password.isEmpty && !promptForPassword {
-                    services.connectionStorage.savePassword(password, for: testConn.id)
-                }
-                if sshState.enabled && sshState.profileId == nil {
-                    if (sshState.authMethod == .password || sshState.authMethod == .keyboardInteractive)
-                        && !sshState.password.isEmpty
-                    {
-                        services.connectionStorage.saveSSHPassword(sshState.password, for: testConn.id)
-                    }
-                    if sshState.authMethod == .privateKey && !sshState.keyPassphrase.isEmpty {
-                        services.connectionStorage.saveKeyPassphrase(sshState.keyPassphrase, for: testConn.id)
-                    }
-                    if sshState.totpMode == .autoGenerate && !sshState.totpSecret.isEmpty {
-                        services.connectionStorage.saveTOTPSecret(sshState.totpSecret, for: testConn.id)
-                    }
-                }
-
-                for field in services.pluginManager.additionalConnectionFields(for: connectionType)
-                    where field.isSecure
-                {
-                    if let value = additionalFieldValues[field.id], !value.isEmpty {
-                        services.connectionStorage.savePluginSecureField(
-                            value, fieldId: field.id, for: testConn.id
-                        )
-                    }
-                }
-
                 let sshPasswordForTest = sshState.profileId == nil ? sshState.password : nil
                 let isApiOnly = services.pluginManager.connectionMode(for: connectionType) == .apiOnly
                 let testPwOverride: String? = promptForPassword
@@ -543,7 +550,7 @@ final class ConnectionFormCoordinator {
                     } else {
                         AlertHelper.showErrorSheet(
                             title: String(localized: "Connection Test Failed"),
-                            message: error.localizedDescription,
+                            message: SSLHandshakeError.formatted(error),
                             window: window
                         )
                     }
@@ -552,11 +559,62 @@ final class ConnectionFormCoordinator {
         }
     }
 
+    private func persistTestSecrets(
+        for testId: UUID,
+        password: String,
+        promptForPassword: Bool,
+        sshState: SSHTunnelFormState,
+        sslClientKeyPassphrase: String,
+        sslClientKeyPath: String,
+        cloudflareState: CloudflareTunnelFormState,
+        connectionType: DatabaseType,
+        additionalFieldValues: [String: String]
+    ) {
+        if !password.isEmpty && !promptForPassword {
+            services.connectionStorage.savePassword(password, for: testId)
+        }
+        if sshState.enabled && sshState.profileId == nil {
+            if (sshState.authMethod == .password || sshState.authMethod == .keyboardInteractive)
+                && !sshState.password.isEmpty
+            {
+                services.connectionStorage.saveSSHPassword(sshState.password, for: testId)
+            }
+            if sshState.authMethod == .privateKey && !sshState.keyPassphrase.isEmpty {
+                services.connectionStorage.saveKeyPassphrase(sshState.keyPassphrase, for: testId)
+            }
+            if sshState.totpMode == .autoGenerate && !sshState.totpSecret.isEmpty {
+                services.connectionStorage.saveTOTPSecret(sshState.totpSecret, for: testId)
+            }
+        }
+
+        if !sslClientKeyPassphrase.isEmpty
+            && !sslClientKeyPath.trimmingCharacters(in: .whitespaces).isEmpty
+        {
+            services.connectionStorage.saveSSLClientKeyPassphrase(sslClientKeyPassphrase, for: testId)
+        }
+
+        if cloudflareState.enabled && cloudflareState.authMethod == .serviceToken {
+            services.connectionStorage.saveCloudflareTokenId(cloudflareState.serviceTokenId, for: testId)
+            services.connectionStorage.saveCloudflareTokenSecret(cloudflareState.serviceTokenSecret, for: testId)
+        }
+
+        for field in services.pluginManager.additionalConnectionFields(for: connectionType)
+            where field.isSecure
+        {
+            if let value = additionalFieldValues[field.id], !value.isEmpty {
+                services.connectionStorage.savePluginSecureField(value, fieldId: field.id, for: testId)
+            }
+        }
+    }
+
     func cleanupTestSecrets(for testId: UUID) {
         services.connectionStorage.deletePassword(for: testId)
         services.connectionStorage.deleteSSHPassword(for: testId)
         services.connectionStorage.deleteKeyPassphrase(for: testId)
+        services.connectionStorage.deleteSSLClientKeyPassphrase(for: testId)
         services.connectionStorage.deleteTOTPSecret(for: testId)
+        services.connectionStorage.deleteCloudflareTokenId(for: testId)
+        services.connectionStorage.deleteCloudflareTokenSecret(for: testId)
         let secureFieldIds = services.pluginManager.additionalConnectionFields(for: network.type)
             .filter(\.isSecure).map(\.id)
         services.connectionStorage.deleteAllPluginSecureFields(for: testId, fieldIds: secureFieldIds)
@@ -627,7 +685,7 @@ final class ConnectionFormCoordinator {
         network.database = parsed.database
         auth.username = parsed.username
         auth.password = parsed.password
-        ssl.mode = parsed.sslMode ?? .disabled
+        ssl.mode = parsed.sslMode ?? parsed.type.defaultSSLMode
 
         if let sshHostValue = parsed.sshHost {
             ssh.state.enabled = true
@@ -788,7 +846,7 @@ final class ConnectionFormCoordinator {
         }
 
         if parsed.useSSL {
-            ssl.upgradeIfDisabled(to: .required)
+            ssl.mode = .required
         }
 
         if parsed.type == .mongodb {

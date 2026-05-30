@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import TableProPluginKit
 import Testing
 @testable import TablePro
 
@@ -40,7 +41,7 @@ struct MultiRowEditStateTests {
         func hasEditFalseWhenNoPendingChanges() {
             let field = FieldEditState(
                 columnIndex: 0, columnName: "id", columnTypeEnum: .text(rawType: nil),
-                isLongText: false, originalValue: "1", hasMultipleValues: false,
+                isLongText: false, isJson: false, originalValue: "1", hasMultipleValues: false,
                 pendingValue: nil, isPendingNull: false, isPendingDefault: false
             )
             #expect(field.hasEdit == false)
@@ -50,7 +51,7 @@ struct MultiRowEditStateTests {
         func hasEditTrueWhenPendingValueSet() {
             let field = FieldEditState(
                 columnIndex: 0, columnName: "id", columnTypeEnum: .text(rawType: nil),
-                isLongText: false, originalValue: "1", hasMultipleValues: false,
+                isLongText: false, isJson: false, originalValue: "1", hasMultipleValues: false,
                 pendingValue: "2", isPendingNull: false, isPendingDefault: false
             )
             #expect(field.hasEdit == true)
@@ -60,7 +61,7 @@ struct MultiRowEditStateTests {
         func hasEditTrueWhenPendingNull() {
             let field = FieldEditState(
                 columnIndex: 0, columnName: "id", columnTypeEnum: .text(rawType: nil),
-                isLongText: false, originalValue: "1", hasMultipleValues: false,
+                isLongText: false, isJson: false, originalValue: "1", hasMultipleValues: false,
                 pendingValue: nil, isPendingNull: true, isPendingDefault: false
             )
             #expect(field.hasEdit == true)
@@ -70,7 +71,7 @@ struct MultiRowEditStateTests {
         func hasEditTrueWhenPendingDefault() {
             let field = FieldEditState(
                 columnIndex: 0, columnName: "id", columnTypeEnum: .text(rawType: nil),
-                isLongText: false, originalValue: "1", hasMultipleValues: false,
+                isLongText: false, isJson: false, originalValue: "1", hasMultipleValues: false,
                 pendingValue: nil, isPendingNull: false, isPendingDefault: true
             )
             #expect(field.hasEdit == true)
@@ -80,7 +81,7 @@ struct MultiRowEditStateTests {
         func effectiveValueReturnsPendingValue() {
             let field = FieldEditState(
                 columnIndex: 0, columnName: "id", columnTypeEnum: .text(rawType: nil),
-                isLongText: false, originalValue: "1", hasMultipleValues: false,
+                isLongText: false, isJson: false, originalValue: "1", hasMultipleValues: false,
                 pendingValue: "updated", isPendingNull: false, isPendingDefault: false
             )
             #expect(field.effectiveValue == "updated")
@@ -90,7 +91,7 @@ struct MultiRowEditStateTests {
         func effectiveValueReturnsNilWhenPendingNull() {
             let field = FieldEditState(
                 columnIndex: 0, columnName: "id", columnTypeEnum: .text(rawType: nil),
-                isLongText: false, originalValue: "1", hasMultipleValues: false,
+                isLongText: false, isJson: false, originalValue: "1", hasMultipleValues: false,
                 pendingValue: nil, isPendingNull: true, isPendingDefault: false
             )
             #expect(field.effectiveValue == nil)
@@ -100,7 +101,7 @@ struct MultiRowEditStateTests {
         func effectiveValueReturnsDefaultWhenPendingDefault() {
             let field = FieldEditState(
                 columnIndex: 0, columnName: "id", columnTypeEnum: .text(rawType: nil),
-                isLongText: false, originalValue: "1", hasMultipleValues: false,
+                isLongText: false, isJson: false, originalValue: "1", hasMultipleValues: false,
                 pendingValue: nil, isPendingNull: false, isPendingDefault: true
             )
             #expect(field.effectiveValue == "__DEFAULT__")
@@ -110,7 +111,7 @@ struct MultiRowEditStateTests {
         func effectiveValueReturnsNilWhenNoEdit() {
             let field = FieldEditState(
                 columnIndex: 0, columnName: "id", columnTypeEnum: .text(rawType: nil),
-                isLongText: false, originalValue: "1", hasMultipleValues: false,
+                isLongText: false, isJson: false, originalValue: "1", hasMultipleValues: false,
                 pendingValue: nil, isPendingNull: false, isPendingDefault: false
             )
             #expect(field.effectiveValue == nil)
@@ -672,7 +673,7 @@ struct MultiRowEditStateTests {
             let sut = makeSUT()
             var callbackCalls: [(index: Int, value: String?)] = []
             sut.onFieldChanged = { index, value in
-                callbackCalls.append((index, value))
+                callbackCalls.append((index, value.asText))
             }
 
             sut.updateField(at: 1, value: "Bob")
@@ -688,7 +689,7 @@ struct MultiRowEditStateTests {
 
             var callbackCalls: [(index: Int, value: String?)] = []
             sut.onFieldChanged = { index, value in
-                callbackCalls.append((index, value))
+                callbackCalls.append((index, value.asText))
             }
 
             // Revert back to original "Alice" -- should fire because hadPendingEdit was true
@@ -703,7 +704,7 @@ struct MultiRowEditStateTests {
             let sut = makeSUT()
             var callbackCalls: [(index: Int, value: String?)] = []
             sut.onFieldChanged = { index, value in
-                callbackCalls.append((index, value))
+                callbackCalls.append((index, value.asText))
             }
 
             // Setting to same original value with no prior edit -- should NOT fire
@@ -718,7 +719,7 @@ struct MultiRowEditStateTests {
 
             var callbackCalls: [(index: Int, value: String?)] = []
             sut.onFieldChanged = { index, value in
-                callbackCalls.append((index, value))
+                callbackCalls.append((index, value.asText))
             }
 
             // Revert to original "1" -- hadPendingEdit was true (isPendingNull)
@@ -735,7 +736,7 @@ struct MultiRowEditStateTests {
 
             var callbackCalls: [(index: Int, value: String?)] = []
             sut.onFieldChanged = { index, value in
-                callbackCalls.append((index, value))
+                callbackCalls.append((index, value.asText))
             }
 
             // Revert to original "1" -- hadPendingEdit was true (isPendingDefault)
@@ -750,7 +751,7 @@ struct MultiRowEditStateTests {
             let sut = makeSUT()
             var callbackCalls: [(index: Int, value: String?)] = []
             sut.onFieldChanged = { index, value in
-                callbackCalls.append((index, value))
+                callbackCalls.append((index, value.asText))
             }
 
             sut.setFieldToNull(at: 0)
@@ -764,7 +765,7 @@ struct MultiRowEditStateTests {
             let sut = makeSUT()
             var callbackCalls: [(index: Int, value: String?)] = []
             sut.onFieldChanged = { index, value in
-                callbackCalls.append((index, value))
+                callbackCalls.append((index, value.asText))
             }
 
             sut.setFieldToDefault(at: 0)
@@ -778,7 +779,7 @@ struct MultiRowEditStateTests {
             let sut = makeSUT()
             var callbackCalls: [(index: Int, value: String?)] = []
             sut.onFieldChanged = { index, value in
-                callbackCalls.append((index, value))
+                callbackCalls.append((index, value.asText))
             }
 
             sut.setFieldToFunction(at: 0, function: "NOW()")
@@ -792,7 +793,7 @@ struct MultiRowEditStateTests {
             let sut = makeSUT()
             var callbackCalls: [(index: Int, value: String?)] = []
             sut.onFieldChanged = { index, value in
-                callbackCalls.append((index, value))
+                callbackCalls.append((index, value.asText))
             }
 
             sut.setFieldToEmpty(at: 0)
@@ -809,7 +810,7 @@ struct MultiRowEditStateTests {
 
             var callbackCalls: [(index: Int, value: String?)] = []
             sut.onFieldChanged = { index, value in
-                callbackCalls.append((index, value))
+                callbackCalls.append((index, value.asText))
             }
 
             sut.clearEdits()

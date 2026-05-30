@@ -153,7 +153,7 @@ struct OnboardingContentView: View {
                 .font(.largeTitle)
                 .imageScale(.large)
                 .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(Color(nsColor: .systemGreen))
+                .foregroundStyle(.green)
 
             Text("You're all set!")
                 .font(.title2.weight(.bold))
@@ -202,6 +202,7 @@ struct OnboardingContentView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
+                    .keyboardShortcut(.defaultAction)
                     .transition(.opacity)
                 } else {
                     Button("Get Started") {
@@ -209,6 +210,7 @@ struct OnboardingContentView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
+                    .keyboardShortcut(.defaultAction)
                     .transition(.opacity)
                 }
             }

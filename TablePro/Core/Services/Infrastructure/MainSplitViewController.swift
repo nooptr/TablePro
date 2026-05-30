@@ -20,6 +20,7 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
     // MARK: - Payload & Session
 
     let payload: EditorTabPayload?
+    private let payloadConnection: DatabaseConnection?
     private var currentSession: ConnectionSession?
     private var sessionState: SessionStateFactory.SessionState?
     private var rightPanelState: RightPanelState?
@@ -48,32 +49,53 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
 
     private var connectionStatusCancellable: AnyCancellable?
 
+    // MARK: - Title Resolution
+
+    static func resolveDefaultTitle(payload: EditorTabPayload?, queryLanguageName: String?) -> String {
+        switch payload?.tabType {
+        case .serverDashboard:
+            return String(localized: "Server Dashboard")
+        case .erDiagram:
+            return String(localized: "ER Diagram")
+        case .createTable:
+            return String(localized: "Create Table")
+        default:
+            break
+        }
+        if let tabTitle = payload?.tabTitle {
+            return tabTitle
+        }
+        if let sourceFileURL = payload?.sourceFileURL {
+            return QueryTab.fileDisplayTitle(for: sourceFileURL)
+        }
+        if let tableName = payload?.tableName {
+            return tableName
+        }
+        if let queryLanguageName {
+            return String(format: String(localized: "%@ Query"), queryLanguageName)
+        }
+        return String(localized: "SQL Query")
+    }
+
     // MARK: - Init
 
     init(payload: EditorTabPayload?, sessionState: SessionStateFactory.SessionState?) {
         self.payload = payload
-
-        let defaultTitle: String
-        if payload?.tabType == .serverDashboard {
-            defaultTitle = String(localized: "Server Dashboard")
-        } else if payload?.tabType == .erDiagram {
-            defaultTitle = String(localized: "ER Diagram")
-        } else if payload?.tabType == .createTable {
-            defaultTitle = String(localized: "Create Table")
-        } else if payload?.tabType == .terminal {
-            defaultTitle = String(localized: "Terminal")
-        } else if let tabTitle = payload?.tabTitle {
-            defaultTitle = tabTitle
-        } else if let tableName = payload?.tableName {
-            defaultTitle = tableName
-        } else if let connectionId = payload?.connectionId,
-                  let connection = DatabaseManager.shared.activeSessions[connectionId]?.connection {
-            let langName = PluginManager.shared.queryLanguageName(for: connection.type)
-            defaultTitle = "\(langName) Query"
+        if let connectionId = payload?.connectionId {
+            self.payloadConnection = DatabaseManager.shared.activeSessions[connectionId]?.connection
+                ?? ConnectionStorage.shared.loadConnections().first { $0.id == connectionId }
         } else {
-            defaultTitle = String(localized: "SQL Query")
+            self.payloadConnection = nil
         }
-        self.windowTitle = defaultTitle
+
+        let queryLanguageName: String? = {
+            guard let connectionId = payload?.connectionId,
+                  let connection = DatabaseManager.shared.activeSessions[connectionId]?.connection else {
+                return nil
+            }
+            return PluginManager.shared.queryLanguageName(for: connection.type)
+        }()
+        self.windowTitle = Self.resolveDefaultTitle(payload: payload, queryLanguageName: queryLanguageName)
 
         var resolvedSession: ConnectionSession?
         if let connectionId = payload?.connectionId {
@@ -147,7 +169,7 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
         inspectorSplitItem.maximumThickness = 400
         addSplitViewItem(inspectorSplitItem)
 
-        if currentSession == nil {
+        if currentSession?.driver == nil {
             sidebarSplitItem.isCollapsed = true
         } else if let session = currentSession, let coordinator = sessionState?.coordinator {
             sidebarContainer.updateSidebarState(
@@ -156,6 +178,11 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
             )
         }
         inspectorSplitItem.isCollapsed = !inspectorPresented
+    }
+
+    override func splitViewDidResizeSubviews(_ notification: Notification) {
+        super.splitViewDidResizeSubviews(notification)
+        recomputeWindowMinSize()
     }
 
     private func materializeInspectorIfNeeded() {
@@ -187,6 +214,8 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
         }
 
         installObservers()
+        recomputeWindowMinSize()
+        window.recalculateKeyViewLoop()
     }
 
     override func viewDidDisappear() {
@@ -283,10 +312,11 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
             installToolbar(coordinator: state.coordinator)
         }
 
+        let collapseSidebar = newSession.driver == nil
         if view.window?.isVisible == true {
-            sidebarSplitItem.animator().isCollapsed = false
+            sidebarSplitItem.animator().isCollapsed = collapseSidebar
         } else {
-            sidebarSplitItem.isCollapsed = false
+            sidebarSplitItem.isCollapsed = collapseSidebar
         }
         rebuildPanes()
     }
@@ -322,21 +352,15 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
     ) -> some View {
         SidebarView(
             sidebarState: SharedSidebarState.forConnection(currentSession.connection.id),
+            windowState: sessionState.coordinator.windowSidebarState,
             onDoubleClick: { [weak self] table in
                 guard let coordinator = self?.sessionState?.coordinator else { return }
-                let connectionId = coordinator.connectionId
-                let isView = table.type == .view
-                if let preview = WindowLifecycleMonitor.shared.previewWindow(for: connectionId),
-                   let previewCoordinator = MainContentCoordinator.coordinator(for: preview.windowId) {
-                    if previewCoordinator.tabManager.selectedTab?.tableContext.tableName == table.name {
-                        previewCoordinator.promotePreviewTab()
-                    } else {
-                        previewCoordinator.promotePreviewTab()
-                        coordinator.openTableTab(table.name, isView: isView)
-                    }
-                } else {
+                let activeTab = coordinator.tabManager.selectedTab
+                if activeTab?.tabType == .table, activeTab?.tableContext.tableName == table.name {
                     coordinator.promotePreviewTab()
-                    coordinator.openTableTab(table.name, isView: isView)
+                    coordinator.requestGridFocus()
+                } else {
+                    coordinator.openTableTab(table, forceNonPreview: true, activateGridFocus: true)
                 }
             },
             pendingTruncates: sessionPendingTruncatesBinding,
@@ -350,7 +374,11 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
 
     @ViewBuilder
     private func buildDetailView() -> some View {
-        if let currentSession, let rightPanelState, let sessionState {
+        if let pendingConnection = connectingConnection {
+            ConnectingStateView(connection: pendingConnection) { [weak self] in
+                self?.cancelConnectionAttempt()
+            }
+        } else if let currentSession, let rightPanelState, let sessionState {
             MainContentView(
                 connection: currentSession.connection,
                 payload: payload,
@@ -367,15 +395,21 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
             )
             .transaction { $0.animation = nil }
         } else {
-            VStack(spacing: 16) {
-                ProgressView()
-                    .scaleEffect(1.5)
-                Text("Connecting...")
-                    .font(.headline)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Color.clear
         }
+    }
+
+    private var connectingConnection: DatabaseConnection? {
+        guard closingSessionId == nil else { return nil }
+        guard let connectionId = payload?.connectionId else { return nil }
+        if let session = DatabaseManager.shared.activeSessions[connectionId] {
+            return session.driver == nil ? session.connection : nil
+        }
+        return payloadConnection
+    }
+
+    private func cancelConnectionAttempt() {
+        view.window?.performClose(nil)
     }
 
     @ViewBuilder
@@ -443,11 +477,13 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
         materializeInspectorIfNeeded()
         inspectorSplitItem?.animator().isCollapsed = false
         UserDefaults.standard.set(true, forKey: Self.inspectorPresentedKey)
+        recomputeWindowMinSize()
     }
 
     func hideInspector() {
         inspectorSplitItem?.animator().isCollapsed = true
         UserDefaults.standard.set(false, forKey: Self.inspectorPresentedKey)
+        recomputeWindowMinSize()
     }
 
     @objc override func toggleInspector(_ sender: Any?) {
@@ -458,6 +494,13 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
 
     var isSidebarCollapsed: Bool {
         sidebarSplitItem?.isCollapsed ?? true
+    }
+
+    func focusSidebarSearch() {
+        if sidebarSplitItem?.isCollapsed == true {
+            sidebarSplitItem?.animator().isCollapsed = false
+        }
+        sidebarContainer.focusSearchField()
     }
 
     func setSidebarTab(_ tab: SidebarTab) {
@@ -471,6 +514,50 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
             sidebarSplitItem?.animator().isCollapsed = true
         } else {
             sidebarState.selectedSidebarTab = tab
+        }
+    }
+
+    // MARK: - Dynamic Window Minimum Size
+
+    private static let baseWindowMinWidth: CGFloat = 720
+    private static let baseWindowMinHeight: CGFloat = 480
+
+    private func recomputeWindowMinSize() {
+        guard let window = view.window else { return }
+        let sidebarVisible = !(sidebarSplitItem?.isCollapsed ?? true)
+        let inspectorVisible = !(inspectorSplitItem?.isCollapsed ?? true)
+
+        let detailMin: CGFloat = detailSplitItem?.minimumThickness ?? 400
+        let sidebarMin: CGFloat = sidebarSplitItem?.minimumThickness ?? 280
+        let inspectorMin: CGFloat = inspectorSplitItem?.minimumThickness ?? 270
+        let dividerThickness = splitView.dividerThickness
+
+        var width: CGFloat = detailMin
+        if sidebarVisible {
+            width += sidebarMin + dividerThickness
+        }
+        if inspectorVisible {
+            width += inspectorMin + dividerThickness
+        }
+
+        let resolvedWidth = max(Self.baseWindowMinWidth, width)
+        let newMinSize = NSSize(width: resolvedWidth, height: Self.baseWindowMinHeight)
+
+        guard window.minSize != newMinSize else { return }
+        window.minSize = newMinSize
+
+        var frame = window.frame
+        var resized = false
+        if frame.size.width < resolvedWidth {
+            frame.size.width = resolvedWidth
+            resized = true
+        }
+        if frame.size.height < Self.baseWindowMinHeight {
+            frame.size.height = Self.baseWindowMinHeight
+            resized = true
+        }
+        if resized {
+            window.setFrame(frame, display: true, animate: false)
         }
     }
 

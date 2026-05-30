@@ -8,6 +8,10 @@ import SwiftUI
 struct WelcomeConnectionRow: View {
     let connection: DatabaseConnection
     let sshProfile: SSHProfile?
+    let isSelected: Bool
+    let onToggleFavorite: () -> Void
+    @State private var isHovering = false
+    private let pluginManager = PluginManager.shared
 
     private var displayTag: ConnectionTag? {
         guard let tagId = connection.tagId else { return nil }
@@ -16,6 +20,19 @@ struct WelcomeConnectionRow: View {
 
     private var showsLocalOnly: Bool {
         connection.localOnly && !connection.isSample
+    }
+
+    private var isDriverRejected: Bool {
+        let typeId = connection.type.pluginTypeId
+        return pluginManager.rejectedPlugins.contains { rejected in
+            rejected.bundleId == typeId || rejected.registryId == typeId
+        }
+    }
+
+    private var toggleFavoriteActionName: String {
+        connection.isFavorite
+            ? String(localized: "Remove from Favorites")
+            : String(localized: "Add to Favorites")
     }
 
     var body: some View {
@@ -44,12 +61,24 @@ struct WelcomeConnectionRow: View {
             trailingAccessories
         }
         .contentShape(Rectangle())
+        .onHover { hovering in isHovering = hovering }
         .accessibilityElement(children: .combine)
+        .accessibilityAction(named: Text(toggleFavoriteActionName)) {
+            onToggleFavorite()
+        }
     }
 
     @ViewBuilder
     private var trailingAccessories: some View {
         HStack(spacing: 8) {
+            if isDriverRejected {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .imageScale(.small)
+                    .foregroundStyle(.yellow)
+                    .help(String(localized: "Driver plugin not loaded. Open Settings to update."))
+                    .accessibilityLabel(String(localized: "Plugin not loaded"))
+            }
+
             if showsLocalOnly {
                 Image(systemName: "icloud.slash")
                     .imageScale(.small)
@@ -71,6 +100,35 @@ struct WelcomeConnectionRow: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel(String(format: String(localized: "Tag: %@"), tag.name))
             }
+
+            favoriteButton
+        }
+    }
+
+    private var favoriteButton: some View {
+        let visible = connection.isFavorite || isHovering || isSelected
+        return Button(action: onToggleFavorite) {
+            favoriteStarImage
+        }
+        .buttonStyle(.borderless)
+        .opacity(visible ? 1 : 0)
+        .allowsHitTesting(visible)
+        .help(toggleFavoriteActionName)
+        .accessibilityHidden(!connection.isFavorite)
+        .accessibilityLabel(String(localized: "Favorited"))
+        .frame(width: 16, alignment: .center)
+    }
+
+    @ViewBuilder
+    private var favoriteStarImage: some View {
+        if connection.isFavorite {
+            Image(systemName: "star.fill")
+                .imageScale(.small)
+                .foregroundStyle(.yellow)
+        } else {
+            Image(systemName: "star")
+                .imageScale(.small)
+                .foregroundStyle(.tertiary)
         }
     }
 
@@ -78,9 +136,6 @@ struct WelcomeConnectionRow: View {
         var components: [String] = [primaryEndpoint]
         if let viaText = sshViaText {
             components.append(viaText)
-        }
-        if connection.isSample {
-            components.append(String(localized: "Sample"))
         }
         return components.joined(separator: " · ")
     }

@@ -192,7 +192,7 @@ private actor DuckDBConnectionActor {
         return raw
     }
 
-    func executePrepared(_ query: String, parameters: [String?]) throws -> DuckDBRawResult {
+    func executePrepared(_ query: String, parameters: [PluginCellValue]) throws -> DuckDBRawResult {
         guard let conn = connection else {
             throw DuckDBPluginError.notConnected
         }
@@ -222,16 +222,22 @@ private actor DuckDBConnectionActor {
 
         for (index, param) in parameters.enumerated() {
             let paramIdx = idx_t(index + 1)
-            if let value = param {
-                let bindState = duckdb_bind_varchar(stmt, paramIdx, value)
-                if bindState == DuckDBError {
-                    throw DuckDBPluginError.queryFailed("Failed to bind parameter at index \(index)")
+            let bindState: duckdb_state
+            switch param {
+            case .null:
+                bindState = duckdb_bind_null(stmt, paramIdx)
+            case .text(let value):
+                bindState = duckdb_bind_varchar(stmt, paramIdx, value)
+            case .bytes(let data):
+                bindState = data.withUnsafeBytes { rawBuffer -> duckdb_state in
+                    guard let baseAddress = rawBuffer.baseAddress else {
+                        return duckdb_bind_null(stmt, paramIdx)
+                    }
+                    return duckdb_bind_blob(stmt, paramIdx, baseAddress, idx_t(data.count))
                 }
-            } else {
-                let bindState = duckdb_bind_null(stmt, paramIdx)
-                if bindState == DuckDBError {
-                    throw DuckDBPluginError.queryFailed("Failed to bind NULL at index \(index)")
-                }
+            }
+            if bindState == DuckDBError {
+                throw DuckDBPluginError.queryFailed("Failed to bind parameter at index \(index)")
             }
         }
 
@@ -281,11 +287,9 @@ private actor DuckDBConnectionActor {
         }
 
         let colCount = duckdb_column_count(&result)
-        let rowCount = duckdb_row_count(&result)
-
         var columns: [String] = []
         var columnTypeNames: [String] = []
-
+        var columnTypes: [duckdb_type] = []
         for i in 0..<colCount {
             if let namePtr = duckdb_column_name(&result, i) {
                 columns.append(String(cString: namePtr))
@@ -293,8 +297,75 @@ private actor DuckDBConnectionActor {
                 columns.append("column_\(i)")
             }
             let colType = duckdb_column_type(&result, i)
+            columnTypes.append(colType)
             columnTypeNames.append(Self.typeName(for: colType))
         }
+
+        if columnTypes.contains(where: Self.isUnrenderable) {
+            duckdb_destroy_result(&result)
+            try Self.streamWrappedQuery(
+                query: query,
+                columns: columns,
+                columnTypeNames: columnTypeNames,
+                columnTypes: columnTypes,
+                connection: conn,
+                continuation: continuation
+            )
+            return
+        }
+
+        defer { duckdb_destroy_result(&result) }
+        try Self.streamResultRows(
+            &result,
+            columns: columns,
+            columnTypeNames: columnTypeNames,
+            continuation: continuation
+        )
+    }
+
+    private static func streamWrappedQuery(
+        query: String,
+        columns: [String],
+        columnTypeNames: [String],
+        columnTypes: [duckdb_type],
+        connection: duckdb_connection,
+        continuation: AsyncThrowingStream<PluginStreamElement, Error>.Continuation
+    ) throws {
+        let castExprs = columns.enumerated().map { i, name in
+            castExpression(for: columnTypes[i], column: name)
+        }
+        let wrappedQuery = buildWrappedQuery(originalQuery: query, castExprs: castExprs)
+
+        var result = duckdb_result()
+        let state = duckdb_query(connection, wrappedQuery, &result)
+        if state == DuckDBError {
+            let errorMsg: String
+            if let errPtr = duckdb_result_error(&result) {
+                errorMsg = String(cString: errPtr)
+            } else {
+                errorMsg = "Unknown DuckDB error"
+            }
+            duckdb_destroy_result(&result)
+            throw DuckDBPluginError.queryFailed(errorMsg)
+        }
+        defer { duckdb_destroy_result(&result) }
+
+        try Self.streamResultRows(
+            &result,
+            columns: columns,
+            columnTypeNames: columnTypeNames,
+            continuation: continuation
+        )
+    }
+
+    private static func streamResultRows(
+        _ result: inout duckdb_result,
+        columns: [String],
+        columnTypeNames: [String],
+        continuation: AsyncThrowingStream<PluginStreamElement, Error>.Continuation
+    ) throws {
+        let colCount = duckdb_column_count(&result)
+        let rowCount = duckdb_row_count(&result)
 
         continuation.yield(.header(PluginStreamHeader(
             columns: columns,
@@ -302,30 +373,43 @@ private actor DuckDBConnectionActor {
             estimatedRowCount: Int(rowCount)
         )))
 
-        for row in 0..<rowCount {
+        let maxRows = min(rowCount, UInt64(PluginRowLimits.emergencyMax))
+        if rowCount > UInt64(PluginRowLimits.emergencyMax) {
+            Self.logger.warning("streamQuery truncating result from \(rowCount) to \(maxRows) rows")
+        }
+
+        for row in 0..<maxRows {
             if Task.isCancelled {
-                duckdb_destroy_result(&result)
                 continuation.finish(throwing: CancellationError())
                 return
             }
 
-            var rowData: [String?] = []
+            var rowData: [PluginCellValue] = []
             for col in 0..<colCount {
+                let colType = duckdb_column_type(&result, col)
                 if duckdb_value_is_null(&result, col, row) {
-                    rowData.append(nil)
+                    rowData.append(.null)
+                } else if colType == DUCKDB_TYPE_BLOB {
+                    let blob = duckdb_value_blob(&result, col, row)
+                    if let ptr = blob.data {
+                        rowData.append(.bytes(Data(bytes: ptr, count: Int(blob.size))))
+                    } else {
+                        rowData.append(.bytes(Data()))
+                    }
+                    duckdb_free(blob.data)
                 } else if let valPtr = duckdb_value_varchar(&result, col, row) {
-                    rowData.append(String(cString: valPtr))
+                    rowData.append(.text(String(cString: valPtr)))
                     duckdb_free(valPtr)
                 } else {
-                    let colType = duckdb_column_type(&result, col)
-                    rowData.append(Self.extractFallbackValue(&result, col: col, row: row, type: colType))
+                    rowData.append(PluginCellValue.fromOptional(
+                        Self.extractFallbackValue(&result, col: col, row: row, type: colType)
+                    ))
                 }
             }
 
             continuation.yield(.rows([rowData]))
         }
 
-        duckdb_destroy_result(&result)
         continuation.finish()
     }
 
@@ -353,7 +437,7 @@ private actor DuckDBConnectionActor {
             columnTypeNames.append(Self.typeName(for: colType))
         }
 
-        var rows: [[String?]] = []
+        var rows: [[PluginCellValue]] = []
         var truncated = false
 
         let maxRows = min(rowCount, UInt64(PluginRowLimits.emergencyMax))
@@ -362,16 +446,27 @@ private actor DuckDBConnectionActor {
         }
 
         for row in 0..<maxRows {
-            var rowData: [String?] = []
+            var rowData: [PluginCellValue] = []
 
             for col in 0..<colCount {
+                let colType = columnTypes[Int(col)]
                 if duckdb_value_is_null(&result, col, row) {
-                    rowData.append(nil)
+                    rowData.append(.null)
+                } else if colType == DUCKDB_TYPE_BLOB {
+                    let blob = duckdb_value_blob(&result, col, row)
+                    if let ptr = blob.data {
+                        rowData.append(.bytes(Data(bytes: ptr, count: Int(blob.size))))
+                    } else {
+                        rowData.append(.bytes(Data()))
+                    }
+                    duckdb_free(blob.data)
                 } else if let valPtr = duckdb_value_varchar(&result, col, row) {
-                    rowData.append(String(cString: valPtr))
+                    rowData.append(.text(String(cString: valPtr)))
                     duckdb_free(valPtr)
                 } else {
-                    rowData.append(Self.extractFallbackValue(&result, col: col, row: row, type: columnTypes[Int(col)]))
+                    rowData.append(PluginCellValue.fromOptional(
+                        Self.extractFallbackValue(&result, col: col, row: row, type: colType)
+                    ))
                 }
             }
 
@@ -383,6 +478,7 @@ private actor DuckDBConnectionActor {
         return DuckDBRawResult(
             columns: columns,
             columnTypeNames: columnTypeNames,
+            columnTypes: columnTypes,
             rows: rows,
             rowsAffected: Int(rowsChanged),
             executionTime: executionTime,
@@ -426,6 +522,7 @@ private actor DuckDBConnectionActor {
         case DUCKDB_TYPE_TIME_NS: return "TIME_NS"
         case DUCKDB_TYPE_UHUGEINT: return "UHUGEINT"
         case DUCKDB_TYPE_ARRAY: return "ARRAY"
+        case DUCKDB_TYPE_GEOMETRY: return "GEOMETRY"
         default: return "VARCHAR"
         }
     }
@@ -441,7 +538,7 @@ private actor DuckDBConnectionActor {
         case DUCKDB_TYPE_DATE:
             let date = duckdb_value_date(&result, col, row)
             let d = duckdb_from_date(date)
-            return String(format: "%04d-%02d-%02d", d.year, d.month, d.day)
+            return String(format: "\(formatYearISO(d.year))-%02d-%02d", d.month, d.day)
 
         case DUCKDB_TYPE_TIME, DUCKDB_TYPE_TIME_NS:
             let time = duckdb_value_time(&result, col, row)
@@ -484,65 +581,92 @@ private actor DuckDBConnectionActor {
         }
     }
 
-    /// DuckDB v1.5.0 C API: duckdb_value_varchar returns nil for TIMESTAMPTZ and TIMETZ,
-    /// and duckdb_value_is_null is unreliable for these types. The only reliable method
-    /// is re-executing the query with TZ columns cast to VARCHAR at the SQL level.
-    private static func patchTzColumns(
+    static func patchTzColumns(
         _ raw: inout DuckDBRawResult, query: String, connection: duckdb_connection
     ) {
-        let tzTypes: Set<String> = ["TIMESTAMPTZ", "TIMETZ"]
-        let tzColIndices = raw.columnTypeNames.enumerated().compactMap { idx, name in
-            tzTypes.contains(name) ? idx : nil
+        let patchedColIndices = raw.columnTypes.enumerated().compactMap { idx, type in
+            isUnrenderable(type) ? idx : nil
         }
-        guard !tzColIndices.isEmpty, !raw.rows.isEmpty else { return }
+        guard !patchedColIndices.isEmpty, !raw.rows.isEmpty else { return }
 
-        var castExprs: [String] = []
-        for (i, name) in raw.columns.enumerated() {
-            let escaped = name.replacingOccurrences(of: "\"", with: "\"\"")
-            if tzColIndices.contains(i) {
-                castExprs.append(
-                    "CASE WHEN \"\(escaped)\" IS NULL THEN NULL ELSE CAST(\"\(escaped)\" AS VARCHAR) END AS \"\(escaped)\""
-                )
-            } else {
-                castExprs.append("\"\(escaped)\"")
-            }
+        let castExprs = raw.columns.enumerated().map { i, name in
+            castExpression(for: raw.columnTypes[i], column: name)
         }
+        let wrappedQuery = buildWrappedQuery(originalQuery: query, castExprs: castExprs)
 
-        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
-            .hasSuffix(";") ? String(query.dropLast()) : query
-        let wrappedQuery = "SELECT \(castExprs.joined(separator: ", ")) FROM (\(trimmedQuery)) AS _tz_cast"
         var patchResult = duckdb_result()
         guard duckdb_query(connection, wrappedQuery, &patchResult) == DuckDBSuccess else { return }
         defer { duckdb_destroy_result(&patchResult) }
 
         let patchRowCount = min(duckdb_row_count(&patchResult), UInt64(raw.rows.count))
         for row in 0..<patchRowCount {
-            for colIdx in tzColIndices {
+            for colIdx in patchedColIndices {
                 if duckdb_value_is_null(&patchResult, idx_t(colIdx), row) {
-                    raw.rows[Int(row)][colIdx] = nil
+                    raw.rows[Int(row)][colIdx] = .null
                 } else if let ptr = duckdb_value_varchar(&patchResult, idx_t(colIdx), row) {
-                    raw.rows[Int(row)][colIdx] = String(cString: ptr)
+                    raw.rows[Int(row)][colIdx] = .text(String(cString: ptr))
                     duckdb_free(ptr)
                 }
             }
         }
     }
 
-    private static func formatTimestamp(_ ts: duckdb_timestamp) -> String {
+    static func isUnrenderable(_ type: duckdb_type) -> Bool {
+        switch type {
+        case DUCKDB_TYPE_TIMESTAMP_TZ, DUCKDB_TYPE_TIME_TZ, DUCKDB_TYPE_GEOMETRY:
+            return true
+        default:
+            return false
+        }
+    }
+
+    static func castExpression(for type: duckdb_type, column: String) -> String {
+        let quoted = quoteIdentifier(column)
+        switch type {
+        case DUCKDB_TYPE_GEOMETRY:
+            return "CASE WHEN \(quoted) IS NULL THEN NULL ELSE ST_AsText(\(quoted)) END AS \(quoted)"
+        case DUCKDB_TYPE_TIMESTAMP_TZ, DUCKDB_TYPE_TIME_TZ:
+            return "CASE WHEN \(quoted) IS NULL THEN NULL ELSE CAST(\(quoted) AS VARCHAR) END AS \(quoted)"
+        default:
+            return quoted
+        }
+    }
+
+    static func buildWrappedQuery(originalQuery: String, castExprs: [String]) -> String {
+        var trimmed = originalQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasSuffix(";") {
+            trimmed = String(trimmed.dropLast())
+        }
+        return "SELECT \(castExprs.joined(separator: ", ")) FROM (\(trimmed)) AS _tp_cast"
+    }
+
+    static func quoteIdentifier(_ ident: String) -> String {
+        "\"\(ident.replacingOccurrences(of: "\"", with: "\"\""))\""
+    }
+
+    static func formatTimestamp(_ ts: duckdb_timestamp) -> String {
         let parts = duckdb_from_timestamp(ts)
         let d = parts.date
         let t = parts.time
         let micros = t.micros % 1_000_000
+        let yearPart = formatYearISO(d.year)
         if micros == 0 {
             return String(
-                format: "%04d-%02d-%02d %02d:%02d:%02d",
-                d.year, d.month, d.day, t.hour, t.min, t.sec
+                format: "\(yearPart)-%02d-%02d %02d:%02d:%02d",
+                d.month, d.day, t.hour, t.min, t.sec
             )
         }
         return String(
-            format: "%04d-%02d-%02d %02d:%02d:%02d.%06d",
-            d.year, d.month, d.day, t.hour, t.min, t.sec, micros
+            format: "\(yearPart)-%02d-%02d %02d:%02d:%02d.%06d",
+            d.month, d.day, t.hour, t.min, t.sec, micros
         )
+    }
+
+    static func formatYearISO(_ year: Int32) -> String {
+        if year < 0 {
+            return String(format: "-%04d", -Int(year))
+        }
+        return String(format: "%04d", year)
     }
 
     private static func formatTime(_ t: duckdb_time_struct) -> String {
@@ -553,32 +677,20 @@ private actor DuckDBConnectionActor {
         return String(format: "%02d:%02d:%02d.%06d", t.hour, t.min, t.sec, micros)
     }
 
-    private static func formatHugeInt(upper: Int64, lower: UInt64) -> String {
-        if upper == 0 {
-            return String(lower)
-        }
-        if upper == -1, lower > Int64.max.magnitude {
-            let val = ~upper
-            let low = ~lower &+ 1
-            return "-\(formatUHugeInt(upper: UInt64(val), lower: low))"
-        }
-        return formatUHugeInt(upper: UInt64(upper), lower: lower)
+    static func formatHugeInt(upper: Int64, lower: UInt64) -> String {
+        HugeIntFormatter.format(upper: upper, lower: lower)
     }
 
-    private static func formatUHugeInt(upper: UInt64, lower: UInt64) -> String {
-        if upper == 0 {
-            return String(lower)
-        }
-        let upperDecimal = Decimal(upper) * Decimal(sign: .plus, exponent: 0, significand: Decimal(UInt64.max) + 1)
-        let result = upperDecimal + Decimal(lower)
-        return "\(result)"
+    static func formatUHugeInt(upper: UInt64, lower: UInt64) -> String {
+        HugeIntFormatter.formatUnsigned(upper: upper, lower: lower)
     }
 }
 
-private struct DuckDBRawResult: Sendable {
+private struct DuckDBRawResult: @unchecked Sendable {
     let columns: [String]
     let columnTypeNames: [String]
-    var rows: [[String?]]
+    let columnTypes: [duckdb_type]
+    var rows: [[PluginCellValue]]
     let rowsAffected: Int
     let executionTime: TimeInterval
     let isTruncated: Bool
@@ -688,7 +800,7 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
 
     func executeParameterized(
         query: String,
-        parameters: [String?]
+        parameters: [PluginCellValue]
     ) async throws -> PluginQueryResult {
         let rawResult = try await connectionActor.executePrepared(query, parameters: parameters)
         return PluginQueryResult(
@@ -735,10 +847,10 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             WHERE table_schema = $1
             ORDER BY table_name
         """
-        let result = try await executeParameterized(query: query, parameters: [schemaName])
+        let result = try await executeParameterized(query: query, parameters: [.text(schemaName)])
         return result.rows.compactMap { row in
-            guard let name = row[safe: 0] ?? nil else { return nil }
-            let typeString = (row[safe: 1] ?? nil) ?? "BASE TABLE"
+            guard let name = row[safe: 0]?.asText else { return nil }
+            let typeString = (row[safe: 1]?.asText) ?? "BASE TABLE"
             let tableType = typeString.uppercased().contains("VIEW") ? "VIEW" : "TABLE"
             return PluginTableInfo(name: name, type: tableType)
         }
@@ -753,18 +865,19 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
               AND table_name = $2
             ORDER BY ordinal_position
         """
-        let result = try await executeParameterized(query: query, parameters: [schemaName, table])
+        let result = try await executeParameterized(query: query, parameters: [.text(schemaName), .text(table)])
 
         let pkColumns = try await fetchPrimaryKeyColumns(table: table, schema: schemaName)
+        let enumMap = try await fetchEnumLabelMap(schema: schemaName)
 
         return result.rows.compactMap { row in
-            guard let name = row[safe: 0] ?? nil,
-                  let dataType = row[safe: 1] ?? nil else {
+            guard let name = row[safe: 0]?.asText,
+                  let dataType = row[safe: 1]?.asText else {
                 return nil
             }
 
-            let isNullable = (row[safe: 2] ?? nil) == "YES"
-            let defaultValue = row[safe: 3] ?? nil
+            let isNullable = (row[safe: 2]?.asText) == "YES"
+            let defaultValue = row[safe: 3]?.asText
             let isPrimaryKey = pkColumns.contains(name)
 
             return PluginColumnInfo(
@@ -772,7 +885,8 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 dataType: dataType,
                 isNullable: isNullable,
                 isPrimaryKey: isPrimaryKey,
-                defaultValue: defaultValue
+                defaultValue: defaultValue,
+                allowedValues: resolveEnumValues(dataType: dataType, enumMap: enumMap)
             )
         }
     }
@@ -785,7 +899,7 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             WHERE table_schema = $1
             ORDER BY table_name, ordinal_position
         """
-        let result = try await executeParameterized(query: query, parameters: [schemaName])
+        let result = try await executeParameterized(query: query, parameters: [.text(schemaName)])
 
         let pkQuery = """
             SELECT tc.table_name, kcu.column_name
@@ -796,25 +910,26 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             WHERE tc.constraint_type = 'PRIMARY KEY'
               AND tc.table_schema = $1
         """
-        let pkResult = try await executeParameterized(query: pkQuery, parameters: [schemaName])
+        let pkResult = try await executeParameterized(query: pkQuery, parameters: [.text(schemaName)])
         var pkMap: [String: Set<String>] = [:]
         for row in pkResult.rows {
-            if let tableName = row[safe: 0] ?? nil, let colName = row[safe: 1] ?? nil {
+            if let tableName = row[safe: 0]?.asText, let colName = row[safe: 1]?.asText {
                 pkMap[tableName, default: []].insert(colName)
             }
         }
 
+        let enumMap = try await fetchEnumLabelMap(schema: schemaName)
         var allColumns: [String: [PluginColumnInfo]] = [:]
 
         for row in result.rows {
-            guard let tableName = row[safe: 0] ?? nil,
-                  let columnName = row[safe: 1] ?? nil,
-                  let dataType = row[safe: 2] ?? nil else {
+            guard let tableName = row[safe: 0]?.asText,
+                  let columnName = row[safe: 1]?.asText,
+                  let dataType = row[safe: 2]?.asText else {
                 continue
             }
 
-            let isNullable = (row[safe: 3] ?? nil) == "YES"
-            let defaultValue = row[safe: 4] ?? nil
+            let isNullable = (row[safe: 3]?.asText) == "YES"
+            let defaultValue = row[safe: 4]?.asText
             let isPrimaryKey = pkMap[tableName]?.contains(columnName) ?? false
 
             let column = PluginColumnInfo(
@@ -822,13 +937,55 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
                 dataType: dataType,
                 isNullable: isNullable,
                 isPrimaryKey: isPrimaryKey,
-                defaultValue: defaultValue
+                defaultValue: defaultValue,
+                allowedValues: resolveEnumValues(dataType: dataType, enumMap: enumMap)
             )
 
             allColumns[tableName, default: []].append(column)
         }
 
         return allColumns
+    }
+
+    private func fetchEnumLabelMap(schema: String) async throws -> [String: [String]] {
+        let typeNamesQuery = """
+            SELECT type_name
+            FROM duckdb_types()
+            WHERE schema_name = $1 AND type_category = 'ENUM'
+        """
+        let typeResult: PluginQueryResult
+        do {
+            typeResult = try await executeParameterized(query: typeNamesQuery, parameters: [.text(schema)])
+        } catch {
+            return [:]
+        }
+        let typeNames = typeResult.rows.compactMap { $0[safe: 0]?.asText }
+        guard !typeNames.isEmpty else { return [:] }
+
+        let quotedSchema = quoteIdentifier(schema)
+        var map: [String: [String]] = [:]
+        for typeName in typeNames {
+            let quoted = quoteIdentifier(typeName)
+            let valuesQuery = "SELECT UNNEST(enum_range(NULL::\(quotedSchema).\(quoted)))::VARCHAR AS value"
+            let valuesResult: PluginQueryResult
+            do {
+                valuesResult = try await execute(query: valuesQuery)
+            } catch {
+                continue
+            }
+            let labels = valuesResult.rows.compactMap { $0[safe: 0]?.asText }
+            if !labels.isEmpty {
+                map[typeName] = labels
+            }
+        }
+        return map
+    }
+
+    private func resolveEnumValues(dataType: String, enumMap: [String: [String]]) -> [String]? {
+        if let values = enumMap[dataType], !values.isEmpty {
+            return values
+        }
+        return EnumValueParser.parseMySQLEnumOrSet(from: dataType)
     }
 
     func fetchIndexes(table: String, schema: String?) async throws -> [PluginIndexInfo] {
@@ -842,12 +999,12 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
 
         do {
             let result = try await executeParameterized(
-                query: query, parameters: [schemaName, table]
+                query: query, parameters: [.text(schemaName), .text(table)]
             )
             return result.rows.compactMap { row in
-                guard let name = row[safe: 0] ?? nil else { return nil }
-                let isUnique = (row[safe: 1] ?? nil) == "true"
-                let sql = row[safe: 2] ?? nil
+                guard let name = row[safe: 0]?.asText else { return nil }
+                let isUnique = (row[safe: 1]?.asText) == "true"
+                let sql = row[safe: 2]?.asText
                 let isPrimary = name.lowercased().contains("primary")
                     || (sql?.uppercased().contains("PRIMARY KEY") ?? false)
 
@@ -890,18 +1047,18 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
 
         do {
             let result = try await executeParameterized(
-                query: query, parameters: [schemaName, table]
+                query: query, parameters: [.text(schemaName), .text(table)]
             )
             return result.rows.compactMap { row in
-                guard let name = row[safe: 0] ?? nil,
-                      let column = row[safe: 1] ?? nil,
-                      let refTable = row[safe: 2] ?? nil,
-                      let refColumn = row[safe: 3] ?? nil else {
+                guard let name = row[safe: 0]?.asText,
+                      let column = row[safe: 1]?.asText,
+                      let refTable = row[safe: 2]?.asText,
+                      let refColumn = row[safe: 3]?.asText else {
                     return nil
                 }
 
-                let onDelete = (row[safe: 4] ?? nil) ?? "NO ACTION"
-                let onUpdate = (row[safe: 5] ?? nil) ?? "NO ACTION"
+                let onDelete = (row[safe: 4]?.asText) ?? "NO ACTION"
+                let onUpdate = (row[safe: 5]?.asText) ?? "NO ACTION"
 
                 return PluginForeignKeyInfo(
                     name: name,
@@ -922,9 +1079,9 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
 
         // Try native DDL from duckdb_tables() first (preserves complex types like LIST, STRUCT, MAP)
         let nativeQuery = "SELECT sql FROM duckdb_tables() WHERE schema_name = $1 AND table_name = $2"
-        let nativeResult = try await executeParameterized(query: nativeQuery, parameters: [schemaName, table])
+        let nativeResult = try await executeParameterized(query: nativeQuery, parameters: [.text(schemaName), .text(table)])
 
-        if let firstRow = nativeResult.rows.first, let sql = firstRow[0] {
+        if let firstRow = nativeResult.rows.first, let sql = firstRow[0].asText {
             var ddl = sql.hasSuffix(";") ? sql : sql + ";"
 
             // Append index definitions
@@ -993,10 +1150,10 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             WHERE table_schema = $1
               AND table_name = $2
         """
-        let result = try await executeParameterized(query: query, parameters: [schemaName, view])
+        let result = try await executeParameterized(query: query, parameters: [.text(schemaName), .text(view)])
 
         guard let firstRow = result.rows.first,
-              let definition = firstRow[0] else {
+              let definition = firstRow[0].asText else {
             throw DuckDBPluginError.queryFailed(
                 "Failed to fetch definition for view '\(view)'"
             )
@@ -1013,8 +1170,8 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             "SELECT COUNT(*) FROM (SELECT 1 FROM \"\(safeSchema)\".\"\(safeTable)\" LIMIT 100001) AS _t"
         let countResult = try await execute(query: countQuery)
         let rowCount: Int64? = {
-            guard let row = countResult.rows.first, let countStr = row.first else { return nil }
-            return Int64(countStr ?? "0")
+            guard let row = countResult.rows.first, let firstCell = row.first else { return nil }
+            return Int64(firstCell.asText ?? "0")
         }()
 
         return PluginTableMetadata(
@@ -1029,7 +1186,7 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     func fetchSchemas() async throws -> [String] {
         let query = "SELECT schema_name FROM information_schema.schemata ORDER BY schema_name"
         let result = try await execute(query: query)
-        return result.rows.compactMap { $0[safe: 0] ?? nil }
+        return result.rows.compactMap { $0[safe: 0]?.asText }
     }
 
     func switchSchema(to schema: String) async throws {
@@ -1046,7 +1203,7 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         let query = "SELECT database_name FROM duckdb_databases() ORDER BY database_name"
         let result = try await execute(query: query)
         return result.rows.compactMap { row in
-            row[safe: 0] ?? nil
+            row[safe: 0]?.asText
         }
     }
 
@@ -1074,7 +1231,7 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     // MARK: - All Tables Metadata
 
     func allTablesMetadataSQL(schema: String?) -> String? {
-        let s = schema ?? currentSchema ?? "main"
+        let s = (schema ?? currentSchema ?? "main").replacingOccurrences(of: "'", with: "''")
         return """
         SELECT
             table_schema as schema_name,
@@ -1119,8 +1276,8 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
               AND tc.table_schema = $1
               AND tc.table_name = $2
         """
-        let result = try await executeParameterized(query: query, parameters: [schema, table])
-        return Set(result.rows.compactMap { $0[safe: 0] ?? nil })
+        let result = try await executeParameterized(query: query, parameters: [.text(schema), .text(table)])
+        return Set(result.rows.compactMap { $0[safe: 0]?.asText })
     }
 
     // MARK: - Create Table DDL
@@ -1128,7 +1285,7 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     func generateCreateTableSQL(definition: PluginCreateTableDefinition) -> String? {
         guard !definition.columns.isEmpty else { return nil }
 
-        let schema = _currentSchema
+        let schema = resolveSchema(nil)
         let qualifiedTable = "\(quoteIdentifier(schema)).\(quoteIdentifier(definition.tableName))"
         let pkColumns = definition.columns.filter { $0.isPrimaryKey }
         let inlinePK = pkColumns.count == 1
@@ -1216,7 +1373,7 @@ final class DuckDBPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     }
 
     private func qualifiedTableName(_ table: String) -> String {
-        "\(quoteIdentifier(_currentSchema)).\(quoteIdentifier(table))"
+        "\(quoteIdentifier(resolveSchema(nil))).\(quoteIdentifier(table))"
     }
 
     // MARK: - ALTER TABLE DDL

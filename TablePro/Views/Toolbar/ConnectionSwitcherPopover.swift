@@ -2,19 +2,40 @@
 //  ConnectionSwitcherPopover.swift
 //  TablePro
 //
-//  Quick-switch popover for active and saved connections.
-//  Shown from the toolbar connection button.
-//
 
 import AppKit
 import SwiftUI
 import TableProPluginKit
 
+enum ConnectionSwitcherFilter {
+    static func matches(_ connection: DatabaseConnection, query: String) -> Bool {
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return true }
+        let needle = trimmed.lowercased()
+        return connection.name.lowercased().contains(needle)
+            || connection.host.lowercased().contains(needle)
+            || connection.database.lowercased().contains(needle)
+    }
+}
+
+enum ConnectionSwitcherSelection {
+    static func moved(in ids: [UUID], from current: UUID?, by offset: Int) -> UUID? {
+        guard !ids.isEmpty else { return nil }
+        let currentIndex = current.flatMap { ids.firstIndex(of: $0) } ?? 0
+        let newIndex = max(0, min(ids.count - 1, currentIndex + offset))
+        return ids[newIndex]
+    }
+}
+
 struct ConnectionSwitcherPopover: View {
+    @Environment(\.dismiss) private var dismiss
+
     @State private var savedConnections: [DatabaseConnection] = []
     @State private var selectedConnectionId: UUID?
+    @State private var searchText = ""
 
-    var onDismiss: (() -> Void)?
+    private static let popoverWidth: CGFloat = 400
+    private static let popoverHeight: CGFloat = 460
 
     private var activeSessions: [UUID: ConnectionSession] {
         DatabaseManager.shared.activeSessions
@@ -32,18 +53,79 @@ struct ConnectionSwitcherPopover: View {
         savedConnections.filter { activeSessions[$0.id] == nil }
     }
 
+    private var filteredSessions: [ConnectionSession] {
+        sortedSessions.filter { ConnectionSwitcherFilter.matches($0.connection, query: searchText) }
+    }
+
+    private var filteredSaved: [DatabaseConnection] {
+        inactiveSaved.filter { ConnectionSwitcherFilter.matches($0, query: searchText) }
+    }
+
+    private var orderedIds: [UUID] {
+        filteredSessions.map(\.id) + filteredSaved.map(\.id)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
+            searchField
+
+            Divider()
+
+            content
+
+            Divider()
+
+            manageButton
+        }
+        .frame(width: Self.popoverWidth, height: Self.popoverHeight)
+        .onAppear {
+            savedConnections = ConnectionStorage.shared.loadConnections()
+            if selectedConnectionId == nil {
+                selectedConnectionId = currentSessionId ?? orderedIds.first
+            }
+        }
+        .onChange(of: searchText) { _, _ in
+            let ids = orderedIds
+            if let id = selectedConnectionId, ids.contains(id) { return }
+            selectedConnectionId = ids.first
+        }
+    }
+
+    private var searchField: some View {
+        NativeSearchField(
+            text: $searchText,
+            placeholder: String(localized: "Search connections"),
+            onMoveUp: { moveSelection(by: -1) },
+            onMoveDown: { moveSelection(by: 1) },
+            onSubmit: { activateSelected() },
+            focusOnAppear: true
+        )
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if orderedIds.isEmpty {
+            emptyState
+        } else {
+            list
+        }
+    }
+
+    private var list: some View {
+        ScrollViewReader { proxy in
             List(selection: $selectedConnectionId) {
-                if !sortedSessions.isEmpty {
+                if !filteredSessions.isEmpty {
                     Section {
-                        ForEach(sortedSessions) { session in
+                        ForEach(filteredSessions) { session in
                             connectionRow(
                                 connection: session.connection,
                                 isActive: session.id == currentSessionId,
                                 isConnected: session.status.isConnected
                             )
                             .tag(session.id)
+                            .id(session.id)
                         }
                     } header: {
                         Text("ACTIVE CONNECTIONS")
@@ -52,11 +134,12 @@ struct ConnectionSwitcherPopover: View {
                     }
                 }
 
-                if !inactiveSaved.isEmpty {
+                if !filteredSaved.isEmpty {
                     Section {
-                        ForEach(inactiveSaved) { connection in
+                        ForEach(filteredSaved) { connection in
                             connectionRow(connection: connection, isActive: false, isConnected: false)
                                 .tag(connection.id)
+                                .id(connection.id)
                         }
                     } header: {
                         Text("SAVED CONNECTIONS")
@@ -67,51 +150,52 @@ struct ConnectionSwitcherPopover: View {
             }
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
-
-            Divider()
-
-            Button {
-                onDismiss?()
-                WindowOpener.shared.openWelcome()
-            } label: {
-                HStack {
-                    Image(systemName: "gear")
-                        .foregroundStyle(.secondary)
-                    Text("Manage Connections...")
-                        .foregroundStyle(.primary)
-                    Spacer()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onChange(of: selectedConnectionId) { _, newValue in
+                guard let id = newValue else { return }
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    proxy.scrollTo(id)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-        }
-        .frame(
-            width: 280,
-            height: listHeight(sessions: sortedSessions.count, saved: inactiveSaved.count)
-        )
-        .onAppear {
-            savedConnections = ConnectionStorage.shared.loadConnections()
-            if selectedConnectionId == nil {
-                selectedConnectionId = currentSessionId ?? sortedSessions.first?.id ?? inactiveSaved.first?.id
             }
         }
-        .onExitCommand { onDismiss?() }
-        .onKeyPress(.return) {
-            activateSelected()
-            return .handled
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .font(.title3)
+                .foregroundStyle(.secondary)
+            if searchText.isEmpty {
+                Text(String(localized: "No connections"))
+                    .font(.callout.weight(.medium))
+            } else {
+                Text(String(format: String(localized: "No connections match “%@”"), searchText))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
         }
-        .onKeyPress(characters: .init(charactersIn: "j"), phases: [.down, .repeat]) { keyPress in
-            guard keyPress.modifiers.contains(.control) else { return .ignored }
-            moveSelection(by: 1)
-            return .handled
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.vertical, 12)
+    }
+
+    private var manageButton: some View {
+        Button {
+            dismiss()
+            WindowOpener.shared.openWelcome()
+        } label: {
+            HStack {
+                Image(systemName: "gear")
+                    .foregroundStyle(.secondary)
+                Text("Manage Connections...")
+                    .foregroundStyle(.primary)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
         }
-        .onKeyPress(characters: .init(charactersIn: "k"), phases: [.down, .repeat]) { keyPress in
-            guard keyPress.modifiers.contains(.control) else { return .ignored }
-            moveSelection(by: -1)
-            return .handled
-        }
+        .buttonStyle(.plain)
     }
 
     private func connectionRow(
@@ -139,11 +223,11 @@ struct ConnectionSwitcherPopover: View {
 
             if isActive {
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(Color(nsColor: .systemGreen))
+                    .foregroundStyle(.green)
                     .font(.body)
             } else if isConnected {
                 Circle()
-                    .fill(Color(nsColor: .systemGreen))
+                    .fill(.green)
                     .frame(width: 6, height: 6)
             }
 
@@ -161,16 +245,10 @@ struct ConnectionSwitcherPopover: View {
 
     // MARK: - Selection
 
-    private var allConnectionIds: [UUID] {
-        sortedSessions.map(\.id) + inactiveSaved.map(\.id)
-    }
-
     private func moveSelection(by offset: Int) {
-        let ids = allConnectionIds
-        guard !ids.isEmpty else { return }
-        let currentIndex = ids.firstIndex(of: selectedConnectionId ?? UUID()) ?? 0
-        let newIndex = max(0, min(ids.count - 1, currentIndex + offset))
-        selectedConnectionId = ids[newIndex]
+        if let next = ConnectionSwitcherSelection.moved(in: orderedIds, from: selectedConnectionId, by: offset) {
+            selectedConnectionId = next
+        }
     }
 
     private func activateSelected() {
@@ -179,7 +257,7 @@ struct ConnectionSwitcherPopover: View {
     }
 
     private func activate(connectionId: UUID) {
-        onDismiss?()
+        dismiss()
         Task {
             do {
                 try await TabRouter.shared.route(.openConnection(connectionId))
@@ -193,22 +271,6 @@ struct ConnectionSwitcherPopover: View {
                 }
             }
         }
-    }
-
-    // MARK: - Layout
-
-    private func listHeight(sessions: Int, saved: Int) -> CGFloat {
-        let rowHeight: CGFloat = 44
-        let sectionHeaderHeight: CGFloat = 28
-        let buttonHeight: CGFloat = 44
-        var height: CGFloat = buttonHeight
-        if sessions > 0 {
-            height += sectionHeaderHeight + CGFloat(sessions) * rowHeight
-        }
-        if saved > 0 {
-            height += sectionHeaderHeight + CGFloat(saved) * rowHeight
-        }
-        return min(height, 400)
     }
 
     private func connectionSubtitle(_ connection: DatabaseConnection) -> String {

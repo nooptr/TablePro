@@ -9,6 +9,7 @@
 import AppKit
 import CodeEditSourceEditor
 import SwiftUI
+import TableProPluginKit
 
 /// Identity for the visibility-scoped lazy-load `.task(id:)` modifier on
 /// `MainEditorContentView`. Changes to either field cancel the previous
@@ -50,9 +51,9 @@ struct MainEditorContentView: View {
     let onPreviousPage: () -> Void
     let onNextPage: () -> Void
     let onLastPage: () -> Void
-    let onLimitChange: (Int) -> Void
-    let onOffsetChange: (Int) -> Void
-    let onPaginationGo: () -> Void
+    let onPageSizeChange: (Int) -> Void
+    let onShowAll: () -> Void
+    let onGoToPage: (Int) -> Void
 
     @State private var cachedChangeManager: AnyChangeManager?
     @State private var erDiagramViewModels: [UUID: ERDiagramViewModel] = [:]
@@ -208,14 +209,13 @@ struct MainEditorContentView: View {
         case .createTable:
             CreateTableView(
                 connection: connection,
-                coordinator: coordinator
+                coordinator: coordinator,
+                selectionState: selectionState
             )
         case .erDiagram:
             erDiagramContent(tab: tab)
         case .serverDashboard:
             serverDashboardContent(tab: tab)
-        case .terminal:
-            terminalTabContent(tab: tab)
         }
     }
 
@@ -239,18 +239,6 @@ struct MainEditorContentView: View {
                     }
             }
         }
-        .id(tab.id)
-    }
-
-    // MARK: - Terminal Tab Content
-
-    @ViewBuilder
-    private func terminalTabContent(tab: QueryTab) -> some View {
-        TerminalTabContentView(
-            tab: tab,
-            connection: connection,
-            connectionId: connectionId
-        )
         .id(tab.id)
     }
 
@@ -332,7 +320,8 @@ struct MainEditorContentView: View {
                         onSaveAsFavorite: { text in
                             guard !text.isEmpty else { return }
                             coordinator.favoriteDialogQuery = FavoriteDialogQuery(query: text)
-                        }
+                        },
+                        onClearResults: { coordinator.clearActiveQueryResults() }
                     )
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -432,8 +421,11 @@ struct MainEditorContentView: View {
             case .structure:
                 if let tableName = tab.tableContext.tableName {
                     TableStructureView(
-                        tableName: tableName, connection: connection,
-                        toolbarState: coordinator.toolbarState, coordinator: coordinator
+                        tableName: tableName,
+                        connection: connection,
+                        toolbarState: coordinator.toolbarState,
+                        coordinator: coordinator,
+                        selectionState: selectionState
                     )
                     .id(tableName)
                     .frame(maxHeight: .infinity)
@@ -489,6 +481,7 @@ struct MainEditorContentView: View {
                                 columns: resolvedRows.columns,
                                 primaryKeyColumn: changeManager.primaryKeyColumn,
                                 databaseType: connection.type,
+                                enumValuesByColumn: resolvedRows.columnEnumValues,
                                 onApply: onApplyFilters,
                                 onUnset: onClearFilters
                             )
@@ -560,6 +553,9 @@ struct MainEditorContentView: View {
                     return .none
                 }
             },
+            paginationOffsetProvider: { [coordinator] in
+                coordinator.tabManager.tabs.first(where: { $0.id == tabId })?.pagination.currentOffset ?? 0
+            },
             changeManager: currentChangeManager,
             isEditable: isEditable,
             configuration: DataGridConfiguration(
@@ -608,8 +604,8 @@ struct MainEditorContentView: View {
 
         var detected: [ValueDisplayFormat?] = Array(repeating: nil, count: columns.count)
         if smartDetectionEnabled {
-            let sampleRows: [[String?]]? = {
-                let rows: [[String?]] = tableRows?.rows.prefix(10).map { Array($0.values) } ?? []
+            let sampleRows: [[PluginCellValue]]? = {
+                let rows: [[PluginCellValue]] = tableRows?.rows.prefix(10).map { Array($0.values) } ?? []
                 return rows.isEmpty ? nil : rows
             }()
             detected = ValueDisplayDetector.detect(
@@ -690,9 +686,9 @@ struct MainEditorContentView: View {
             let row2 = storageRows[idx2].values
             for sortCol in sortColumns {
                 let val1 = sortCol.columnIndex < row1.count
-                    ? (row1[sortCol.columnIndex] ?? "") : ""
+                    ? row1[sortCol.columnIndex].sortKey : ""
                 let val2 = sortCol.columnIndex < row2.count
-                    ? (row2[sortCol.columnIndex] ?? "") : ""
+                    ? row2[sortCol.columnIndex].sortKey : ""
                 let colType = sortCol.columnIndex < colTypes.count
                     ? colTypes[sortCol.columnIndex] : nil
                 let result = RowSortComparator.compare(val1, val2, columnType: colType)
@@ -749,21 +745,24 @@ struct MainEditorContentView: View {
             snapshot: StatusBarSnapshot(tab: tab, tableRows: resolvedRows),
             filterState: tab.filterState,
             hiddenColumns: tab.columnLayout.hiddenColumns,
-            allColumns: resolvedRows.columns,
+            allColumns: coordinator.columnsForVisibilityPicker(for: tab, resultColumns: resolvedRows.columns),
             selectedRowIndices: selectionState.indices,
             viewMode: resultsViewModeBinding(for: tab),
             onFirstPage: onFirstPage,
             onPreviousPage: onPreviousPage,
             onNextPage: onNextPage,
             onLastPage: onLastPage,
-            onLimitChange: onLimitChange,
-            onOffsetChange: onOffsetChange,
-            onPaginationGo: onPaginationGo,
+            onPageSizeChange: onPageSizeChange,
+            onShowAll: onShowAll,
+            onGoToPage: onGoToPage,
             onToggleColumn: { coordinator.toggleColumnVisibility($0) },
             onShowAllColumns: { coordinator.showAllColumns() },
             onHideAllColumns: { coordinator.hideAllColumns($0) },
             onToggleFilters: { coordinator.toggleFilterPanel() },
-            onFetchAll: { coordinator.fetchAllRows() }
+            onFetchAll: { coordinator.fetchAllRows() },
+            structureFooterState: coordinator.structureFooterState,
+            onStructureAdd: { coordinator.structureActions?.addRow?() },
+            onStructureRemove: { coordinator.structureActions?.removeRow?() }
         )
     }
 

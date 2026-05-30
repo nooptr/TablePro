@@ -15,7 +15,7 @@ struct InlineErrorBanner: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(Color(nsColor: .systemRed))
+                .foregroundStyle(.red)
             Text(message)
                 .font(.subheadline)
                 .lineLimit(3)
@@ -43,7 +43,7 @@ struct InlineErrorBanner: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(Color(nsColor: .systemRed).opacity(0.08))
+        .background(.red.opacity(0.08))
     }
 }
 

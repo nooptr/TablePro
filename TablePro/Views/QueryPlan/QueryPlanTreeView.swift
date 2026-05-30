@@ -117,10 +117,10 @@ private struct QueryPlanRowView: View {
     }
 
     private var costColor: Color {
-        if node.costFraction > 0.5 { return Color(nsColor: .systemRed) }
-        if node.costFraction > 0.2 { return Color(nsColor: .systemOrange) }
-        if node.costFraction > 0.05 { return Color(nsColor: .systemYellow) }
-        return Color(nsColor: .systemGreen)
+        if node.costFraction > 0.5 { return .red }
+        if node.costFraction > 0.2 { return .orange }
+        if node.costFraction > 0.05 { return .yellow }
+        return .green
     }
 }
 

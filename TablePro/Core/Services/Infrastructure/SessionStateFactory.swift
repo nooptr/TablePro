@@ -79,7 +79,7 @@ enum SessionStateFactory {
 
         if connection.type.pluginTypeId == "Redis" {
             let dbIndex = connection.redisDatabase ?? Int(connection.database) ?? 0
-            toolbarSt.databaseName = String(dbIndex)
+            toolbarSt.currentDatabase = String(dbIndex)
         }
 
         let activeDatabaseName = DatabaseManager.shared.activeDatabaseName(for: connection)
@@ -96,13 +96,15 @@ enum SessionStateFactory {
                                 try tabMgr.addPreviewTableTab(
                                     tableName: tableName,
                                     databaseType: connection.type,
-                                    databaseName: payload.databaseName ?? activeDatabaseName
+                                    databaseName: payload.databaseName ?? activeDatabaseName,
+                                    schemaName: payload.schemaName
                                 )
                             } else {
                                 try tabMgr.addTableTab(
                                     tableName: tableName,
                                     databaseType: connection.type,
-                                    databaseName: payload.databaseName ?? activeDatabaseName
+                                    databaseName: payload.databaseName ?? activeDatabaseName,
+                                    schemaName: payload.schemaName
                                 )
                             }
                         } catch {
@@ -145,10 +147,6 @@ enum SessionStateFactory {
                     )
                 case .serverDashboard:
                     tabMgr.addServerDashboardTab()
-                case .terminal:
-                    tabMgr.addTerminalTab(
-                        databaseName: payload.databaseName ?? activeDatabaseName
-                    )
                 }
             case .newEmptyTab:
                 let allTabs = MainContentCoordinator.allTabs(for: connection.id)

@@ -27,7 +27,7 @@ struct ExportSuccessView: View {
                 .font(.largeTitle)
                 .imageScale(.large)
                 .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(Color(nsColor: .systemGreen))
+                .foregroundStyle(.green)
 
             // Title and message
             VStack(spacing: 6) {

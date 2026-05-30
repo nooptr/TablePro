@@ -1,4 +1,5 @@
 import Foundation
+import TableProPluginKit
 import Testing
 @testable import TablePro
 
@@ -21,8 +22,8 @@ struct NeedsRestartPersistenceTests {
     }
 
     @Test("loadPendingPlugins with no pending plugins does not set needsRestart")
-    func loadPendingPluginsKeepsFalse() {
-        PluginManager.shared.loadPendingPlugins()
+    func loadPendingPluginsKeepsFalse() async {
+        await PluginManager.shared.loadPendingPluginsAsync()
         #expect(PluginManager.shared.needsRestart == false)
     }
 

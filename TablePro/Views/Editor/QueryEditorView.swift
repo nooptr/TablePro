@@ -32,6 +32,7 @@ struct QueryEditorView: View {
     var onAIExplain: ((String) -> Void)?
     var onAIOptimize: ((String) -> Void)?
     var onSaveAsFavorite: ((String) -> Void)?
+    var onClearResults: (() -> Void)?
 
     @State private var vimMode: VimMode = .normal
 
@@ -90,12 +91,16 @@ struct QueryEditorView: View {
             Spacer()
 
             // Clear button
-            Button(action: { queryText = "" }) {
+            Button(action: {
+                queryText = ""
+                onClearResults?()
+            }) {
                 Image(systemName: "trash")
                     .frame(width: 24, height: 24)
             }
             .buttonStyle(.borderless)
             .help(String(localized: "Clear Query"))
+            .accessibilityLabel(String(localized: "Clear Query"))
 
             // Format button
             Button(action: formatQuery) {
@@ -104,6 +109,7 @@ struct QueryEditorView: View {
             }
             .buttonStyle(.borderless)
             .help(String(localized: "Format Query (⇧⌘L)"))
+            .accessibilityLabel(String(localized: "Format Query"))
             .optionalKeyboardShortcut(AppSettingsManager.shared.keyboard.keyboardShortcut(for: .formatQuery))
 
             Divider()
@@ -120,7 +126,7 @@ struct QueryEditorView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
-            .keyboardShortcut(.return, modifiers: .command)
+            .optionalKeyboardShortcut(AppSettingsManager.shared.keyboard.keyboardShortcut(for: .executeQuery))
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -131,9 +137,7 @@ struct QueryEditorView: View {
 
     @ViewBuilder
     private func explainButton(hasQueryText: Bool) -> some View {
-        let variants = databaseType.flatMap {
-            PluginMetadataRegistry.shared.snapshot(forTypeId: $0.pluginTypeId)?.explainVariants
-        } ?? []
+        let variants = databaseType?.explainVariants ?? []
 
         if variants.count <= 1 {
             Button {

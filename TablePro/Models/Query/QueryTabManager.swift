@@ -117,7 +117,7 @@ final class QueryTabManager {
         if let title {
             tabTitle = title
         } else if let sourceFileURL {
-            tabTitle = sourceFileURL.deletingPathExtension().lastPathComponent
+            tabTitle = QueryTab.fileDisplayTitle(for: sourceFileURL)
         } else {
             tabTitle = nextTitle()
         }
@@ -142,10 +142,14 @@ final class QueryTabManager {
         tableName: String,
         databaseType: DatabaseType = .mysql,
         databaseName: String = "",
+        schemaName: String? = nil,
         quoteIdentifier: ((String) -> String)? = nil
     ) throws {
         if let existingTab = tabs.first(where: {
-            $0.tabType == .table && $0.tableContext.tableName == tableName && $0.tableContext.databaseName == databaseName
+            $0.tabType == .table
+                && $0.tableContext.tableName == tableName
+                && $0.tableContext.databaseName == databaseName
+                && $0.tableContext.schemaName == schemaName
         }) {
             selectedTabId = existingTab.id
             return
@@ -153,18 +157,30 @@ final class QueryTabManager {
 
         let pageSize = AppSettingsManager.shared.dataGrid.defaultPageSize
         let query = try QueryTab.buildBaseTableQuery(
-            tableName: tableName, databaseType: databaseType, quoteIdentifier: quoteIdentifier
+            tableName: tableName,
+            databaseType: databaseType,
+            schemaName: schemaName,
+            quoteIdentifier: quoteIdentifier
         )
         var newTab = QueryTab(
-            title: tableName,
+            title: Self.tabTitle(name: tableName, schema: schemaName, databaseType: databaseType),
             query: query,
             tabType: .table,
             tableName: tableName
         )
         newTab.pagination = PaginationState(pageSize: pageSize)
         newTab.tableContext.databaseName = databaseName
+        newTab.tableContext.schemaName = schemaName
         tabs.append(newTab)
         selectedTabId = newTab.id
+    }
+
+    static func tabTitle(name: String, schema: String?, databaseType: DatabaseType) -> String {
+        guard let schema, !schema.isEmpty else { return name }
+        let defaultSchema = PluginMetadataRegistry.shared
+            .snapshot(forTypeId: databaseType.pluginTypeId)?
+            .schema.defaultSchemaName ?? ""
+        return schema == defaultSchema ? name : "\(schema).\(name)"
     }
 
     func addCreateTableTab(databaseName: String = "") {
@@ -201,28 +217,18 @@ final class QueryTabManager {
         selectedTabId = newTab.id
     }
 
-    func addTerminalTab(databaseName: String = "") {
-        if let existing = tabs.first(where: { $0.tabType == .terminal }) {
-            selectedTabId = existing.id
-            return
-        }
-        let tabTitle = String(localized: "Terminal")
-        var newTab = QueryTab(title: tabTitle, tabType: .terminal)
-        newTab.tableContext.databaseName = databaseName
-        newTab.tableContext.isEditable = false
-        newTab.hasUserInteraction = true
-        tabs.append(newTab)
-        selectedTabId = newTab.id
-    }
-
     func addPreviewTableTab(
         tableName: String,
         databaseType: DatabaseType = .mysql,
         databaseName: String = "",
+        schemaName: String? = nil,
         quoteIdentifier: ((String) -> String)? = nil
     ) throws {
         if let existing = tabs.first(where: {
-            $0.tabType == .table && $0.tableContext.tableName == tableName && $0.tableContext.databaseName == databaseName
+            $0.tabType == .table
+                && $0.tableContext.tableName == tableName
+                && $0.tableContext.databaseName == databaseName
+                && $0.tableContext.schemaName == schemaName
         }) {
             selectedTabId = existing.id
             return
@@ -230,16 +236,20 @@ final class QueryTabManager {
 
         let pageSize = AppSettingsManager.shared.dataGrid.defaultPageSize
         let query = try QueryTab.buildBaseTableQuery(
-            tableName: tableName, databaseType: databaseType, quoteIdentifier: quoteIdentifier
+            tableName: tableName,
+            databaseType: databaseType,
+            schemaName: schemaName,
+            quoteIdentifier: quoteIdentifier
         )
         var newTab = QueryTab(
-            title: tableName,
+            title: Self.tabTitle(name: tableName, schema: schemaName, databaseType: databaseType),
             query: query,
             tabType: .table,
             tableName: tableName
         )
         newTab.pagination = PaginationState(pageSize: pageSize)
         newTab.tableContext.databaseName = databaseName
+        newTab.tableContext.schemaName = schemaName
         newTab.isPreview = true
         tabs.append(newTab)
         selectedTabId = newTab.id
@@ -271,7 +281,7 @@ final class QueryTabManager {
 
         var tab = tabs[selectedIndex]
         tab.tabType = .table
-        tab.title = tableName
+        tab.title = Self.tabTitle(name: tableName, schema: schemaName, databaseType: databaseType)
         tab.tableContext.tableName = tableName
         tab.content.query = query
         tab.schemaVersion += 1
@@ -279,6 +289,7 @@ final class QueryTabManager {
         tab.execution.statusMessage = nil
         tab.execution.errorMessage = nil
         tab.execution.lastExecutedAt = nil
+        tab.execution.didEvaluateDefaultSort = false
         tab.display.resultsViewMode = .data
         tab.sortState = SortState()
         tab.selectedRowIndices = []

@@ -276,7 +276,7 @@ struct SSHProfileEditorView: View {
                             } label: {
                                 Image(systemName: "minus.circle.fill")
                                     .frame(width: 24, height: 24)
-                                    .foregroundStyle(Color(nsColor: .systemRed))
+                                    .foregroundStyle(.red)
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel(String(localized: "Remove jump host"))
@@ -334,10 +334,10 @@ struct SSHProfileEditorView: View {
                             .controlSize(.small)
                     } else if testSucceeded {
                         Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(Color(nsColor: .systemGreen))
+                            .foregroundStyle(.green)
                     } else if testError != nil {
                         Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(Color(nsColor: .systemRed))
+                            .foregroundStyle(.red)
                     } else {
                         Image(systemName: "antenna.radiowaves.left.and.right")
                             .foregroundStyle(.secondary)
@@ -350,11 +350,11 @@ struct SSHProfileEditorView: View {
             if testSucceeded {
                 Text(String(localized: "Connected"))
                     .font(.caption)
-                    .foregroundStyle(Color(nsColor: .systemGreen))
+                    .foregroundStyle(.green)
             } else if let testError {
                 Label(testError, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
-                    .foregroundStyle(Color(nsColor: .systemOrange))
+                    .foregroundStyle(.orange)
                     .lineLimit(2)
                     .truncationMode(.tail)
             }

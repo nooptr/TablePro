@@ -173,6 +173,29 @@ final class ConnectionStorage {
         }
     }
 
+    /// Update multiple connections in a single file write, marking each dirty for sync.
+    @discardableResult
+    func updateConnections(_ updates: [DatabaseConnection]) -> Bool {
+        guard !updates.isEmpty else { return true }
+        var connections = loadConnections()
+        let updatesById = Dictionary(updates.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+        var didMutate = false
+        for index in connections.indices {
+            if let replacement = updatesById[connections[index].id] {
+                connections[index] = replacement
+                didMutate = true
+            }
+        }
+        guard didMutate, saveConnections(connections) else {
+            return false
+        }
+        let dirtyIds = updatesById.values
+            .filter { !$0.localOnly && !$0.isSample }
+            .map { $0.id.uuidString }
+        syncTracker.markDirty(.connection, ids: dirtyIds)
+        return true
+    }
+
     /// Delete a connection
     func deleteConnection(_ connection: DatabaseConnection) {
         var connections = loadConnections()
@@ -187,7 +210,10 @@ final class ConnectionStorage {
         deletePassword(for: connection.id)
         deleteSSHPassword(for: connection.id)
         deleteKeyPassphrase(for: connection.id)
+        deleteSSLClientKeyPassphrase(for: connection.id)
         deleteTOTPSecret(for: connection.id)
+        deleteCloudflareTokenId(for: connection.id)
+        deleteCloudflareTokenSecret(for: connection.id)
 
         let secureFieldIds = Self.secureFieldIds(for: connection.type)
         deleteAllPluginSecureFields(for: connection.id, fieldIds: secureFieldIds)
@@ -195,6 +221,8 @@ final class ConnectionStorage {
         let appSettings = appSettingsProvider()
         appSettings.saveLastDatabase(nil, for: connection.id)
         appSettings.saveLastSchema(nil, for: connection.id)
+
+        FavoriteTablesStorage.shared.removeFavorites(for: connection.id)
     }
 
     /// Batch-delete multiple connections and clean up their Keychain entries
@@ -213,12 +241,16 @@ final class ConnectionStorage {
             deletePassword(for: conn.id)
             deleteSSHPassword(for: conn.id)
             deleteKeyPassphrase(for: conn.id)
+            deleteSSLClientKeyPassphrase(for: conn.id)
             deleteTOTPSecret(for: conn.id)
+            deleteCloudflareTokenId(for: conn.id)
+            deleteCloudflareTokenSecret(for: conn.id)
             let fields = Self.secureFieldIds(for: conn.type)
             deleteAllPluginSecureFields(for: conn.id, fieldIds: fields)
             let appSettings = appSettingsProvider()
             appSettings.saveLastDatabase(nil, for: conn.id)
             appSettings.saveLastSchema(nil, for: conn.id)
+            FavoriteTablesStorage.shared.removeFavorites(for: conn.id)
         }
     }
 
@@ -251,6 +283,7 @@ final class ConnectionStorage {
             startupCommands: connection.startupCommands,
             sortOrder: connection.sortOrder,
             localOnly: connection.localOnly,
+            passwordSource: connection.passwordSource,
             additionalFields: connection.additionalFields.isEmpty ? nil : connection.additionalFields
         )
 
@@ -274,6 +307,9 @@ final class ConnectionStorage {
         }
         if let keyPassphrase = loadKeyPassphrase(for: connection.id) {
             saveKeyPassphrase(keyPassphrase, for: newId)
+        }
+        if let sslKeyPassphrase = loadSSLClientKeyPassphrase(for: connection.id) {
+            saveSSLClientKeyPassphrase(sslKeyPassphrase, for: newId)
         }
         if let totpSecret = loadTOTPSecret(for: connection.id) {
             saveTOTPSecret(totpSecret, for: newId)
@@ -340,6 +376,23 @@ final class ConnectionStorage {
         keychain.delete(forKey: key)
     }
 
+    // MARK: - SSL Client Key Passphrase Storage
+
+    func saveSSLClientKeyPassphrase(_ passphrase: String, for connectionId: UUID) {
+        let key = "com.TablePro.sslkeypassphrase.\(connectionId.uuidString)"
+        keychain.writeString(passphrase, forKey: key)
+    }
+
+    func loadSSLClientKeyPassphrase(for connectionId: UUID) -> String? {
+        let key = "com.TablePro.sslkeypassphrase.\(connectionId.uuidString)"
+        return resolveString(.init(label: "SSL client key passphrase", connectionId: connectionId), forKey: key)
+    }
+
+    func deleteSSLClientKeyPassphrase(for connectionId: UUID) {
+        let key = "com.TablePro.sslkeypassphrase.\(connectionId.uuidString)"
+        keychain.delete(forKey: key)
+    }
+
     // MARK: - Plugin Secure Field Storage
 
     func savePluginSecureField(_ value: String, fieldId: String, for connectionId: UUID) {
@@ -377,6 +430,38 @@ final class ConnectionStorage {
 
     func deleteTOTPSecret(for connectionId: UUID) {
         let key = "com.TablePro.totpsecret.\(connectionId.uuidString)"
+        keychain.delete(forKey: key)
+    }
+
+    // MARK: - Cloudflare Service Token Storage
+
+    func saveCloudflareTokenId(_ tokenId: String, for connectionId: UUID) {
+        let key = "com.TablePro.cloudflaretokenid.\(connectionId.uuidString)"
+        keychain.writeString(tokenId, forKey: key)
+    }
+
+    func loadCloudflareTokenId(for connectionId: UUID) -> String? {
+        let key = "com.TablePro.cloudflaretokenid.\(connectionId.uuidString)"
+        return resolveString(.init(label: "Cloudflare token ID", connectionId: connectionId), forKey: key)
+    }
+
+    func deleteCloudflareTokenId(for connectionId: UUID) {
+        let key = "com.TablePro.cloudflaretokenid.\(connectionId.uuidString)"
+        keychain.delete(forKey: key)
+    }
+
+    func saveCloudflareTokenSecret(_ tokenSecret: String, for connectionId: UUID) {
+        let key = "com.TablePro.cloudflaretokensecret.\(connectionId.uuidString)"
+        keychain.writeString(tokenSecret, forKey: key)
+    }
+
+    func loadCloudflareTokenSecret(for connectionId: UUID) -> String? {
+        let key = "com.TablePro.cloudflaretokensecret.\(connectionId.uuidString)"
+        return resolveString(.init(label: "Cloudflare token secret", connectionId: connectionId), forKey: key)
+    }
+
+    func deleteCloudflareTokenSecret(for connectionId: UUID) {
+        let key = "com.TablePro.cloudflaretokensecret.\(connectionId.uuidString)"
         keychain.delete(forKey: key)
     }
 
@@ -515,6 +600,8 @@ private struct StoredConnection: Codable {
 
     let isSample: Bool
 
+    let isFavorite: Bool
+
     // TOTP configuration
     let totpMode: String
     let totpAlgorithm: String
@@ -524,8 +611,14 @@ private struct StoredConnection: Codable {
     // SSH tunnel mode (v2 JSON blob preserving jump hosts + profile links)
     let sshTunnelModeJson: Data?
 
+    // Cloudflare Access TCP tunnel mode (JSON blob)
+    let cloudflareTunnelModeJson: Data?
+
     // Plugin-driven additional fields
     let additionalFields: [String: String]?
+
+    // Password source (file, env, or command) for connections provisioned outside the app
+    let passwordSource: PasswordSource?
 
     init(from connection: DatabaseConnection) {
         self.id = connection.id
@@ -599,11 +692,22 @@ private struct StoredConnection: Codable {
         // Sample marker
         self.isSample = connection.isSample
 
+        // Favorite flag
+        self.isFavorite = connection.isFavorite
+
         // SSH tunnel mode (v2 format preserving jump hosts, profiles, etc.)
         self.sshTunnelModeJson = try? JSONEncoder().encode(connection.sshTunnelMode)
 
+        // Cloudflare tunnel mode (only persisted when enabled)
+        self.cloudflareTunnelModeJson = connection.isCloudflareEnabled
+            ? (try? JSONEncoder().encode(connection.cloudflareTunnelMode))
+            : nil
+
         // Plugin-driven additional fields
         self.additionalFields = connection.additionalFields.isEmpty ? nil : connection.additionalFields
+
+        // Password source (not synced to iCloud; see SyncRecordMapper)
+        self.passwordSource = connection.passwordSource
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -621,9 +725,12 @@ private struct StoredConnection: Codable {
         case mongoAuthSource, mongoReadPreference, mongoWriteConcern, redisDatabase
         case mssqlSchema, oracleServiceName, startupCommands, sortOrder
         case sshTunnelModeJson
+        case cloudflareTunnelModeJson
         case additionalFields
         case localOnly
         case isSample
+        case isFavorite
+        case passwordSource
     }
 
     func encode(to encoder: Encoder) throws {
@@ -662,9 +769,12 @@ private struct StoredConnection: Codable {
         try container.encodeIfPresent(startupCommands, forKey: .startupCommands)
         try container.encode(sortOrder, forKey: .sortOrder)
         try container.encodeIfPresent(sshTunnelModeJson, forKey: .sshTunnelModeJson)
+        try container.encodeIfPresent(cloudflareTunnelModeJson, forKey: .cloudflareTunnelModeJson)
         try container.encodeIfPresent(additionalFields, forKey: .additionalFields)
         try container.encode(localOnly, forKey: .localOnly)
         try container.encode(isSample, forKey: .isSample)
+        try container.encode(isFavorite, forKey: .isFavorite)
+        try container.encodeIfPresent(passwordSource, forKey: .passwordSource)
     }
 
     // Custom decoder to handle migration from old format
@@ -729,9 +839,12 @@ private struct StoredConnection: Codable {
         startupCommands = try container.decodeIfPresent(String.self, forKey: .startupCommands)
         sortOrder = try container.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
         sshTunnelModeJson = try container.decodeIfPresent(Data.self, forKey: .sshTunnelModeJson)
+        cloudflareTunnelModeJson = try container.decodeIfPresent(Data.self, forKey: .cloudflareTunnelModeJson)
         additionalFields = try container.decodeIfPresent([String: String].self, forKey: .additionalFields)
+        passwordSource = PasswordSource.resilientlyDecoded(from: container, forKey: .passwordSource)
         localOnly = try container.decodeIfPresent(Bool.self, forKey: .localOnly) ?? false
         isSample = try container.decodeIfPresent(Bool.self, forKey: .isSample) ?? false
+        isFavorite = try container.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
     }
 
     func toConnection() -> DatabaseConnection {
@@ -766,9 +879,23 @@ private struct StoredConnection: Codable {
             resolvedTunnelMode = .disabled
         }
 
+        let resolvedCloudflareMode: CloudflareTunnelMode
+        if let json = cloudflareTunnelModeJson,
+           let decoded = try? JSONDecoder().decode(CloudflareTunnelMode.self, from: json) {
+            resolvedCloudflareMode = decoded
+        } else {
+            resolvedCloudflareMode = .disabled
+        }
+
+        var resolvedSSLCaPath = sslCaCertificatePath
+        if type == "Cassandra", resolvedSSLCaPath.isEmpty,
+           let legacy = additionalFields?["sslCaCertPath"], !legacy.isEmpty {
+            resolvedSSLCaPath = legacy
+        }
+
         let sslConfig = SSLConfiguration(
             mode: SSLMode(rawValue: sslMode) ?? .disabled,
-            caCertificatePath: sslCaCertificatePath,
+            caCertificatePath: resolvedSSLCaPath,
             clientCertificatePath: sslClientCertificatePath,
             clientKeyPath: sslClientKeyPath
         )
@@ -811,6 +938,7 @@ private struct StoredConnection: Codable {
             groupId: parsedGroupId,
             sshProfileId: parsedSSHProfileId,
             sshTunnelMode: resolvedTunnelMode,
+            cloudflareTunnelMode: resolvedCloudflareMode,
             safeModeLevel: SafeModeLevel(rawValue: safeModeLevel) ?? .silent,
             aiPolicy: parsedAIPolicy,
             aiRules: aiRules,
@@ -820,6 +948,8 @@ private struct StoredConnection: Codable {
             sortOrder: sortOrder,
             localOnly: localOnly,
             isSample: isSample,
+            isFavorite: isFavorite,
+            passwordSource: passwordSource,
             additionalFields: mergedFields
         )
     }

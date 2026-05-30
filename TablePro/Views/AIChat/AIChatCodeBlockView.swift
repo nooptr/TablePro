@@ -8,9 +8,13 @@ import CodeEditLanguages
 import CodeEditSourceEditor
 import SwiftUI
 
-struct AIChatCodeBlockView: View {
+struct AIChatCodeBlockView: View, Equatable {
     let code: String
     let language: String?
+
+    static func == (lhs: AIChatCodeBlockView, rhs: AIChatCodeBlockView) -> Bool {
+        lhs.code == rhs.code && lhs.language == rhs.language
+    }
 
     @State private var isCopied: Bool = false
     @State private var isEditorReady = false
@@ -114,11 +118,8 @@ struct AIChatCodeBlockView: View {
         guard !trimmed.isEmpty else { return nil }
         let firstNonCommentLine = trimmed
             .split(whereSeparator: { $0.isNewline })
-            .first(where: { line in
-                let head = line.trimmingCharacters(in: .whitespaces)
-                return !head.isEmpty && !head.hasPrefix("--") && !head.hasPrefix("/*")
-            })
-            .map(String.init) ?? trimmed
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first(where: { !$0.isEmpty && !$0.hasPrefix("--") && !$0.hasPrefix("/*") }) ?? trimmed
 
         let sqlPrefixes = [
             "SELECT ", "INSERT ", "UPDATE ", "DELETE ", "WITH ",

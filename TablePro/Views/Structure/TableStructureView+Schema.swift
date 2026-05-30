@@ -18,6 +18,10 @@ extension TableStructureView {
     func generateStructurePreviewSQL() {
         let changes = structureChangeManager.getChangesArray()
         guard !changes.isEmpty else {
+            // After undo brings the working copy back to a clean state, the popover
+            // would otherwise retain the last-generated SQL. Clear it so reopening
+            // the popover correctly shows "no changes".
+            toolbarState.previewStatements = []
             return
         }
 
@@ -31,7 +35,7 @@ extension TableStructureView {
 
         guard let pluginDriver = (DatabaseManager.shared.driver(for: connection.id) as? PluginDriverAdapter)?.schemaPluginDriver else {
             toolbarState.previewStatements = ["-- Error: no plugin driver available for DDL generation"]
-            toolbarState.showSQLReviewPopover = true
+            coordinator?.activeSheet = .sqlPreview
             return
         }
 
@@ -46,7 +50,7 @@ extension TableStructureView {
         } catch {
             toolbarState.previewStatements = ["-- Error generating SQL: \(error.localizedDescription)"]
         }
-        toolbarState.showSQLReviewPopover = true
+        coordinator?.activeSheet = .sqlPreview
     }
 
     func executeSchemaChanges() async {
@@ -98,14 +102,15 @@ extension TableStructureView {
             await loadColumns()
 
             // Load indexes and foreign keys (needed for complete schema state)
-            guard let driver = DatabaseManager.shared.driver(for: connection.id) else {
-                isReloadingAfterSave = false
-                return
-            }
             do {
-                indexes = try await driver.fetchIndexes(table: tableName)
+                let (reloadedIndexes, reloadedFKs) = try await DatabaseManager.shared.withMetadataDriver(connectionId: connection.id) { driver in
+                    let reloadedIndexes = try await driver.fetchIndexes(table: tableName)
+                    let reloadedFKs = try await driver.fetchForeignKeys(table: tableName)
+                    return (reloadedIndexes, reloadedFKs)
+                }
+                indexes = reloadedIndexes
                 loadedTabs.insert(.indexes)
-                foreignKeys = try await driver.fetchForeignKeys(table: tableName)
+                foreignKeys = reloadedFKs
                 loadedTabs.insert(.foreignKeys)
             } catch {
                 Self.logger.error("Failed to reload indexes/FKs: \(error.localizedDescription, privacy: .public)")
@@ -119,6 +124,15 @@ extension TableStructureView {
 
             // Force clear state after reload (in case it got set during the async process)
             structureChangeManager.discardChanges()
+
+            // Save resets the manager (pendingChanges cleared, working state
+            // refetched from DB) but row count is usually unchanged after a
+            // rename / type-change, so `DataGridView.updateNSView` does not
+            // call `reloadData` on its own. Ask the grid to repaint visible
+            // cells so the modified yellow tint clears and any value the DB
+            // round-trip changed (collation defaults, etc.) shows the canonical
+            // post-save value.
+            gridDelegate.reloadAllVisibleRows()
 
             lastSaveTime = Date()
             isReloadingAfterSave = false
@@ -134,6 +148,10 @@ extension TableStructureView {
 
     func discardChanges() {
         structureChangeManager.discardChanges()
+        // Mirror the save path: discard reverts working state without changing
+        // row count, so the grid needs an explicit reload to drop the yellow
+        // modified tint and revert any displayed value.
+        gridDelegate.reloadAllVisibleRows()
     }
 
     // MARK: - DDL View
@@ -165,7 +183,7 @@ extension TableStructureView {
                 if showCopyConfirmation {
                     HStack {
                         Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(Color(nsColor: .systemGreen))
+                            .foregroundStyle(.green)
                         Text("Copied!")
                     }
                     .transition(.opacity)

@@ -4,6 +4,7 @@
 //
 
 import Foundation
+import TableProPluginKit
 
 @MainActor @Observable
 final class GridSelectionState {
@@ -17,7 +18,6 @@ enum TabType: Equatable, Codable, Hashable {
     case createTable      // Create new table tab
     case erDiagram        // ER diagram tab
     case serverDashboard  // Server dashboard tab
-    case terminal         // Embedded database CLI terminal tab
 }
 
 /// Minimal representation of a tab for persistence
@@ -40,7 +40,7 @@ struct TabChangeSnapshot: Equatable {
     var deletedRowIndices: Set<Int>
     var insertedRowIndices: Set<Int>
     var modifiedCells: [Int: Set<Int>]
-    var insertedRowData: [Int: [String?]]  // Lazy storage for inserted row values
+    var insertedRowData: [Int: [PluginCellValue]]
     var primaryKeyColumns: [String]
     var columns: [String]
 
@@ -74,11 +74,20 @@ struct SortColumn: Equatable {
     var direction: SortDirection
 }
 
+enum SortSource: Equatable {
+    case user
+    case defaultSort
+}
+
 /// Tracks sorting state for a table (supports multi-column sort)
 struct SortState: Equatable {
     var columns: [SortColumn] = []
+    var source: SortSource = .user
 
-    init() {}
+    init(columns: [SortColumn] = [], source: SortSource = .user) {
+        self.columns = columns
+        self.source = source
+    }
 
     var isSorting: Bool { !columns.isEmpty }
 
@@ -133,6 +142,15 @@ struct PaginationState: Equatable {
         currentPage < totalPages
     }
 
+    var isLastPageKnown: Bool {
+        totalRowCount != nil
+    }
+
+    func canGoToNextPage(loadedRowCount: Int) -> Bool {
+        if hasNextPage { return true }
+        return totalRowCount == nil && loadedRowCount >= pageSize
+    }
+
     /// Whether there is a previous page available
     var hasPreviousPage: Bool {
         currentPage > 1
@@ -153,37 +171,37 @@ struct PaginationState: Equatable {
 
     // MARK: - Navigation Methods
 
-    /// Navigate to next page
-    mutating func goToNextPage() {
-        guard hasNextPage else { return }
-        currentPage += 1
-        currentOffset = (currentPage - 1) * pageSize
-    }
-
-    /// Navigate to previous page
-    mutating func goToPreviousPage() {
-        guard hasPreviousPage else { return }
-        currentPage -= 1
-        currentOffset = (currentPage - 1) * pageSize
-    }
-
-    /// Navigate to first page
-    mutating func goToFirstPage() {
-        currentPage = 1
-        currentOffset = 0
-    }
-
-    /// Navigate to last page
-    mutating func goToLastPage() {
-        currentPage = totalPages
-        currentOffset = (totalPages - 1) * pageSize
-    }
-
-    /// Navigate to specific page
-    mutating func goToPage(_ page: Int) {
-        guard page > 0 && page <= totalPages else { return }
+    private mutating func setPage(_ page: Int) {
         currentPage = page
         currentOffset = (page - 1) * pageSize
+    }
+
+    mutating func goToNextPage() {
+        guard hasNextPage else { return }
+        setPage(currentPage + 1)
+    }
+
+    mutating func goToNextPage(loadedRowCount: Int) {
+        guard canGoToNextPage(loadedRowCount: loadedRowCount) else { return }
+        setPage(currentPage + 1)
+    }
+
+    mutating func goToPreviousPage() {
+        guard hasPreviousPage else { return }
+        setPage(currentPage - 1)
+    }
+
+    mutating func goToFirstPage() {
+        setPage(1)
+    }
+
+    mutating func goToLastPage() {
+        setPage(totalPages)
+    }
+
+    mutating func goToPage(_ page: Int) {
+        guard page > 0 && page <= totalPages else { return }
+        setPage(page)
     }
 
     /// Reset pagination to first page
@@ -231,6 +249,7 @@ struct TabExecutionState: Equatable {
     var errorMessage: String?
     var rowsAffected: Int = 0
     var lastExecutedAt: Date?
+    var didEvaluateDefaultSort: Bool = false
 
     static func == (lhs: TabExecutionState, rhs: TabExecutionState) -> Bool {
         lhs.isExecuting == rhs.isExecuting

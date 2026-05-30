@@ -4,6 +4,7 @@
 //
 
 import Foundation
+import TableProPluginKit
 import Testing
 @testable import TablePro
 
@@ -36,19 +37,6 @@ struct TabStructureVersionTests {
         #expect(afterFirstAdd == 1)
 
         try manager.addTableTab(tableName: "users")
-
-        #expect(manager.tabStructureVersion == afterFirstAdd)
-    }
-
-    @Test("addTerminalTab(...) for a new tab bumps once; activating existing terminal does NOT bump")
-    func addTerminalTabBumpsOnceAndIdempotent() {
-        let manager = QueryTabManager()
-
-        manager.addTerminalTab()
-        let afterFirstAdd = manager.tabStructureVersion
-        #expect(afterFirstAdd == 1)
-
-        manager.addTerminalTab()
 
         #expect(manager.tabStructureVersion == afterFirstAdd)
     }

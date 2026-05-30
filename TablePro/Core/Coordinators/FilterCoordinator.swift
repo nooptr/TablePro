@@ -34,24 +34,20 @@ final class FilterCoordinator {
 
             let tab = parent.tabManager.tabs[capturedTabIndex]
             let buffer = parent.tabSessionRegistry.tableRows(for: tab.id)
-            let exclusions = parent.columnExclusions(for: capturedTableName)
             let newQuery = parent.queryBuilder.buildFilteredQuery(
                 tableName: capturedTableName,
+                schemaName: tab.tableContext.schemaName,
                 filters: capturedFilters,
                 logicMode: tab.filterState.filterLogicMode,
                 sortState: tab.sortState,
                 columns: buffer.columns,
+                selectColumns: parent.selectColumns(for: tab),
                 limit: tab.pagination.pageSize,
-                offset: tab.pagination.currentOffset,
-                columnExclusions: exclusions
+                offset: tab.pagination.currentOffset
             )
 
             parent.tabManager.mutate(at: capturedTabIndex) { $0.content.query = newQuery }
-
-            if !capturedFilters.isEmpty {
-                saveLastFilters(for: capturedTableName)
-            }
-
+            saveLastFilters(for: capturedTableName)
             parent.runQuery()
         }
     }
@@ -66,19 +62,22 @@ final class FilterCoordinator {
             guard let self, confirmed else { return }
             guard capturedTabIndex < parent.tabManager.tabs.count else { return }
 
+            parent.tabManager.mutate(at: capturedTabIndex) { $0.pagination.reset() }
+
             let tab = parent.tabManager.tabs[capturedTabIndex]
             let buffer = parent.tabSessionRegistry.tableRows(for: tab.id)
-            let exclusions = parent.columnExclusions(for: capturedTableName)
             let newQuery = parent.queryBuilder.buildBaseQuery(
                 tableName: capturedTableName,
+                schemaName: tab.tableContext.schemaName,
                 sortState: tab.sortState,
                 columns: buffer.columns,
+                selectColumns: parent.selectColumns(for: tab),
                 limit: tab.pagination.pageSize,
-                offset: tab.pagination.currentOffset,
-                columnExclusions: exclusions
+                offset: tab.pagination.currentOffset
             )
 
             parent.tabManager.mutate(at: capturedTabIndex) { $0.content.query = newQuery }
+            clearLastFilters(for: capturedTableName)
             parent.runQuery()
         }
     }
@@ -98,28 +97,29 @@ final class FilterCoordinator {
         let tab = parent.tabManager.tabs[tabIndex]
         let buffer = parent.tabSessionRegistry.tableRows(for: tab.id)
         let hasFilters = tab.filterState.hasAppliedFilters
-        let exclusions = parent.columnExclusions(for: tableName)
 
         let newQuery: String
         if hasFilters {
             newQuery = parent.queryBuilder.buildFilteredQuery(
                 tableName: tableName,
+                schemaName: tab.tableContext.schemaName,
                 filters: tab.filterState.appliedFilters,
                 logicMode: tab.filterState.filterLogicMode,
                 sortState: tab.sortState,
                 columns: buffer.columns,
+                selectColumns: parent.selectColumns(for: tab),
                 limit: tab.pagination.pageSize,
-                offset: tab.pagination.currentOffset,
-                columnExclusions: exclusions
+                offset: tab.pagination.currentOffset
             )
         } else {
             newQuery = parent.queryBuilder.buildBaseQuery(
                 tableName: tableName,
+                schemaName: tab.tableContext.schemaName,
                 sortState: tab.sortState,
                 columns: buffer.columns,
+                selectColumns: parent.selectColumns(for: tab),
                 limit: tab.pagination.pageSize,
-                offset: tab.pagination.currentOffset,
-                columnExclusions: exclusions
+                offset: tab.pagination.currentOffset
             )
         }
 
@@ -212,6 +212,37 @@ final class FilterCoordinator {
         }
     }
 
+    enum RemoveFilterOutcome: Equatable {
+        case noChange
+        case clear
+        case reapply([TableFilter])
+    }
+
+    static func removeFilterOutcome(
+        removing filter: TableFilter,
+        from appliedFilters: [TableFilter]
+    ) -> RemoveFilterOutcome {
+        guard appliedFilters.contains(where: { $0.id == filter.id }) else { return .noChange }
+        let remaining = appliedFilters.filter { $0.id != filter.id }
+        return remaining.isEmpty ? .clear : .reapply(remaining)
+    }
+
+    func removeFilterAndReload(_ filter: TableFilter) {
+        let outcome = Self.removeFilterOutcome(
+            removing: filter,
+            from: selectedTabFilterState.appliedFilters
+        )
+        removeFilter(filter)
+        switch outcome {
+        case .noChange:
+            break
+        case .clear:
+            clearFiltersAndReload()
+        case .reapply(let remaining):
+            applyFilters(remaining)
+        }
+    }
+
     func updateFilter(_ filter: TableFilter) {
         mutateSelectedTabFilterState { state in
             if let index = state.filters.firstIndex(where: { $0.id == filter.id }) {
@@ -257,12 +288,14 @@ final class FilterCoordinator {
         mutateSelectedTabFilterState { state in
             state.appliedFilters = state.filters.filter { $0.isSelected && $0.isValid }
         }
+        saveLastFiltersForActiveTable()
     }
 
     func applyAllFilters() {
         mutateSelectedTabFilterState { state in
             state.appliedFilters = state.filters.filter { $0.isEnabled && $0.isValid }
         }
+        saveLastFiltersForActiveTable()
     }
 
     func clearAppliedFilters() {
@@ -322,7 +355,10 @@ final class FilterCoordinator {
               let tableName = tab.tableContext.tableName else { return }
         FilterSettingsStorage.shared.saveLastFilters(
             tab.filterState.appliedFilters,
-            for: tableName
+            for: tableName,
+            connectionId: parent.connectionId,
+            databaseName: tab.tableContext.databaseName,
+            schemaName: tab.tableContext.schemaName
         )
     }
 
@@ -330,29 +366,68 @@ final class FilterCoordinator {
         guard let tab = parent.tabManager.selectedTab else { return }
         FilterSettingsStorage.shared.saveLastFilters(
             tab.filterState.appliedFilters,
-            for: tableName
+            for: tableName,
+            connectionId: parent.connectionId,
+            databaseName: tab.tableContext.databaseName,
+            schemaName: tab.tableContext.schemaName
+        )
+    }
+
+    func clearLastFilters(for tableName: String) {
+        guard let tab = parent.tabManager.selectedTab else { return }
+        FilterSettingsStorage.shared.clearLastFilters(
+            for: tableName,
+            connectionId: parent.connectionId,
+            databaseName: tab.tableContext.databaseName,
+            schemaName: tab.tableContext.schemaName
         )
     }
 
     func restoreLastFilters(for tableName: String) {
         let settings = FilterSettingsStorage.shared.loadSettings()
-        mutateSelectedTabFilterState { state in
-            if settings.panelState == .restoreLast {
-                let restored = FilterSettingsStorage.shared.loadLastFilters(for: tableName)
-                if !restored.isEmpty {
-                    state.filters = restored
-                    state.appliedFilters = restored
-                }
-            }
-            if settings.panelState == .alwaysShow {
-                state.isVisible = true
-            }
+        guard let tab = parent.tabManager.selectedTab else { return }
+
+        let restored: [TableFilter]
+        if settings.panelState == .alwaysHide {
+            restored = []
+        } else {
+            restored = FilterSettingsStorage.shared.loadLastFilters(
+                for: tableName,
+                connectionId: parent.connectionId,
+                databaseName: tab.tableContext.databaseName,
+                schemaName: tab.tableContext.schemaName
+            )
         }
+        mutateSelectedTabFilterState { state in
+            state = Self.resolvedRestoredState(panelState: settings.panelState, saved: restored, current: state)
+        }
+    }
+
+    static func resolvedRestoredState(
+        panelState: FilterPanelDefaultState,
+        saved: [TableFilter],
+        current: TabFilterState
+    ) -> TabFilterState {
+        var state = current
+        switch panelState {
+        case .alwaysHide:
+            state.filters = []
+            state.appliedFilters = []
+            state.isVisible = false
+        case .alwaysShow:
+            state.filters = saved
+            state.appliedFilters = saved
+            state.isVisible = true
+        case .restoreLast:
+            state.filters = saved
+            state.appliedFilters = saved
+            state.isVisible = !saved.isEmpty
+        }
+        return state
     }
 
     func clearFilterState() {
         mutateSelectedTabFilterState { state in
-            state.isVisible = false
             state.filters = []
             state.appliedFilters = []
         }

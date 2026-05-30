@@ -11,8 +11,9 @@
 import AppKit
 import Foundation
 import SwiftUI
-import Testing
 @testable import TablePro
+import TableProPluginKit
+import Testing
 
 @MainActor
 private final class NoopColumnLayoutPersister: ColumnLayoutPersisting {
@@ -27,8 +28,13 @@ private final class StubClipboard: ClipboardProvider {
     var hasGridRowsValue = false
 
     func readText() -> String? { text }
+    func readGridRows() -> GridRowsClipboardPayload? { nil }
     func writeText(_ text: String) { self.text = text; hasGridRowsValue = false }
-    func writeRows(tsv: String, html: String?) { self.text = tsv; hasGridRowsValue = true }
+    func writeCsv(_ csv: String) { self.text = csv; hasGridRowsValue = false }
+    func writeRows(tsv: String, html: String?, gridRows: GridRowsClipboardPayload) {
+        self.text = tsv
+        hasGridRowsValue = true
+    }
     var hasText: Bool { text != nil }
     var hasGridRows: Bool { hasGridRowsValue }
 }
@@ -46,7 +52,7 @@ struct CellPasteRoutingTests {
         )
         let columnTypes: [ColumnType] = Array(repeating: .text(rawType: nil), count: columns.count)
         let rows = (0..<rowCount).map { i in (0..<columns.count).map { c in "r\(i)c\(c)" } }
-        let tableRows = TableRows.from(queryRows: rows, columns: columns, columnTypes: columnTypes)
+        let tableRows = TableRows.from(queryRows: rows.map { row in row.map { PluginCellValue.text($0) } }, columns: columns, columnTypes: columnTypes)
         coordinator.tableRowsProvider = { tableRows }
         coordinator.updateCache()
         return coordinator

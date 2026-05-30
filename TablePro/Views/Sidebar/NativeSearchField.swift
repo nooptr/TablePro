@@ -8,6 +8,13 @@
 import AppKit
 import SwiftUI
 
+private final class IntrinsicHeightSearchField: NSSearchField {
+    override var intrinsicContentSize: NSSize {
+        let cellHeight = cell?.cellSize.height ?? super.intrinsicContentSize.height
+        return NSSize(width: NSView.noIntrinsicMetric, height: cellHeight)
+    }
+}
+
 struct NativeSearchField: NSViewRepresentable {
     @Binding var text: String
     var placeholder: String
@@ -20,7 +27,7 @@ struct NativeSearchField: NSViewRepresentable {
     var maxWidth: CGFloat?
 
     func makeNSView(context: Context) -> NSSearchField {
-        let field = NSSearchField()
+        let field = IntrinsicHeightSearchField()
         field.placeholderString = placeholder
         field.delegate = context.coordinator
         field.controlSize = controlSize
@@ -43,6 +50,10 @@ struct NativeSearchField: NSViewRepresentable {
     func updateNSView(_ field: NSSearchField, context: Context) {
         if field.stringValue != text {
             field.stringValue = text
+        }
+        if field.controlSize != controlSize {
+            field.controlSize = controlSize
+            field.invalidateIntrinsicContentSize()
         }
         field.placeholderString = placeholder
         context.coordinator.onMoveUp = onMoveUp
@@ -83,13 +94,12 @@ struct NativeSearchField: NSViewRepresentable {
 
         func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
             if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
-                guard let field = control as? NSSearchField else { return false }
-                if !field.stringValue.isEmpty {
-                    field.stringValue = ""
-                    text.wrappedValue = ""
-                    return true
+                guard let field = control as? NSSearchField, !field.stringValue.isEmpty else {
+                    return false
                 }
-                return false
+                field.stringValue = ""
+                text.wrappedValue = ""
+                return true
             }
             if commandSelector == #selector(NSResponder.moveUp(_:)), let onMoveUp {
                 onMoveUp()

@@ -158,13 +158,13 @@ struct ConnectionSidebarHeader: View {
     private func statusColor(for session: ConnectionSession) -> Color {
         switch session.status {
         case .connected:
-            return Color(nsColor: .systemGreen)
+            return .green
         case .connecting:
-            return Color(nsColor: .systemOrange)
+            return .orange
         case .disconnected:
             return .gray
         case .error:
-            return Color(nsColor: .systemRed)
+            return .red
         }
     }
 }

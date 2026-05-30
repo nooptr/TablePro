@@ -36,14 +36,14 @@ struct LicenseSection: View {
             if licenseManager.isExpiringSoon, let days = licenseManager.daysUntilExpiry {
                 HStack {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(Color(nsColor: .systemOrange))
-                    Text("License expires in \(days) day(s)")
+                        .foregroundStyle(.orange)
+                    Text(String(format: String(localized: "License expires in %lld day(s)"), days))
                     Spacer()
                     Link(String(localized: "Renew"), destination: LicenseConstants.pricingURL)
                         .controlSize(.small)
                 }
                 .padding(6)
-                .background(Color(nsColor: .systemOrange).opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+                .background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
             }
 
             LabeledContent("Email:", value: license.email)
@@ -86,7 +86,7 @@ struct LicenseSection: View {
             if let error = activationLoadError {
                 Text(error)
                     .font(.caption)
-                    .foregroundStyle(Color(nsColor: .systemRed))
+                    .foregroundStyle(.red)
             }
 
             if !activations.isEmpty {

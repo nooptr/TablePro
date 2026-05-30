@@ -15,6 +15,7 @@ struct BrowsePluginsView: View {
     @State private var selectedCategory: RegistryCategory?
     @State private var selectedPluginId: String?
     @State private var showErrorAlert = false
+    @State private var errorTitle = String(localized: "Operation Failed")
     @State private var errorMessage = ""
 
     private var selectedRegistryPlugin: RegistryPlugin? {
@@ -30,7 +31,7 @@ struct BrowsePluginsView: View {
             }
             await downloadCountService.fetchCounts(for: registryClient.manifest)
         }
-        .alert(String(localized: "Installation Failed"), isPresented: $showErrorAlert) {
+        .alert(errorTitle, isPresented: $showErrorAlert) {
             Button("OK") {}
         } message: {
             Text(errorMessage)
@@ -121,7 +122,7 @@ struct BrowsePluginsView: View {
                         .lineLimit(1)
                     if plugin.isVerified {
                         Image(systemName: "checkmark.seal.fill")
-                            .foregroundStyle(Color(nsColor: .systemBlue))
+                            .foregroundStyle(.blue)
                             .font(.caption2)
                     }
                 }
@@ -162,9 +163,13 @@ struct BrowsePluginsView: View {
                     case .installing:
                         ProgressView()
                             .controlSize(.mini)
+                    case .stagedPendingActivation:
+                        Image(systemName: "clock.arrow.circlepath")
+                            .foregroundStyle(.orange)
+                            .font(.caption)
                     case .completed:
                         Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(Color(nsColor: .systemGreen))
+                            .foregroundStyle(.green)
                             .font(.caption)
                     case .failed:
                         Button("Retry") { updatePlugin(plugin) }
@@ -189,9 +194,13 @@ struct BrowsePluginsView: View {
             case .installing:
                 ProgressView()
                     .controlSize(.mini)
+            case .stagedPendingActivation:
+                Image(systemName: "clock.arrow.circlepath")
+                    .foregroundStyle(.orange)
+                    .font(.caption)
             case .completed:
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(Color(nsColor: .systemGreen))
+                    .foregroundStyle(.green)
                     .font(.caption)
             case .failed:
                 Button("Retry") { installPlugin(plugin) }
@@ -261,11 +270,31 @@ struct BrowsePluginsView: View {
     }
 
     private func updatePlugin(_ plugin: RegistryPlugin) {
-        performTrackedOperation(pluginId: plugin.id) { progress in
+        Task {
             if plugin.category == .theme {
-                try await ThemeRegistryInstaller.shared.update(plugin, progress: progress)
-            } else {
-                _ = try await pluginManager.updateFromRegistry(plugin, progress: progress)
+                installTracker.beginInstall(pluginId: plugin.id)
+                do {
+                    try await ThemeRegistryInstaller.shared.update(plugin) { fraction in
+                        installTracker.updateProgress(pluginId: plugin.id, fraction: fraction)
+                        if fraction >= 1.0 {
+                            installTracker.markInstalling(pluginId: plugin.id)
+                        }
+                    }
+                    installTracker.completeInstall(pluginId: plugin.id)
+                } catch {
+                    installTracker.failInstall(pluginId: plugin.id, error: error.localizedDescription)
+                    errorTitle = String(localized: "Theme Update Failed")
+                    errorMessage = error.localizedDescription
+                    showErrorAlert = true
+                }
+                return
+            }
+
+            let result = await pluginManager.performRegistryUpdate(plugin)
+            if case .failed(let error) = result {
+                errorTitle = String(localized: "Plugin Update Failed")
+                errorMessage = error.localizedDescription
+                showErrorAlert = true
             }
         }
     }
@@ -286,6 +315,7 @@ struct BrowsePluginsView: View {
                 installTracker.completeInstall(pluginId: pluginId)
             } catch {
                 installTracker.failInstall(pluginId: pluginId, error: error.localizedDescription)
+                errorTitle = String(localized: "Installation Failed")
                 errorMessage = error.localizedDescription
                 showErrorAlert = true
             }

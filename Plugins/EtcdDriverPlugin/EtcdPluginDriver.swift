@@ -10,6 +10,14 @@ import Foundation
 import OSLog
 import TableProPluginKit
 
+private extension Array where Element == String? {
+    var asCells: [PluginCellValue] { map(PluginCellValue.fromOptional) }
+}
+
+private extension Array where Element == String {
+    var asCells: [PluginCellValue] { map(PluginCellValue.text) }
+}
+
 final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     private let config: DriverConnectionConfig
     private var _httpClient: EtcdHttpClient?
@@ -132,7 +140,7 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         return try await dispatch(operation, client: client, startTime: startTime)
     }
 
-    func executeParameterized(query: String, parameters: [String?]) async throws -> PluginQueryResult {
+    func executeParameterized(query: String, parameters: [PluginCellValue]) async throws -> PluginQueryResult {
         try await execute(query: query)
     }
 
@@ -233,7 +241,14 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             let lease = kv.lease ?? "0"
             let leaseDisplay = lease == "0" ? "" : formatLeaseHex(lease)
 
-            rows.append([key, value, version, modRevision, createRevision, leaseDisplay])
+            rows.append([
+                .text(key),
+                PluginCellValue.fromOptional(value),
+                .text(version),
+                .text(modRevision),
+                .text(createRevision),
+                .text(leaseDisplay)
+            ])
         }
 
         if !rows.isEmpty {
@@ -249,7 +264,9 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         httpClient?.cancelCurrentRequest()
     }
 
-    func applyQueryTimeout(_ seconds: Int) async throws {}
+    func applyQueryTimeout(_ seconds: Int) async throws {
+        httpClient?.setQueryTimeout(seconds)
+    }
 
     // MARK: - Schema Operations
 
@@ -429,11 +446,12 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     func generateStatements(
         table: String,
         columns: [String],
+        primaryKeyColumns: [String],
         changes: [PluginRowChange],
-        insertedRowData: [Int: [String?]],
+        insertedRowData: [Int: [PluginCellValue]],
         deletedRowIndices: Set<Int>,
         insertedRowIndices: Set<Int>
-    ) -> [(statement: String, parameters: [String?])]? {
+    ) -> [(statement: String, parameters: [PluginCellValue])]? {
         let generator = EtcdStatementGenerator(
             prefix: resolvedPrefix(for: table),
             columns: columns
@@ -503,7 +521,7 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             return PluginQueryResult(
                 columns: ["Result"],
                 columnTypeNames: ["String"],
-                rows: [["Compaction completed at revision \(revision)"]],
+                rows: [[.text("Compaction completed at revision \(revision)")]],
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -526,7 +544,7 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
 
         case .userList:
             let users = try await client.userList()
-            let rows = users.map { [$0 as String?] }
+            let rows = users.map { ([$0 as String?]).asCells }
             return PluginQueryResult(
                 columns: ["User"],
                 columnTypeNames: ["String"],
@@ -545,7 +563,7 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
 
         case .roleList:
             let roles = try await client.roleList()
-            let rows = roles.map { [$0 as String?] }
+            let rows = roles.map { ([$0 as String?]).asCells }
             return PluginQueryResult(
                 columns: ["Role"],
                 columnTypeNames: ["String"],
@@ -597,13 +615,13 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         let response = try await client.rangeRequest(req)
 
         if keysOnly {
-            let rows: [[String?]] = (response.kvs ?? []).map { kv in
+            let rowsRaw: [[String?]] = (response.kvs ?? []).map { kv in
                 [EtcdHttpClient.base64Decode(kv.key)]
             }
             return PluginQueryResult(
                 columns: ["Key"],
                 columnTypeNames: ["String"],
-                rows: rows,
+                rows: rowsRaw.map { $0.asCells },
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -631,7 +649,7 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         return PluginQueryResult(
             columns: ["Key", "Value", "Revision"],
             columnTypeNames: ["String", "String", "Int64"],
-            rows: [[key, value, revision]],
+            rows: [[key, value, revision].asCells],
             rowsAffected: 1,
             executionTime: Date().timeIntervalSince(startTime)
         )
@@ -655,7 +673,7 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         return PluginQueryResult(
             columns: ["Deleted"],
             columnTypeNames: ["Int64"],
-            rows: [[deleted]],
+            rows: [[deleted].asCells],
             rowsAffected: Int(deleted) ?? 0,
             executionTime: Date().timeIntervalSince(startTime)
         )
@@ -669,7 +687,7 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     ) async throws -> PluginQueryResult {
         let events = try await client.watch(key: key, prefix: prefix, timeout: timeout)
 
-        let rows: [[String?]] = events.map { event in
+        let rowsRaw: [[String?]] = events.map { event in
             let eventType = event.type ?? "UNKNOWN"
             let eventKey = event.kv.map { EtcdHttpClient.base64Decode($0.key) } ?? ""
             let eventValue = event.kv?.value.map { EtcdHttpClient.base64Decode($0) } ?? ""
@@ -681,7 +699,7 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         return PluginQueryResult(
             columns: ["Type", "Key", "Value", "ModRevision", "PrevValue"],
             columnTypeNames: ["String", "String", "String", "Int64", "String"],
-            rows: rows,
+            rows: rowsRaw.map { $0.asCells },
             rowsAffected: 0,
             executionTime: Date().timeIntervalSince(startTime)
         )
@@ -706,7 +724,7 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         return PluginQueryResult(
             columns: ["LeaseID", "LeaseID (hex)", "TTL"],
             columnTypeNames: ["String", "String", "Int64"],
-            rows: [[leaseIdStr, hexId, grantedTtl]],
+            rows: [[leaseIdStr, hexId, grantedTtl].asCells],
             rowsAffected: 0,
             executionTime: Date().timeIntervalSince(startTime)
         )
@@ -743,7 +761,7 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         return PluginQueryResult(
             columns: ["LeaseID (hex)", "TTL", "GrantedTTL", "AttachedKeys"],
             columnTypeNames: ["String", "Int64", "Int64", "String"],
-            rows: [[hexId, ttl, grantedTtl, attachedKeys]],
+            rows: [[hexId, ttl, grantedTtl, attachedKeys].asCells],
             rowsAffected: 0,
             executionTime: Date().timeIntervalSince(startTime)
         )
@@ -753,7 +771,7 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         client: EtcdHttpClient, startTime: Date
     ) async throws -> PluginQueryResult {
         let response = try await client.leaseList()
-        let rows: [[String?]] = (response.leases ?? []).map { lease in
+        let rowsRaw: [[String?]] = (response.leases ?? []).map { lease in
             let idStr = lease.ID
             let hexId: String
             if let idNum = Int64(idStr) {
@@ -767,7 +785,7 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         return PluginQueryResult(
             columns: ["LeaseID", "LeaseID (hex)"],
             columnTypeNames: ["String", "String"],
-            rows: rows,
+            rows: rowsRaw.map { $0.asCells },
             rowsAffected: 0,
             executionTime: Date().timeIntervalSince(startTime)
         )
@@ -790,7 +808,7 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         client: EtcdHttpClient, startTime: Date
     ) async throws -> PluginQueryResult {
         let response = try await client.memberList()
-        let rows: [[String?]] = (response.members ?? []).map { member in
+        let rowsRaw: [[String?]] = (response.members ?? []).map { member in
             let id = member.ID ?? "unknown"
             let hexId: String
             if let idNum = UInt64(id) {
@@ -808,7 +826,7 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         return PluginQueryResult(
             columns: ["ID", "Name", "PeerURLs", "ClientURLs", "IsLearner"],
             columnTypeNames: ["String", "String", "String", "String", "String"],
-            rows: rows,
+            rows: rowsRaw.map { $0.asCells },
             rowsAffected: 0,
             executionTime: Date().timeIntervalSince(startTime)
         )
@@ -829,7 +847,7 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         return PluginQueryResult(
             columns: ["Version", "DbSize", "Leader", "RaftIndex", "RaftTerm", "Errors"],
             columnTypeNames: ["String", "String", "String", "String", "String", "String"],
-            rows: [[version, dbSize, leader, raftIndex, raftTerm, errors.isEmpty ? nil : errors]],
+            rows: [[version, dbSize, leader, raftIndex, raftTerm, errors.isEmpty ? nil : errors].asCells],
             rowsAffected: 0,
             executionTime: Date().timeIntervalSince(startTime)
         )
@@ -865,7 +883,7 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
             return PluginQueryResult(
                 columns: ["Count"],
                 columnTypeNames: ["Int64"],
-                rows: [[String(count)]],
+                rows: [[.text(String(count))]],
                 rowsAffected: 0,
                 executionTime: Date().timeIntervalSince(startTime)
             )
@@ -1008,7 +1026,7 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
     }
 
     private func mapKvsToResult(_ kvs: [EtcdKeyValue], startTime: Date) -> PluginQueryResult {
-        let rows: [[String?]] = kvs.map { kv in
+        let rowsRaw: [[String?]] = kvs.map { kv in
             let key = EtcdHttpClient.base64Decode(kv.key)
             let value = kv.value.map { EtcdHttpClient.base64Decode($0) }
             let version = kv.version ?? "0"
@@ -1022,7 +1040,7 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         return PluginQueryResult(
             columns: Self.columns,
             columnTypeNames: Self.columnTypeNames,
-            rows: rows,
+            rows: rowsRaw.map { $0.asCells },
             rowsAffected: 0,
             executionTime: Date().timeIntervalSince(startTime)
         )
@@ -1042,7 +1060,7 @@ final class EtcdPluginDriver: PluginDatabaseDriver, @unchecked Sendable {
         PluginQueryResult(
             columns: ["Result"],
             columnTypeNames: ["String"],
-            rows: [[message]],
+            rows: [[.text(message)]],
             rowsAffected: 0,
             executionTime: Date().timeIntervalSince(startTime)
         )

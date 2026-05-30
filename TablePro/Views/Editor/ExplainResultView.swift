@@ -102,7 +102,7 @@ struct ExplainResultView: View {
             if showCopyConfirmation {
                 HStack {
                     Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(Color(nsColor: .systemGreen))
+                        .foregroundStyle(.green)
                     Text(String(localized: "Copied!"))
                 }
                 .transition(.opacity)

@@ -40,11 +40,11 @@ struct ImportFromAppPreviewStep: View {
                 .font(.caption)
         } icon: {
             Image(systemName: "key.slash")
-                .foregroundStyle(Color(nsColor: .systemOrange))
+                .foregroundStyle(.orange)
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .systemOrange).opacity(0.12))
+        .background(.orange.opacity(0.12))
     }
 
     // MARK: - Header

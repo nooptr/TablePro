@@ -53,7 +53,6 @@ struct MainContentView: View {
     @State var commandActions: MainContentCommandActions?
     @State var queryResultsSummaryCache: (tabId: UUID, version: Int, summary: String?)?
     @State var inspectorUpdateTask: Task<Void, Never>?
-    @State var lazyLoadTask: Task<Void, Never>?
     /// Stable identifier for this window in WindowLifecycleMonitor
     @State var windowId = UUID()
     @State var hasInitialized = false
@@ -100,7 +99,43 @@ struct MainContentView: View {
             .sheet(item: Bindable(coordinator).activeSheet) { sheet in
                 sheetContent(for: sheet)
             }
+            .confirmationDialog(
+                dropConfirmationTitle,
+                isPresented: dropConfirmationBinding,
+                titleVisibility: .visible,
+                presenting: coordinator.databaseToDrop
+            ) { name in
+                Button(String(localized: "Drop Database"), role: .destructive) {
+                    Task { await dropDatabase(name: name) }
+                }
+                Button(String(localized: "Cancel"), role: .cancel) {
+                    coordinator.databaseToDrop = nil
+                }
+            } message: { _ in
+                Text(String(localized: "All tables and data will be permanently deleted."))
+            }
             .modifier(FocusedCommandActionsModifier(actions: commandActions))
+    }
+
+    private var dropConfirmationBinding: Binding<Bool> {
+        Binding(
+            get: { coordinator.databaseToDrop != nil },
+            set: { newValue in
+                if !newValue { coordinator.databaseToDrop = nil }
+            }
+        )
+    }
+
+    private var dropConfirmationTitle: String {
+        if let name = coordinator.databaseToDrop {
+            return String(format: String(localized: "Drop database “%@”?"), name)
+        }
+        return ""
+    }
+
+    private func dropDatabase(name: String) async {
+        await coordinator.dropDatabase(name: name)
+        coordinator.databaseToDrop = nil
     }
 
     // MARK: - Sheet Content
@@ -131,23 +166,17 @@ struct MainContentView: View {
         )
 
         switch sheet {
-        case .databaseSwitcher:
-            let session = DatabaseManager.shared.session(for: connection.id)
-            let activeDatabase = session?.currentDatabase ?? connection.database
-            let activeSchema = session?.currentSchema
-            let currentSelection =
-                PluginManager.shared.supportsSchemaSwitching(for: connection.type)
-                ? (activeSchema ?? activeDatabase)
-                : activeDatabase
-            DatabaseSwitcherSheet(
-                isPresented: dismissBinding,
-                currentDatabase: currentSelection,
-                currentSchema: activeSchema,
-                databaseType: connection.type,
+        case .createDatabase:
+            let viewModel = DatabaseSwitcherViewModel(
                 connectionId: connection.id,
-                onSelect: switchDatabase,
-                onSelectSchema: { schema in
-                    Task { await coordinator.switchSchema(to: schema) }
+                currentDatabase: nil,
+                databaseType: connection.type
+            )
+            CreateDatabaseSheet(
+                databaseType: connection.type,
+                viewModel: viewModel,
+                onCreated: { newDatabaseName in
+                    Task { await coordinator.switchDatabase(to: newDatabaseName) }
                 }
             )
         case .exportDialog:
@@ -157,7 +186,7 @@ struct MainContentView: View {
                 mode: .tables(
                     connection: exportConnection,
                     preselectedTables: coordinator.exportPreselectedTableNames
-                        ?? Set(sidebarState.selectedTables.map(\.name))
+                        ?? Set(coordinator.windowSidebarState.selectedTables.map(\.name))
                 ),
                 sidebarTables: tables
             )
@@ -198,12 +227,41 @@ struct MainContentView: View {
                 connection: connection,
                 initialFileURL: coordinator.importFileURL
             )
+        case .backupDatabase:
+            BackupDatabaseFlow(
+                isPresented: dismissBinding,
+                connection: connectionWithCurrentDatabase,
+                initialDatabase: DatabaseManager.shared.session(for: connection.id)?.currentDatabase
+                    ?? connection.database
+            )
+        case .restoreDatabase(let fileURL):
+            RestoreDatabaseFlow(
+                isPresented: dismissBinding,
+                connection: connectionWithCurrentDatabase,
+                initialDatabase: DatabaseManager.shared.session(for: connection.id)?.currentDatabase
+                    ?? connection.database,
+                sourceURL: fileURL
+            )
         case .maintenance(let operation, let tableName):
             MaintenanceSheet(
                 operation: operation,
                 tableName: tableName,
                 databaseType: connection.type,
                 onExecute: coordinator.executeMaintenance
+            )
+        case .quickSwitcher:
+            QuickSwitcherSheet(
+                isPresented: dismissBinding,
+                schemaProvider: SchemaProviderRegistry.shared.getOrCreate(for: connection.id),
+                connectionId: connection.id,
+                databaseType: connection.type,
+                onSelect: coordinator.handleQuickSwitcherSelection
+            )
+        case .sqlPreview:
+            SQLReviewSheet(
+                isPresented: dismissBinding,
+                statements: coordinator.toolbarState.previewStatements,
+                databaseType: coordinator.toolbarState.databaseType
             )
         }
     }
@@ -318,9 +376,9 @@ struct MainContentView: View {
                 handleConnectionStatusChange()
             }
 
-            .onChange(of: sidebarState.selectedTables) { oldTables, newTables in
+            .onChange(of: coordinator.windowSidebarState.selectedTables) { oldTables, newTables in
                 guard !coordinator.isTearingDown else {
-                    Self.lifecycleLogger.debug("[switch] sidebarState.selectedTables SKIPPED (tearingDown) windowId=\(windowId, privacy: .public)")
+                    Self.lifecycleLogger.debug("[switch] windowSidebarState.selectedTables SKIPPED (tearingDown) windowId=\(windowId, privacy: .public)")
                     return
                 }
                 handleTableSelectionChange(from: oldTables, to: newTables)
@@ -328,13 +386,13 @@ struct MainContentView: View {
             .onChange(of: tables) { _, newTables in
                 let syncAction = SidebarSyncAction.resolveOnTablesLoad(
                     newTables: newTables,
-                    selectedTables: sidebarState.selectedTables,
+                    selectedTables: coordinator.windowSidebarState.selectedTables,
                     currentTabTableName: tabManager.selectedTab?.tableContext.tableName
                 )
                 if case .select(let tableName) = syncAction,
                     let match = newTables.first(where: { $0.name == tableName })
                 {
-                    sidebarState.selectedTables = [match]
+                    coordinator.windowSidebarState.selectedTables = [match]
                 }
             }
     }
@@ -372,7 +430,7 @@ struct MainContentView: View {
                 {
                     coordinator.inspectorProxy?.showInspector()
                 }
-                scheduleInspectorUpdate(lazyLoadExcludedColumns: true)
+                scheduleInspectorUpdate()
             },
             onFilterColumn: { columnName in
                 coordinator.addFilterForColumn(columnName)
@@ -398,14 +456,14 @@ struct MainContentView: View {
             onLastPage: {
                 coordinator.goToLastPage()
             },
-            onLimitChange: { newLimit in
-                coordinator.updatePageSize(newLimit)
+            onPageSizeChange: { newSize in
+                coordinator.updatePageSize(newSize)
             },
-            onOffsetChange: { newOffset in
-                coordinator.updateOffset(newOffset)
+            onShowAll: {
+                coordinator.showAllRows()
             },
-            onPaginationGo: {
-                coordinator.applyPaginationSettings()
+            onGoToPage: { page in
+                coordinator.goToPage(page)
             }
         )
     }

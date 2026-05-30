@@ -91,6 +91,31 @@ extension TableViewCoordinator {
         copyItem.target = self
         menu.addItem(copyItem)
 
+        if let dataColumnIndex = dataColumnIndex(from: column.identifier) {
+            let copyValuesItem = NSMenuItem(
+                title: String(localized: "Copy Column Values"),
+                action: #selector(copyColumnValues(_:)),
+                keyEquivalent: ""
+            )
+            copyValuesItem.representedObject = dataColumnIndex
+            copyValuesItem.target = self
+            menu.addItem(copyValuesItem)
+        }
+
+        if let dataColumnIndex = dataColumnIndex(from: column.identifier),
+           isEditable,
+           cachedRowCount > 0,
+           !primaryKeyColumns.contains(baseName) {
+            let fillItem = NSMenuItem(
+                title: String(localized: "Fill Column…"),
+                action: #selector(fillColumn(_:)),
+                keyEquivalent: ""
+            )
+            fillItem.representedObject = dataColumnIndex
+            fillItem.target = self
+            menu.addItem(fillItem)
+        }
+
         let filterItem = NSMenuItem(title: String(localized: "Filter with column"), action: #selector(filterWithColumn(_:)), keyEquivalent: "")
         filterItem.representedObject = baseName
         filterItem.target = self
@@ -193,6 +218,11 @@ extension TableViewCoordinator {
     @objc func copyColumnName(_ sender: NSMenuItem) {
         guard let columnName = sender.representedObject as? String else { return }
         ClipboardService.shared.writeText(columnName)
+    }
+
+    @objc func copyColumnValues(_ sender: NSMenuItem) {
+        guard let columnIndex = sender.representedObject as? Int else { return }
+        copyColumnValues(columnIndex: columnIndex)
     }
 
     @objc func filterWithColumn(_ sender: NSMenuItem) {

@@ -30,7 +30,6 @@ final class AppSettingsStorage {
         static let keyboard = "com.TablePro.settings.keyboard"
         static let ai = "com.TablePro.settings.ai"
         static let sync = "com.TablePro.settings.sync"
-        static let terminal = "com.TablePro.settings.terminal"
         static let mcp = "com.TablePro.settings.mcp"
         static let hasCompletedOnboarding = "com.TablePro.settings.hasCompletedOnboarding"
     }
@@ -103,7 +102,7 @@ final class AppSettingsStorage {
     // MARK: - Keyboard Settings
 
     func loadKeyboard() -> KeyboardSettings {
-        load(key: Keys.keyboard, default: .default)
+        load(key: Keys.keyboard, default: KeyboardSettings.default).sanitized()
     }
 
     func saveKeyboard(_ settings: KeyboardSettings) {
@@ -128,16 +127,6 @@ final class AppSettingsStorage {
 
     func saveSync(_ settings: SyncSettings) {
         save(settings, key: Keys.sync)
-    }
-
-    // MARK: - Terminal Settings
-
-    func loadTerminal() -> TerminalSettings {
-        load(key: Keys.terminal, default: .default)
-    }
-
-    func saveTerminal(_ settings: TerminalSettings) {
-        save(settings, key: Keys.terminal)
     }
 
     // MARK: - MCP Settings
@@ -203,7 +192,6 @@ final class AppSettingsStorage {
         saveKeyboard(.default)
         saveAI(.default)
         saveSync(.default)
-        saveTerminal(.default)
         saveMCP(.default)
     }
 

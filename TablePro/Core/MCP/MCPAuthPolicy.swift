@@ -149,30 +149,20 @@ public actor MCPAuthPolicy {
         sql: String,
         connectionId: UUID,
         databaseType: DatabaseType,
-        safeModeLevel: SafeModeLevel
+        capabilities: CallerCapabilities = [.mayWrite, .mayRunDestructive, .mayRunMultiStatement]
     ) async throws {
-        let isWrite = QueryClassifier.isWriteQuery(sql, databaseType: databaseType)
-        let needsDialog = safeModeLevel != .silent
-            && (isWrite || safeModeLevel == .alertFull || safeModeLevel == .safeModeFull)
-
-        let window: NSWindow? = needsDialog
-            ? await MainActor.run {
-                NSApp.activate(ignoringOtherApps: true)
-                return WindowLifecycleMonitor.shared.findWindow(for: connectionId)
-                    ?? NSApp.mainWindow
-            }
-            : nil
-
-        let permission = await SafeModeGuard.checkPermission(
-            level: safeModeLevel,
-            isWriteOperation: isWrite,
-            sql: sql,
-            operationDescription: String(localized: "MCP query execution"),
-            window: window,
-            databaseType: databaseType
+        let decision = await ExecutionGateProvider.shared.authorize(
+            OperationRequest(
+                connectionId: connectionId,
+                databaseType: databaseType,
+                sql: sql,
+                kind: OperationKind.from(QueryClassifier.classifyTier(sql, databaseType: databaseType)),
+                caller: .mcpClient(label: nil),
+                capabilities: capabilities,
+                operationDescription: String(localized: "MCP query execution")
+            )
         )
-
-        if case .blocked(let reason) = permission {
+        if case .denied(let reason) = decision {
             throw MCPDataLayerError.forbidden(reason)
         }
     }
@@ -201,7 +191,7 @@ public actor MCPAuthPolicy {
             errorMessage: errorMessage
         )
 
-        _ = await QueryHistoryStorage.shared.addHistory(entry)
+        _ = await QueryHistoryManager.shared.addHistory(entry)
     }
 
     private func runApprovalDedup(
@@ -298,7 +288,7 @@ public actor MCPAuthPolicy {
                     externalAccess: conn.externalAccess,
                     name: conn.name,
                     databaseType: conn.type.rawValue,
-                    safeModeLevel: conn.safeModeLevel
+                    safeModeLevel: session.safeModeLevel
                 )
             case .stored(let conn):
                 return ConnectionSnapshot(

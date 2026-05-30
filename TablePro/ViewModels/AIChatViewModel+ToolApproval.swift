@@ -31,7 +31,13 @@ extension AIChatViewModel {
             guard let self else { return assembledBlocks }
             let initial = assembledBlocks.map { block -> ToolUseBlock in
                 let state = self.computeInitialApprovalState(for: block.name)
-                return ToolUseBlock(id: block.id, name: block.name, input: block.input, approvalState: state)
+                return ToolUseBlock(
+                    id: block.id,
+                    name: block.name,
+                    input: block.input,
+                    approvalState: state,
+                    providerMetadata: block.providerMetadata
+                )
             }
             self.appendPendingToolUseBlocks(initial, assistantID: assistantID)
             return initial
@@ -60,7 +66,11 @@ extension AIChatViewModel {
                 self?.updateApprovalState(blockID: block.id, newState: finalState, assistantID: assistantID)
             }
             resolved.append(ToolUseBlock(
-                id: block.id, name: block.name, input: block.input, approvalState: finalState
+                id: block.id,
+                name: block.name,
+                input: block.input,
+                approvalState: finalState,
+                providerMetadata: block.providerMetadata
             ))
         }
         return resolved
@@ -68,19 +78,36 @@ extension AIChatViewModel {
 
     @MainActor
     func computeInitialApprovalState(for toolName: String) -> ToolApprovalState {
-        if !ChatToolRegistry.shared.requiresApproval(toolName: toolName) {
+        let tool = ChatToolRegistry.shared.tool(named: toolName)
+        let toolMode = tool?.mode
+
+        if toolMode == .readOnly {
             return .approved
         }
+
+        // Destructive operations (`.agentOnly`) always require user approval.
+        // Safe-mode level and "Always Allow" cannot bypass them — the AI must not
+        // be able to drop tables, truncate, or alter-drop without an explicit click.
+        if toolMode == .agentOnly {
+            if let connection, liveSafeModeLevel(for: connection).blocksAllWrites {
+                return .denied(reason: String(
+                    localized: "Connection is read-only. Destructive operations are not permitted."
+                ))
+            }
+            return .pending
+        }
+
         if let connection, connection.aiAlwaysAllowedTools.contains(toolName) {
             return .approved
         }
         if let connection {
-            if connection.safeModeLevel.blocksAllWrites {
+            let safeModeLevel = liveSafeModeLevel(for: connection)
+            if safeModeLevel.blocksAllWrites {
                 return .denied(reason: String(
                     localized: "Connection is read-only. Set safe mode to Confirm Writes or higher to allow this tool."
                 ))
             }
-            if !connection.safeModeLevel.requiresConfirmation {
+            if !safeModeLevel.requiresConfirmation {
                 return .approved
             }
         }
@@ -88,20 +115,25 @@ extension AIChatViewModel {
     }
 
     @MainActor
+    private func liveSafeModeLevel(for connection: DatabaseConnection) -> SafeModeLevel {
+        DatabaseManager.shared.session(for: connection.id)?.safeModeLevel ?? connection.safeModeLevel
+    }
+
+    @MainActor
     func appendPendingToolUseBlocks(_ blocks: [ToolUseBlock], assistantID: UUID) {
         guard let idx = messages.firstIndex(where: { $0.id == assistantID }) else { return }
         for block in blocks {
-            messages[idx].blocks.append(.toolUse(block))
+            messages[idx].appendBlock(.toolUse(block))
         }
     }
 
     @MainActor
     func updateApprovalState(blockID: String, newState: ToolApprovalState, assistantID: UUID) {
         guard let idx = messages.firstIndex(where: { $0.id == assistantID }) else { return }
-        for blockIdx in messages[idx].blocks.indices {
-            if case .toolUse(var block) = messages[idx].blocks[blockIdx], block.id == blockID {
+        for chatBlock in messages[idx].blocks {
+            if case .toolUse(var block) = chatBlock.kind, block.id == blockID {
                 block.approvalState = newState
-                messages[idx].blocks[blockIdx] = .toolUse(block)
+                chatBlock.setKind(.toolUse(block))
                 return
             }
         }
@@ -109,6 +141,11 @@ extension AIChatViewModel {
 
     @MainActor
     func persistAlwaysAllowed(toolName: String) {
+        // Refuse to persist Always Allow for destructive operations.
+        // Each DROP/TRUNCATE/ALTER...DROP must be confirmed individually.
+        if ChatToolRegistry.shared.tool(named: toolName)?.mode == .agentOnly {
+            return
+        }
         guard var current = connection else { return }
         guard !current.aiAlwaysAllowedTools.contains(toolName) else { return }
         current.aiAlwaysAllowedTools.insert(toolName)
@@ -142,7 +179,11 @@ extension AIChatViewModel {
     ) async {
         let initialState = computeInitialApprovalState(for: block.name)
         let pendingBlock = ToolUseBlock(
-            id: block.id, name: block.name, input: block.input, approvalState: initialState
+            id: block.id,
+            name: block.name,
+            input: block.input,
+            approvalState: initialState,
+            providerMetadata: block.providerMetadata
         )
         appendPendingToolUseBlocks([pendingBlock], assistantID: assistantID)
 

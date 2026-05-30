@@ -8,6 +8,7 @@
 import AppKit
 import Foundation
 import SwiftUI
+import TableProPluginKit
 
 // MARK: - SSH Configuration
 
@@ -27,6 +28,7 @@ extension DatabaseType {
     static let postgresql = DatabaseType(rawValue: "PostgreSQL")
     static let sqlite = DatabaseType(rawValue: "SQLite")
     static let redshift = DatabaseType(rawValue: "Redshift")
+    static let cockroachdb = DatabaseType(rawValue: "CockroachDB")
 
     // Registry-distributed types (known plugins, downloadable separately)
     static let mongodb = DatabaseType(rawValue: "MongoDB")
@@ -100,7 +102,55 @@ extension DatabaseType {
     }
 
     var defaultPort: Int {
-        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.defaultPort ?? 0
+        PluginMetadataRegistry.shared.snapshot(forTypeId: rawValue)?.defaultPort ?? 0
+    }
+
+    var defaultSSLMode: SSLMode {
+        PluginMetadataRegistry.shared.snapshot(forTypeId: rawValue)?.capabilities.defaultSSLMode ?? .disabled
+    }
+
+    var supportsOpportunisticTLS: Bool {
+        PluginMetadataRegistry.shared.snapshot(forTypeId: rawValue)?.capabilities.supportsOpportunisticTLS ?? true
+    }
+
+    var supportsClientKeyPassphrase: Bool {
+        PluginMetadataRegistry.shared.snapshot(forTypeId: rawValue)?.capabilities.supportsClientKeyPassphrase ?? false
+    }
+
+    var sslPaneTooltip: String {
+        switch rawValue {
+        case "PostgreSQL", "Redshift", "CockroachDB":
+            return String(localized: """
+                Preferred tries TLS first, falls back to plain. Matches psql and DataGrip defaults. \
+                Required by AWS RDS, Cloud SQL, Heroku, Supabase, Neon.
+                """)
+        case "MySQL", "MariaDB":
+            return String(localized: """
+                Preferred performs a 2-pass connect: tries TLS first, falls back to plain only on \
+                SSL handshake errors. Required by Cloud SQL and Azure MySQL.
+                """)
+        case "SQL Server":
+            return String(localized: "Preferred requests TLS; the server decides. Required by SQL Server 2022 and Azure SQL Database.")
+        case "MongoDB":
+            return String(localized: "MongoDB driver has no TLS fallback. Preferred and Required both force TLS. Use Required for MongoDB Atlas and other hosted instances.")
+        case "Redis":
+            return String(localized: """
+                Redis driver has no TLS fallback. Preferred and Required both force TLS. \
+                Use Required for Redis Cloud, Upstash, and AWS ElastiCache encrypted endpoints.
+                """)
+        case "Oracle":
+            return String(localized: "OracleNIO has no TLS fallback. Preferred connects in plain TCP. Use Required for TCPS to Oracle Autonomous Database.")
+        case "Cassandra", "ScyllaDB":
+            return String(localized: "Use Required for AstraDB, DataStax Astra, and other hosted Cassandra deployments.")
+        case "ClickHouse":
+            return String(localized: "Use Required for ClickHouse Cloud and other managed instances.")
+        default:
+            return ""
+        }
+    }
+
+    var explainVariants: [ExplainVariant] {
+        PluginMetadataRegistry.shared.snapshot(forTypeId: rawValue)?.explainVariants ?? []
     }
 
     var category: DatabaseCategory {
@@ -118,6 +168,7 @@ extension DatabaseType {
         case "MariaDB": Color(hex: "C0765A")
         case "PostgreSQL": Color(hex: "336791")
         case "Redshift": Color(hex: "527FFF")
+        case "CockroachDB": Color(hex: "6933FF")
         case "SQLite": Color(hex: "0F80CC")
         case "SQL Server": Color(hex: "CC2927")
         case "Oracle": Color(hex: "C74634")
@@ -145,35 +196,35 @@ extension DatabaseType {
     }
 
     var supportsSchemaEditing: Bool {
-        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.supportsSchemaEditing ?? true
+        PluginMetadataRegistry.shared.snapshot(forTypeId: rawValue)?.supportsSchemaEditing ?? true
     }
 
     var supportsAddColumn: Bool {
-        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.capabilities.supportsAddColumn ?? true
+        PluginMetadataRegistry.shared.snapshot(forTypeId: rawValue)?.capabilities.supportsAddColumn ?? true
     }
 
     var supportsModifyColumn: Bool {
-        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.capabilities.supportsModifyColumn ?? true
+        PluginMetadataRegistry.shared.snapshot(forTypeId: rawValue)?.capabilities.supportsModifyColumn ?? true
     }
 
     var supportsDropColumn: Bool {
-        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.capabilities.supportsDropColumn ?? true
+        PluginMetadataRegistry.shared.snapshot(forTypeId: rawValue)?.capabilities.supportsDropColumn ?? true
     }
 
     var supportsRenameColumn: Bool {
-        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.capabilities.supportsRenameColumn ?? false
+        PluginMetadataRegistry.shared.snapshot(forTypeId: rawValue)?.capabilities.supportsRenameColumn ?? false
     }
 
     var supportsAddIndex: Bool {
-        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.capabilities.supportsAddIndex ?? true
+        PluginMetadataRegistry.shared.snapshot(forTypeId: rawValue)?.capabilities.supportsAddIndex ?? true
     }
 
     var supportsDropIndex: Bool {
-        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.capabilities.supportsDropIndex ?? true
+        PluginMetadataRegistry.shared.snapshot(forTypeId: rawValue)?.capabilities.supportsDropIndex ?? true
     }
 
     var supportsModifyPrimaryKey: Bool {
-        PluginMetadataRegistry.shared.snapshot(forTypeId: pluginTypeId)?.capabilities.supportsModifyPrimaryKey ?? true
+        PluginMetadataRegistry.shared.snapshot(forTypeId: rawValue)?.capabilities.supportsModifyPrimaryKey ?? true
     }
 }
 
@@ -241,14 +292,14 @@ enum ConnectionColor: String, CaseIterable, Identifiable, Codable {
     var color: Color {
         switch self {
         case .none: return .clear
-        case .red: return Color(nsColor: .systemRed)
-        case .orange: return Color(nsColor: .systemOrange)
-        case .yellow: return Color(nsColor: .systemYellow)
-        case .green: return Color(nsColor: .systemGreen)
-        case .blue: return Color(nsColor: .systemBlue)
-        case .purple: return Color(nsColor: .systemPurple)
-        case .pink: return Color(nsColor: .systemPink)
-        case .gray: return Color(nsColor: .systemGray)
+        case .red: return .red
+        case .orange: return .orange
+        case .yellow: return .yellow
+        case .green: return .green
+        case .blue: return .blue
+        case .purple: return .purple
+        case .pink: return .pink
+        case .gray: return .gray
         }
     }
 
@@ -274,6 +325,7 @@ struct DatabaseConnection: Identifiable, Hashable {
     var groupId: UUID?
     var sshProfileId: UUID?
     var sshTunnelMode: SSHTunnelMode
+    var cloudflareTunnelMode: CloudflareTunnelMode = .disabled
     var safeModeLevel: SafeModeLevel
     var aiPolicy: AIConnectionPolicy?
     var aiRules: String?
@@ -285,6 +337,8 @@ struct DatabaseConnection: Identifiable, Hashable {
     var sortOrder: Int
     var localOnly: Bool = false
     var isSample: Bool = false
+    var isFavorite: Bool = false
+    var passwordSource: PasswordSource?
 
     var mongoAuthSource: String? {
         get { additionalFields["mongoAuthSource"]?.nilIfEmpty }
@@ -336,6 +390,11 @@ struct DatabaseConnection: Identifiable, Hashable {
         set { additionalFields["promptForPassword"] = newValue ? "true" : "" }
     }
 
+    var usesAWSIAM: Bool {
+        let value = additionalFields["awsAuth"] ?? "off"
+        return value != "off" && !value.isEmpty
+    }
+
     var preConnectScript: String? {
         get { additionalFields["preConnectScript"]?.nilIfEmpty }
         set { additionalFields["preConnectScript"] = newValue ?? "" }
@@ -356,6 +415,7 @@ struct DatabaseConnection: Identifiable, Hashable {
         groupId: UUID? = nil,
         sshProfileId: UUID? = nil,
         sshTunnelMode: SSHTunnelMode = .disabled,
+        cloudflareTunnelMode: CloudflareTunnelMode = .disabled,
         safeModeLevel: SafeModeLevel = .silent,
         aiPolicy: AIConnectionPolicy? = nil,
         aiRules: String? = nil,
@@ -374,6 +434,8 @@ struct DatabaseConnection: Identifiable, Hashable {
         sortOrder: Int = 0,
         localOnly: Bool = false,
         isSample: Bool = false,
+        isFavorite: Bool = false,
+        passwordSource: PasswordSource? = nil,
         additionalFields: [String: String]? = nil
     ) {
         self.id = id
@@ -405,6 +467,7 @@ struct DatabaseConnection: Identifiable, Hashable {
         } else {
             self.sshTunnelMode = sshTunnelMode
         }
+        self.cloudflareTunnelMode = cloudflareTunnelMode
         self.aiPolicy = aiPolicy
         self.aiRules = aiRules
         self.aiAlwaysAllowedTools = aiAlwaysAllowedTools
@@ -414,6 +477,8 @@ struct DatabaseConnection: Identifiable, Hashable {
         self.sortOrder = sortOrder
         self.localOnly = localOnly
         self.isSample = isSample
+        self.isFavorite = isFavorite
+        self.passwordSource = passwordSource
         if let additionalFields {
             self.additionalFields = additionalFields
         } else {
@@ -460,8 +525,9 @@ extension DatabaseConnection: Codable {
     private enum CodingKeys: String, CodingKey {
         case id, name, host, port, database, username, type
         case sshConfig, sslConfig, color, tagId, groupId, sshProfileId
-        case sshTunnelMode, safeModeLevel, aiPolicy, aiRules, aiAlwaysAllowedTools, externalAccess, additionalFields
-        case redisDatabase, startupCommands, sortOrder, localOnly, isSample
+        case sshTunnelMode, cloudflareTunnelMode, safeModeLevel, aiPolicy, aiRules, aiAlwaysAllowedTools, externalAccess, additionalFields
+        case redisDatabase, startupCommands, sortOrder, localOnly, isSample, isFavorite
+        case passwordSource
     }
 
     init(from decoder: Decoder) throws {
@@ -490,6 +556,9 @@ extension DatabaseConnection: Codable {
         sortOrder = try container.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
         localOnly = try container.decodeIfPresent(Bool.self, forKey: .localOnly) ?? false
         isSample = try container.decodeIfPresent(Bool.self, forKey: .isSample) ?? false
+        isFavorite = try container.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
+        passwordSource = PasswordSource.resilientlyDecoded(from: container, forKey: .passwordSource)
+        cloudflareTunnelMode = try container.decodeIfPresent(CloudflareTunnelMode.self, forKey: .cloudflareTunnelMode) ?? .disabled
 
         // Migrate from legacy fields if sshTunnelMode is not present
         if let tunnelMode = try container.decodeIfPresent(SSHTunnelMode.self, forKey: .sshTunnelMode) {
@@ -523,6 +592,9 @@ extension DatabaseConnection: Codable {
         try container.encodeIfPresent(groupId, forKey: .groupId)
         try container.encodeIfPresent(sshProfileId, forKey: .sshProfileId)
         try container.encode(sshTunnelMode, forKey: .sshTunnelMode)
+        if case .inline = cloudflareTunnelMode {
+            try container.encode(cloudflareTunnelMode, forKey: .cloudflareTunnelMode)
+        }
         try container.encode(safeModeLevel, forKey: .safeModeLevel)
         try container.encodeIfPresent(aiPolicy, forKey: .aiPolicy)
         try container.encodeIfPresent(aiRules, forKey: .aiRules)
@@ -536,6 +608,8 @@ extension DatabaseConnection: Codable {
         try container.encode(sortOrder, forKey: .sortOrder)
         try container.encode(localOnly, forKey: .localOnly)
         try container.encode(isSample, forKey: .isSample)
+        try container.encode(isFavorite, forKey: .isFavorite)
+        try container.encodeIfPresent(passwordSource, forKey: .passwordSource)
     }
 }
 

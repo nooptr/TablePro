@@ -40,8 +40,7 @@ extension DatabaseManager {
         do {
             effectiveConnection = try await buildEffectiveConnection(for: resolvedConnection)
         } catch {
-            removeSessionEntry(for: connection.id)
-            currentSessionId = nil
+            finalizeConnectionFailure(for: connection.id, cancelled: Task.isCancelled)
             throw error
         }
 
@@ -51,8 +50,7 @@ extension DatabaseManager {
             do {
                 try await PreConnectHookRunner.run(script: script)
             } catch {
-                removeSessionEntry(for: connection.id)
-                currentSessionId = nil
+                finalizeConnectionFailure(for: connection.id, cancelled: Task.isCancelled)
                 throw error
             }
         }
@@ -68,8 +66,7 @@ extension DatabaseManager {
                     isAPIToken: isApiOnly,
                     window: NSApp.keyWindow
                 ) else {
-                    removeSessionEntry(for: connection.id)
-                    currentSessionId = nil
+                    finalizeConnectionFailure(for: connection.id, cancelled: Task.isCancelled)
                     throw CancellationError()
                 }
                 passwordOverride = prompted
@@ -84,7 +81,7 @@ extension DatabaseManager {
                 awaitPlugins: true
             )
         } catch {
-            if connection.resolvedSSHConfig.enabled {
+            if !Task.isCancelled, connection.resolvedSSHConfig.enabled {
                 Task {
                     do {
                         try await SSHTunnelManager.shared.closeTunnel(connectionId: connection.id)
@@ -93,25 +90,30 @@ extension DatabaseManager {
                     }
                 }
             }
-            removeSessionEntry(for: connection.id)
-            currentSessionId = nil
+            if !Task.isCancelled, connection.isCloudflareEnabled {
+                Task {
+                    do {
+                        try await CloudflareTunnelManager.shared.closeTunnel(connectionId: connection.id)
+                    } catch {
+                        Self.logger.warning("Cloudflare tunnel cleanup failed for \(connection.name): \(error.localizedDescription)")
+                    }
+                }
+            }
+            finalizeConnectionFailure(for: connection.id, cancelled: Task.isCancelled)
             throw error
         }
 
         do {
             try await driver.connect()
+            try Task.checkCancellation()
 
             let timeoutSeconds = AppSettingsManager.shared.general.queryTimeoutSeconds
-            if timeoutSeconds > 0 {
-                do {
-                    try await driver.applyQueryTimeout(timeoutSeconds)
-                } catch {
-                    // Best-effort: some PostgreSQL-compatible databases like Aurora DSQL
-                    // don't support SET statement_timeout.
-                    Self.logger.warning(
-                        "Query timeout not supported for \(connection.name): \(error.localizedDescription)"
-                    )
-                }
+            do {
+                try await driver.applyQueryTimeout(timeoutSeconds)
+            } catch {
+                Self.logger.warning(
+                    "Query timeout not supported for \(connection.name): \(error.localizedDescription)"
+                )
             }
 
             await executeStartupCommands(
@@ -126,12 +128,14 @@ extension DatabaseManager {
                 for: connection, resolvedConnection: resolvedConnection, driver: driver
             )
 
+            try Task.checkCancellation()
+
             // Batch all session mutations into a single write to fire objectWillChange once.
             if var session = activeSessions[connection.id] {
                 session.driver = driver
                 session.status = driver.status
                 session.effectiveConnection = effectiveConnection
-                if let passwordOverride {
+                if let passwordOverride, !connection.usesAWSIAM {
                     session.cachedPassword = passwordOverride
                 }
                 setSession(session, for: connection.id)
@@ -148,7 +152,10 @@ extension DatabaseManager {
                 await startHealthMonitor(for: connection.id)
             }
         } catch {
-            if connection.resolvedSSHConfig.enabled {
+            let cancelled = Task.isCancelled
+            if cancelled {
+                driver.disconnect()
+            } else if connection.resolvedSSHConfig.enabled {
                 Task {
                     do {
                         try await SSHTunnelManager.shared.closeTunnel(connectionId: connection.id)
@@ -156,20 +163,26 @@ extension DatabaseManager {
                         Self.logger.warning("SSH tunnel cleanup failed for \(connection.name): \(error.localizedDescription)")
                     }
                 }
-            }
-
-            // Remove failed session completely so UI returns to Welcome window.
-            removeSessionEntry(for: connection.id)
-
-            if currentSessionId == connection.id {
-                if let nextSessionId = activeSessions.keys.first {
-                    currentSessionId = nextSessionId
-                } else {
-                    currentSessionId = nil
+            } else if connection.isCloudflareEnabled {
+                Task {
+                    do {
+                        try await CloudflareTunnelManager.shared.closeTunnel(connectionId: connection.id)
+                    } catch {
+                        Self.logger.warning("Cloudflare tunnel cleanup failed for \(connection.name): \(error.localizedDescription)")
+                    }
                 }
             }
 
+            finalizeConnectionFailure(for: connection.id, cancelled: cancelled)
             throw error
+        }
+    }
+
+    internal func finalizeConnectionFailure(for connectionId: UUID, cancelled: Bool) {
+        guard !cancelled else { return }
+        removeSessionEntry(for: connectionId)
+        if currentSessionId == connectionId {
+            currentSessionId = activeSessions.keys.first
         }
     }
 
@@ -247,18 +260,11 @@ extension DatabaseManager {
                 session.connection.database = database
                 session.currentDatabase = database
                 session.currentSchema = nil
+                session.status = .connecting
             }
             appSettingsStorage.saveLastSchema(nil, for: connectionId)
             await SchemaService.shared.invalidate(connectionId: connectionId)
             await reconnectSession(connectionId)
-        } else if pm?.capabilities.supportsSchemaSwitching == true,
-                  let schemaDriver = driver as? SchemaSwitchable {
-            try await schemaDriver.switchSchema(to: database)
-            updateSession(connectionId) { session in
-                session.currentSchema = database
-            }
-            appSettingsStorage.saveLastSchema(database, for: connectionId)
-            return
         } else if let adapter = driver as? PluginDriverAdapter {
             try await adapter.switchDatabase(to: database)
             let grouping = pm?.schema.databaseGroupingStrategy ?? .byDatabase
@@ -284,6 +290,7 @@ extension DatabaseManager {
             session.currentSchema = schema
         }
         appSettingsStorage.saveLastSchema(schema, for: connectionId)
+        AppEvents.shared.currentSchemaChanged.send(connectionId)
     }
 
     func switchToSession(_ sessionId: UUID) {
@@ -319,6 +326,14 @@ extension DatabaseManager {
             )
         }
 
+        if session.connection.isCloudflareEnabled {
+            do {
+                try await CloudflareTunnelManager.shared.closeTunnel(connectionId: session.connection.id)
+            } catch {
+                Self.logger.warning("Cloudflare tunnel cleanup failed for \(session.connection.name): \(error.localizedDescription)")
+            }
+        }
+
         let hmStart = Date()
         await stopHealthMonitor(for: sessionId)
         lifecycleLogger.info(
@@ -333,10 +348,12 @@ extension DatabaseManager {
         removeSessionEntry(for: sessionId)
 
         await SchemaService.shared.invalidate(connectionId: sessionId)
+        await DatabaseTreeMetadataService.shared.handleDisconnect(connectionId: sessionId)
 
         SchemaProviderRegistry.shared.clear(for: sessionId)
 
         SharedSidebarState.removeConnection(sessionId)
+        SidebarViewModel.removeConnection(sessionId)
 
         if currentSessionId == sessionId {
             if let nextSessionId = activeSessions.keys.first {
@@ -371,6 +388,12 @@ extension DatabaseManager {
         let driverAfter = session.driver as AnyObject?
         guard !session.isContentViewEquivalent(to: before) || driverBefore !== driverAfter else { return }
         setSession(session, for: sessionId)
+    }
+
+    func setSafeModeLevel(_ level: SafeModeLevel, for connectionId: UUID) {
+        guard var session = activeSessions[connectionId], session.safeModeLevel != level else { return }
+        session.safeModeLevel = level
+        setSession(session, for: connectionId)
     }
 
     internal func setSession(_ session: ConnectionSession, for connectionId: UUID) {

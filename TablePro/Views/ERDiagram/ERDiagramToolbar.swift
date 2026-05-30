@@ -17,7 +17,7 @@ struct ERDiagramToolbar: View {
             Button {
                 viewModel.zoom(to: 1.0)
             } label: {
-                Text("\(Int(viewModel.magnification * 100))%")
+                Text(verbatim: "\(Int(viewModel.magnification * 100))%")
                     .font(.system(.caption, design: .monospaced))
                     .frame(width: 40)
                     .foregroundStyle(.secondary)

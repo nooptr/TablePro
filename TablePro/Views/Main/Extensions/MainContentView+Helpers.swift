@@ -7,6 +7,7 @@
 //
 
 import SwiftUI
+import TableProPluginKit
 
 extension MainContentView {
     // MARK: - Helper Methods
@@ -52,7 +53,7 @@ extension MainContentView {
         if mappedState != toolbarState.connectionState {
             toolbarState.connectionState = mappedState
         }
-        toolbarState.syncDatabaseName(for: connection)
+        toolbarState.syncFromSession(for: connection)
     }
 
     private func mapSessionStatus(_ status: ConnectionStatus) -> ToolbarConnectionState {
@@ -66,16 +67,13 @@ extension MainContentView {
 
     // MARK: - Inspector Context
 
-    func scheduleInspectorUpdate(lazyLoadExcludedColumns: Bool = false) {
+    func scheduleInspectorUpdate() {
         inspectorUpdateTask?.cancel()
         inspectorUpdateTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(50))
             guard !Task.isCancelled else { return }
             updateSidebarEditState()
             updateInspectorContext()
-            if lazyLoadExcludedColumns {
-                lazyLoadExcludedColumnsIfNeeded()
-            }
         }
     }
 
@@ -117,8 +115,17 @@ extension MainContentView {
         lines.append(columns.joined(separator: " | "))
 
         for row in displayRows {
-            let values = columns.indices.map { i in
-                let raw = i < row.values.count ? (row.values[i] ?? "NULL") : "NULL"
+            let values = columns.indices.map { i -> String in
+                guard i < row.values.count else { return "NULL" }
+                let raw: String
+                switch row.values[i] {
+                case .null:
+                    raw = "NULL"
+                case .text(let s):
+                    raw = s
+                case .bytes(let data):
+                    raw = BlobFormattingService.shared.format(data, for: .copy) ?? ""
+                }
                 return (raw as NSString).length > 200 ? String(raw.prefix(200)) + "..." : raw
             }
             lines.append(values.joined(separator: " | "))

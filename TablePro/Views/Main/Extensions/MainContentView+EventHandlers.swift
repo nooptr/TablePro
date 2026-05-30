@@ -8,6 +8,7 @@
 
 import os
 import SwiftUI
+import TableProPluginKit
 
 extension MainContentView {
     // MARK: - Event Handlers
@@ -98,37 +99,29 @@ extension MainContentView {
     ) {
         let action = TableSelectionAction.resolve(oldTables: oldTables, newTables: newTables)
 
-        guard case .navigate(let tableName, let isView) = action else {
+        guard case .navigate(let table) = action else {
             return
         }
 
-        // Only navigate when this is the focused window.
-        // Prevents feedback loops when shared sidebar state syncs across native tabs.
         guard coordinator.isKeyWindow else {
             return
         }
 
-        let isPreviewMode = AppSettingsManager.shared.tabs.enablePreviewTabs
-        let hasPreview = WindowLifecycleMonitor.shared.previewWindow(for: connection.id) != nil
-
         let result = SidebarNavigationResult.resolve(
-            clickedTableName: tableName,
+            clickedTableName: table.name,
             currentTabTableName: tabManager.selectedTab?.tableContext.tableName,
             hasExistingTabs: !tabManager.tabs.isEmpty,
-            isPreviewTabMode: isPreviewMode,
-            hasPreviewTab: hasPreview
+            isActiveTabReusable: coordinator.isActiveTabReusable
         )
 
         switch result {
         case .skip:
             return
-        case .openInPlace:
+        case .reuseActiveTab:
             coordinator.selectionState.indices = []
-            coordinator.openTableTab(tableName, isView: isView)
-        case .revertAndOpenNewWindow:
-            coordinator.openTableTab(tableName, isView: isView)
-        case .replacePreviewTab, .openNewPreviewTab:
-            coordinator.openTableTab(tableName, isView: isView)
+            coordinator.openTableTab(table)
+        case .openNewTab:
+            coordinator.openTableTab(table)
         }
     }
 
@@ -136,8 +129,7 @@ extension MainContentView {
     /// Only writes when the value actually changes, preventing spurious onChange triggers.
     /// Navigation safety is guaranteed by `SidebarNavigationResult.resolve` returning `.skip`
     /// when the selected table matches the current tab.
-    /// Reads from DatabaseManager (authoritative source) instead of the `tables` binding,
-    /// and skips background windows to avoid overwriting shared sidebar state.
+    /// Reads from DatabaseManager (authoritative source) instead of the `tables` binding.
     func syncSidebarToCurrentTab() {
         guard coordinator.isKeyWindow else { return }
         let liveTables = DatabaseManager.shared.session(for: connection.id)?.tables ?? []
@@ -149,9 +141,9 @@ extension MainContentView {
         } else {
             target = []
         }
-        if sidebarState.selectedTables != target {
+        if coordinator.windowSidebarState.selectedTables != target {
             if target.isEmpty && liveTables.isEmpty { return }
-            sidebarState.selectedTables = target
+            coordinator.windowSidebarState.selectedTables = target
         }
     }
 
@@ -168,7 +160,7 @@ extension MainContentView {
         }
         let tableRows = coordinator.tabSessionRegistry.tableRows(for: tab.id)
 
-        var allRows: [[String?]] = []
+        var allRows: [[PluginCellValue]] = []
         for index in selectedIndices.sorted() {
             if index < tableRows.rows.count {
                 allRows.append(Array(tableRows.rows[index].values))
@@ -196,23 +188,24 @@ extension MainContentView {
             modifiedColumns.formUnion(changeManager.getModifiedColumnsForRow(rowIndex))
         }
 
-        let excludedNames: Set<String>
-        if let tableName = tab.tableContext.tableName {
-            excludedNames = Set(coordinator.columnExclusions(for: tableName).map(\.columnName))
-        } else {
-            excludedNames = []
-        }
-
         let pkColumns = Set(tab.tableContext.primaryKeyColumns)
         let fkColumns = Set(tableRows.columnForeignKeys.keys)
 
+        let stringRows: [[String?]] = allRows.map { row in
+            row.map { cell -> String? in
+                switch cell {
+                case .null: return nil
+                case .text(let s): return s
+                case .bytes(let data): return String(data: data, encoding: .isoLatin1) ?? ""
+                }
+            }
+        }
         rightPanelState.editState.configure(
             selectedRowIndices: selectedIndices,
-            allRows: allRows,
+            allRows: stringRows,
             columns: tableRows.columns,
             columnTypes: columnTypes,
             externallyModifiedColumns: modifiedColumns,
-            excludedColumnNames: excludedNames,
             primaryKeyColumns: pkColumns,
             foreignKeyColumns: fkColumns
         )
@@ -234,13 +227,13 @@ extension MainContentView {
                 guard rowIndex < tableRows.rows.count else { continue }
                 let originalRow = Array(tableRows.rows[rowIndex].values)
 
-                let oldValue: String?
-                if columnIndex < capturedEditState.fields.count,
-                    !capturedEditState.fields[columnIndex].isTruncated
-                {
-                    oldValue = capturedEditState.fields[columnIndex].originalValue
+                let oldValue: PluginCellValue
+                if columnIndex < capturedEditState.fields.count {
+                    oldValue = PluginCellValue.fromOptional(capturedEditState.fields[columnIndex].originalValue)
+                } else if columnIndex < originalRow.count {
+                    oldValue = originalRow[columnIndex]
                 } else {
-                    oldValue = columnIndex < originalRow.count ? originalRow[columnIndex] : nil
+                    oldValue = .null
                 }
 
                 capturedCoordinator.changeManager.recordCellChange(
@@ -251,66 +244,6 @@ extension MainContentView {
                     newValue: newValue,
                     originalRow: originalRow
                 )
-            }
-        }
-    }
-
-    func lazyLoadExcludedColumnsIfNeeded() {
-        guard let tab = coordinator.tabManager.selectedTab else { return }
-        let selectedIndices = coordinator.selectionState.indices
-
-        let excludedNames: Set<String>
-        if let tableName = tab.tableContext.tableName {
-            excludedNames = Set(coordinator.columnExclusions(for: tableName).map(\.columnName))
-        } else {
-            excludedNames = []
-        }
-
-        let capturedCoordinator = coordinator
-        let capturedEditState = rightPanelState.editState
-
-        let tableRows = coordinator.tabSessionRegistry.tableRows(for: tab.id)
-        if !excludedNames.isEmpty,
-            selectedIndices.count == 1,
-            let tableName = tab.tableContext.tableName,
-            let pkColumn = tab.tableContext.primaryKeyColumn,
-            let rowIndex = selectedIndices.first,
-            rowIndex < tableRows.rows.count
-        {
-            let row = tableRows.rows[rowIndex].values
-            if let pkColIndex = tableRows.columns.firstIndex(of: pkColumn),
-                pkColIndex < row.count,
-                let pkValue = row[pkColIndex]
-            {
-                let excludedList = Array(excludedNames)
-
-                lazyLoadTask?.cancel()
-                lazyLoadTask = Task { @MainActor in
-                    let expectedRowIndex = rowIndex
-                    do {
-                        let fullValues =
-                            try await capturedCoordinator.fetchFullValuesForExcludedColumns(
-                                tableName: tableName,
-                                primaryKeyColumn: pkColumn,
-                                primaryKeyValue: pkValue,
-                                excludedColumnNames: excludedList
-                            )
-                        guard !Task.isCancelled,
-                            capturedEditState.selectedRowIndices.count == 1,
-                            capturedEditState.selectedRowIndices.first == expectedRowIndex
-                        else { return }
-                        capturedEditState.applyFullValues(fullValues)
-                    } catch {
-                        guard !Task.isCancelled,
-                            capturedEditState.selectedRowIndices.count == 1,
-                            capturedEditState.selectedRowIndices.first == expectedRowIndex
-                        else { return }
-                        for i in 0..<capturedEditState.fields.count
-                        where capturedEditState.fields[i].isLoadingFullValue {
-                            capturedEditState.fields[i].isLoadingFullValue = false
-                        }
-                    }
-                }
             }
         }
     }

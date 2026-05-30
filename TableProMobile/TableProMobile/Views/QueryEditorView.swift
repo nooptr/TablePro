@@ -1,3 +1,4 @@
+import ActivityKit
 import os
 import SwiftUI
 import TableProDatabase
@@ -70,6 +71,12 @@ struct QueryEditorView: View {
                 query = newQuery
                 coordinator.pendingQuery = nil
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+            Task { await viewModel.handlePressure(.warning) }
+        }
+        .onChange(of: MemoryPressureMonitor.shared.currentLevel) { _, level in
+            Task { await viewModel.handlePressure(level) }
         }
         .alert(String(localized: "Write Query Blocked"), isPresented: $showWriteBlockedAlert) {
             Button("OK", role: .cancel) {}
@@ -207,10 +214,20 @@ struct QueryEditorView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if viewModel.legacyRows.isEmpty {
-                    ContentUnavailableView("No Results", systemImage: "tray")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    ContentUnavailableView(
+                        "No Results",
+                        systemImage: "tray",
+                        description: Text("The query returned no rows.")
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    resultList
+                    VStack(spacing: 0) {
+                        if let message = viewModel.truncationMessage {
+                            truncationBanner(message)
+                            Divider()
+                        }
+                        resultList
+                    }
                 }
             } else {
                 ContentUnavailableView {
@@ -221,6 +238,20 @@ struct QueryEditorView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+    }
+
+    private func truncationBanner(_ message: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            Text(verbatim: message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.thinMaterial)
     }
 
     private var resultList: some View {
@@ -371,14 +402,16 @@ struct QueryEditorView: View {
         guard !trimmed.isEmpty else { return }
 
         if isWriteQuery(trimmed) {
-            if safeModeLevel.blocksWrites {
+            switch safeModeLevel.writePermission {
+            case .blocked:
                 showWriteBlockedAlert = true
                 return
-            }
-            if safeModeLevel.requiresConfirmation {
+            case .requiresConfirmation:
                 pendingWriteQuery = trimmed
                 showWriteConfirmation = true
                 return
+            case .proceed:
+                break
             }
         }
 
@@ -390,10 +423,15 @@ struct QueryEditorView: View {
 
         editorFocused = false
         isExecuting = true
-        executionStartTime = Date()
+        let startedAt = Date()
+        executionStartTime = startedAt
+        let activity = startQueryActivity(trimmed: trimmed, startedAt: startedAt)
+        let progressUpdater = startActivityProgressUpdater(activity: activity, startedAt: startedAt)
         defer {
+            progressUpdater.cancel()
             isExecuting = false
             executionStartTime = nil
+            endQueryActivity(activity, startedAt: startedAt)
         }
         appError = nil
 
@@ -412,5 +450,73 @@ struct QueryEditorView: View {
 
         let item = QueryHistoryItem(query: trimmed, connectionId: connectionId)
         coordinator.addHistoryItem(item)
+    }
+
+    // MARK: - Live Activity
+
+    private func startQueryActivity(trimmed: String, startedAt: Date) -> Activity<QueryActivityAttributes>? {
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else { return nil }
+        let preview: String = AppPreferences.hidesQueryPreviewInActivity
+            ? String(localized: "Running query")
+            : String(trimmed.prefix(60))
+        let attributes = QueryActivityAttributes(
+            connectionId: coordinator.connection.id,
+            connectionName: coordinator.displayName,
+            queryPreview: preview
+        )
+        let initialState = QueryActivityAttributes.ContentState(
+            startedAt: startedAt,
+            endedAt: nil,
+            rowsStreamed: 0
+        )
+        // 5-minute stale window: if the app crashes mid-query, iOS marks the
+        // activity stale instead of showing a forever-ticking timer.
+        return try? Activity.request(
+            attributes: attributes,
+            content: .init(state: initialState, staleDate: startedAt.addingTimeInterval(5 * 60))
+        )
+    }
+
+    /// Polls the streaming row count once per second while the query runs and pushes
+    /// `activity.update(state:)` only when the count changes. The system rate-limits
+    /// activity updates anyway, and the lock screen card just needs a fresh number
+    /// when the user wakes the device mid-query - it does not need real-time ticks
+    /// for the count (the elapsed time ticks itself via `Text(timerInterval:)`).
+    private func startActivityProgressUpdater(
+        activity: Activity<QueryActivityAttributes>?,
+        startedAt: Date
+    ) -> Task<Void, Never> {
+        Task { [weak viewModel] in
+            guard let activity else { return }
+            var lastReportedCount = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                if Task.isCancelled { return }
+                let count = viewModel?.legacyRows.count ?? 0
+                guard count != lastReportedCount else { continue }
+                lastReportedCount = count
+                let state = QueryActivityAttributes.ContentState(
+                    startedAt: startedAt,
+                    endedAt: nil,
+                    rowsStreamed: count
+                )
+                await activity.update(.init(
+                    state: state,
+                    staleDate: startedAt.addingTimeInterval(5 * 60)
+                ))
+            }
+        }
+    }
+
+    private func endQueryActivity(_ activity: Activity<QueryActivityAttributes>?, startedAt: Date) {
+        guard let activity else { return }
+        let final = QueryActivityAttributes.ContentState(
+            startedAt: startedAt,
+            endedAt: Date(),
+            rowsStreamed: viewModel.legacyRows.count
+        )
+        Task {
+            await activity.end(.init(state: final, staleDate: nil), dismissalPolicy: .immediate)
+        }
     }
 }

@@ -25,14 +25,7 @@ internal final class CassandraPlugin: NSObject, TableProPlugin, DriverPlugin {
     static let databaseDisplayName = "Cassandra / ScyllaDB"
     static let iconName = "cassandra-icon"
     static let defaultPort = 9042
-    static let additionalConnectionFields: [ConnectionField] = [
-        ConnectionField(
-            id: "sslCaCertPath",
-            label: "CA Certificate",
-            placeholder: "/path/to/ca-cert.pem",
-            section: .advanced
-        ),
-    ]
+    static let additionalConnectionFields: [ConnectionField] = []
     static let additionalDatabaseTypeIds: [String] = ["ScyllaDB"]
 
     // MARK: - UI/Capability Metadata
@@ -143,8 +136,11 @@ private actor CassandraConnectionActor {
         username: String?,
         password: String?,
         keyspace: String?,
-        sslMode: String,
-        sslCaCertPath: String?
+        sslMode: SSLMode,
+        sslCaCertPath: String?,
+        sslClientCertPath: String?,
+        sslClientKeyPath: String?,
+        sslClientKeyPassphrase: String?
     ) throws {
         cluster = cass_cluster_new()
         guard let cluster else {
@@ -158,34 +154,51 @@ private actor CassandraConnectionActor {
             cass_cluster_set_credentials(cluster, username, password)
         }
 
-        // SSL/TLS
-        if sslMode != "Disabled" {
+        if sslMode != .disabled {
             guard let ssl = cass_ssl_new() else {
                 cass_cluster_free(cluster)
                 self.cluster = nil
                 throw CassandraPluginError.connectionFailed("Failed to create SSL context")
             }
 
-            if sslMode == "Verify CA" || sslMode == "Verify Identity" {
-                if sslMode == "Verify Identity" {
-                    let flags = Int32(CASS_SSL_VERIFY_PEER_CERT.rawValue | CASS_SSL_VERIFY_PEER_IDENTITY.rawValue)
-                    cass_ssl_set_verify_flags(ssl, flags)
-                } else {
-                    cass_ssl_set_verify_flags(ssl, Int32(CASS_SSL_VERIFY_PEER_CERT.rawValue))
-                }
+            cass_ssl_set_verify_flags(ssl, CassandraSSLMapping.verifyFlags(for: sslMode))
 
-                if let caCertPath = sslCaCertPath, !caCertPath.isEmpty,
-                   let certData = FileManager.default.contents(atPath: caCertPath),
-                   let certString = String(data: certData, encoding: .utf8) {
-                    let rc = cass_ssl_add_trusted_cert(ssl, certString)
-                    if rc != CASS_OK {
-                        Self.logger.warning("Failed to add CA certificate, proceeding without verification")
-                        cass_ssl_set_verify_flags(ssl, Int32(CASS_SSL_VERIFY_NONE.rawValue))
-                    }
+            if sslMode == .verifyCa || sslMode == .verifyIdentity {
+                guard let caCertPath = sslCaCertPath, !caCertPath.isEmpty else {
+                    cass_ssl_free(ssl)
+                    cass_cluster_free(cluster)
+                    self.cluster = nil
+                    throw SSLHandshakeError.untrustedCertificate(serverMessage: "Verify CA or Verify Identity requires a CA certificate path")
                 }
-            } else {
-                // "Preferred" / "Required" — encrypt but skip cert verification
-                cass_ssl_set_verify_flags(ssl, Int32(CASS_SSL_VERIFY_NONE.rawValue))
+                guard let certData = FileManager.default.contents(atPath: caCertPath),
+                      let certString = String(data: certData, encoding: .utf8) else {
+                    cass_ssl_free(ssl)
+                    cass_cluster_free(cluster)
+                    self.cluster = nil
+                    throw SSLHandshakeError.untrustedCertificate(serverMessage: "Could not read CA certificate at \(caCertPath)")
+                }
+                let rc = cass_ssl_add_trusted_cert(ssl, certString)
+                if rc != CASS_OK {
+                    cass_ssl_free(ssl)
+                    cass_cluster_free(cluster)
+                    self.cluster = nil
+                    throw SSLHandshakeError.untrustedCertificate(serverMessage: "CA certificate at \(caCertPath) is not a valid PEM")
+                }
+            }
+
+            let trimmedClientCertPath = sslClientCertPath?.trimmingCharacters(in: .whitespaces) ?? ""
+            let trimmedClientKeyPath = sslClientKeyPath?.trimmingCharacters(in: .whitespaces) ?? ""
+            if !trimmedClientCertPath.isEmpty || !trimmedClientKeyPath.isEmpty {
+                try applyClientCertificate(
+                    to: ssl,
+                    certPath: trimmedClientCertPath,
+                    keyPath: trimmedClientKeyPath,
+                    keyPassphrase: sslClientKeyPassphrase
+                ) {
+                    cass_ssl_free(ssl)
+                    cass_cluster_free(cluster)
+                    self.cluster = nil
+                }
             }
 
             cass_cluster_set_ssl(cluster, ssl)
@@ -228,6 +241,9 @@ private actor CassandraConnectionActor {
             cass_session_free(newSession)
             cass_cluster_free(cluster)
             self.cluster = nil
+            if let sslError = Self.classifySSLError(rc: rc, message: errorMessage) {
+                throw sslError
+            }
             throw CassandraPluginError.connectionFailed(errorMessage)
         }
 
@@ -235,6 +251,60 @@ private actor CassandraConnectionActor {
         session = newSession
 
         Self.logger.info("Connected to Cassandra at \(host):\(port)")
+    }
+
+    private func applyClientCertificate(
+        to ssl: OpaquePointer,
+        certPath: String,
+        keyPath: String,
+        keyPassphrase: String?,
+        cleanup: () -> Void
+    ) throws {
+        guard !certPath.isEmpty else {
+            cleanup()
+            throw SSLHandshakeError.clientCertRequired(serverMessage: "A client certificate is required when a client key is set")
+        }
+        guard !keyPath.isEmpty else {
+            cleanup()
+            throw SSLHandshakeError.clientCertRequired(serverMessage: "A client key is required when a client certificate is set")
+        }
+
+        guard let certData = FileManager.default.contents(atPath: certPath),
+              let certString = String(data: certData, encoding: .utf8) else {
+            cleanup()
+            throw SSLHandshakeError.clientCertRequired(serverMessage: "Could not read client certificate at \(certPath)")
+        }
+        let certResult = cass_ssl_set_cert(ssl, certString)
+        if certResult != CASS_OK {
+            cleanup()
+            throw SSLHandshakeError.clientCertRequired(serverMessage: "Client certificate at \(certPath) is not a valid PEM")
+        }
+
+        guard let keyData = FileManager.default.contents(atPath: keyPath),
+              let keyString = String(data: keyData, encoding: .utf8) else {
+            cleanup()
+            throw SSLHandshakeError.clientKeyInvalid(serverMessage: "Could not read client key at \(keyPath)")
+        }
+        let passphrase = keyPassphrase?.isEmpty == false ? keyPassphrase : nil
+        let keyResult = cass_ssl_set_private_key(ssl, keyString, passphrase)
+        if keyResult != CASS_OK {
+            cleanup()
+            throw Self.privateKeyLoadError(keyPEM: keyString, hasPassphrase: passphrase != nil, keyPath: keyPath)
+        }
+    }
+
+    static func isEncryptedPrivateKey(_ pem: String) -> Bool {
+        pem.contains("ENCRYPTED PRIVATE KEY") || (pem.contains("Proc-Type:") && pem.contains("ENCRYPTED"))
+    }
+
+    static func privateKeyLoadError(keyPEM: String, hasPassphrase: Bool, keyPath: String) -> SSLHandshakeError {
+        guard isEncryptedPrivateKey(keyPEM) else {
+            return .clientKeyInvalid(serverMessage: "The client key at \(keyPath) is not a valid private key")
+        }
+        if hasPassphrase {
+            return .clientKeyPassphraseIncorrect(serverMessage: "The passphrase for the client key at \(keyPath) is incorrect")
+        }
+        return .clientKeyPassphraseRequired(serverMessage: "The client key at \(keyPath) is encrypted. Enter its passphrase.")
     }
 
     func close() {
@@ -303,7 +373,7 @@ private actor CassandraConnectionActor {
         return extractResult(from: result, startTime: startTime)
     }
 
-    func executePrepared(_ cql: String, parameters: [String?]) throws -> CassandraRawResult {
+    func executePrepared(_ cql: String, parameters: [PluginCellValue]) throws -> CassandraRawResult {
         guard let session else {
             throw CassandraPluginError.notConnected
         }
@@ -337,9 +407,18 @@ private actor CassandraConnectionActor {
         defer { cass_statement_free(statement) }
 
         for (index, param) in parameters.enumerated() {
-            if let value = param {
+            switch param {
+            case .text(let value):
                 cass_statement_bind_string(statement, index, value)
-            } else {
+            case .bytes(let data):
+                data.withUnsafeBytes { rawBuffer in
+                    if let base = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) {
+                        cass_statement_bind_bytes(statement, index, base, data.count)
+                    } else {
+                        cass_statement_bind_null(statement, index)
+                    }
+                }
+            case .null:
                 cass_statement_bind_null(statement, index)
             }
         }
@@ -384,7 +463,7 @@ private actor CassandraConnectionActor {
 
     func serverVersion() throws -> String? {
         let result = try executeQuery("SELECT release_version FROM system.local WHERE key = 'local'")
-        return result.rows.first?.first ?? nil
+        return result.rows.first?.first?.asText
     }
 
     // MARK: - Private Helpers
@@ -413,7 +492,7 @@ private actor CassandraConnectionActor {
             columnTypeNames.append(Self.cassTypeName(colType))
         }
 
-        var rows: [[String?]] = []
+        var rows: [[PluginCellValue]] = []
         let iterator = cass_iterator_from_result(result)
         defer {
             if let iterator { cass_iterator_free(iterator) }
@@ -437,13 +516,18 @@ private actor CassandraConnectionActor {
             let row = cass_iterator_get_row(iterator)
             guard let row else { continue }
 
-            var rowData: [String?] = []
+            var rowData: [PluginCellValue] = []
             for col in 0..<colCount {
                 let value = cass_row_get_column(row, col)
                 if let value, cass_value_is_null(value) == cass_false {
-                    rowData.append(Self.extractStringValue(value))
+                    if cass_value_type(value) == CASS_VALUE_TYPE_BLOB,
+                       let data = Self.extractBlobValue(value) {
+                        rowData.append(.bytes(data))
+                    } else {
+                        rowData.append(PluginCellValue.fromOptional(Self.extractStringValue(value)))
+                    }
                 } else {
-                    rowData.append(nil)
+                    rowData.append(.null)
                 }
             }
             rows.append(rowData)
@@ -459,6 +543,15 @@ private actor CassandraConnectionActor {
             rowsAffected: Int(rowCount),
             executionTime: executionTime
         )
+    }
+
+    private static func extractBlobValue(_ value: OpaquePointer) -> Data? {
+        var bytes: UnsafePointer<UInt8>?
+        var length: Int = 0
+        guard cass_value_get_bytes(value, &bytes, &length) == CASS_OK, let bytes else {
+            return nil
+        }
+        return Data(bytes: bytes, count: length)
     }
 
     private static func extractStringValue(_ value: OpaquePointer) -> String? {
@@ -546,10 +639,7 @@ private actor CassandraConnectionActor {
             return nil
 
         case CASS_VALUE_TYPE_BLOB:
-            var bytes: UnsafePointer<UInt8>?
-            var length: Int = 0
-            if cass_value_get_bytes(value, &bytes, &length) == CASS_OK, let bytes {
-                let data = Data(bytes: bytes, count: length)
+            if let data = extractBlobValue(value) {
                 return "0x" + data.map { String(format: "%02x", $0) }.joined()
             }
             return nil
@@ -782,13 +872,18 @@ private actor CassandraConnectionActor {
                     let row = cass_iterator_get_row(iterator)
                     guard let row else { continue }
 
-                    var rowData: [String?] = []
+                    var rowData: [PluginCellValue] = []
                     for col in 0..<colCount {
                         let value = cass_row_get_column(row, col)
                         if let value, cass_value_is_null(value) == cass_false {
-                            rowData.append(Self.extractStringValue(value))
+                            if cass_value_type(value) == CASS_VALUE_TYPE_BLOB,
+                               let data = Self.extractBlobValue(value) {
+                                rowData.append(.bytes(data))
+                            } else {
+                                rowData.append(PluginCellValue.fromOptional(Self.extractStringValue(value)))
+                            }
                         } else {
-                            rowData.append(nil)
+                            rowData.append(.null)
                         }
                     }
                     continuation.yield(.rows([rowData]))
@@ -819,6 +914,26 @@ private actor CassandraConnectionActor {
     private func escapeIdentifier(_ value: String) -> String {
         value.replacingOccurrences(of: "\"", with: "\"\"")
     }
+
+    static func classifySSLError(rc: CassError, message: String) -> SSLHandshakeError? {
+        switch rc {
+        case CASS_ERROR_SSL_NO_PEER_CERT, CASS_ERROR_SSL_INVALID_PEER_CERT:
+            return .untrustedCertificate(serverMessage: message)
+        case CASS_ERROR_SSL_IDENTITY_MISMATCH:
+            return .hostnameMismatch(serverMessage: message)
+        case CASS_ERROR_SSL_INVALID_PRIVATE_KEY, CASS_ERROR_SSL_INVALID_CERT:
+            return .clientCertRequired(serverMessage: message)
+        case CASS_ERROR_SSL_PROTOCOL_ERROR:
+            return .cipherMismatch(serverMessage: message)
+        default:
+            break
+        }
+        let lower = message.lowercased()
+        if lower.contains("ssl handshake") || lower.contains("tls handshake") || lower.contains("ssl_connect") {
+            return .cipherMismatch(serverMessage: message)
+        }
+        return nil
+    }
 }
 
 // MARK: - Raw Result
@@ -826,7 +941,7 @@ private actor CassandraConnectionActor {
 private struct CassandraRawResult: Sendable {
     let columns: [String]
     let columnTypeNames: [String]
-    let rows: [[String?]]
+    let rows: [[PluginCellValue]]
     let rowsAffected: Int
     let executionTime: TimeInterval
 }
@@ -875,19 +990,24 @@ internal final class CassandraPluginDriver: PluginDatabaseDriver, @unchecked Sen
     // MARK: - Connection
 
     func connect() async throws {
-        let sslMode = config.additionalFields["sslMode"] ?? "Disabled"
-        let sslCaCertPath = config.additionalFields["sslCaCertPath"]
-
         let keyspace = config.database.isEmpty ? nil : config.database
+        let legacyCaPath = config.additionalFields["sslCaCertPath"]
+        let resolvedCaPath = config.ssl.caCertificatePath.isEmpty ? legacyCaPath : config.ssl.caCertificatePath
+        let clientCertPath = config.ssl.clientCertificatePath.isEmpty ? nil : config.ssl.clientCertificatePath
+        let clientKeyPath = config.ssl.clientKeyPath.isEmpty ? nil : config.ssl.clientKeyPath
+        let clientKeyPassphrase = config.additionalFields["sslClientKeyPassphrase"]
 
         try await connectionActor.connect(
             host: config.host,
-            port: Int(config.port) ?? 9042,
+            port: Int(config.port) ?? 9_042,
             username: config.username.isEmpty ? nil : config.username,
             password: config.password.isEmpty ? nil : config.password,
             keyspace: keyspace,
-            sslMode: sslMode,
-            sslCaCertPath: sslCaCertPath
+            sslMode: config.ssl.mode,
+            sslCaCertPath: resolvedCaPath,
+            sslClientCertPath: clientCertPath,
+            sslClientKeyPath: clientKeyPath,
+            sslClientKeyPassphrase: clientKeyPassphrase
         )
 
         if let keyspace {
@@ -896,11 +1016,20 @@ internal final class CassandraPluginDriver: PluginDatabaseDriver, @unchecked Sen
             stateLock.unlock()
         }
 
-        // Cache server version
         if let version = try? await connectionActor.serverVersion() {
             stateLock.lock()
             _cachedVersion = version
             stateLock.unlock()
+        }
+
+        let caps = CassandraCapabilities(
+            releaseVersionMajor: CassandraCapabilities.parseMajorVersion(serverVersion)
+        )
+        guard caps.hasSystemSchemaKeyspace else {
+            throw CassandraPluginError.connectionFailed(String(
+                format: String(localized: "Cassandra %@ is not supported. TablePro requires Cassandra 3.0 or later (the system_schema keyspace was introduced in 3.0)."),
+                serverVersion ?? "<unknown>"
+            ))
         }
     }
 
@@ -938,7 +1067,7 @@ internal final class CassandraPluginDriver: PluginDatabaseDriver, @unchecked Sen
 
     func executeParameterized(
         query: String,
-        parameters: [String?]
+        parameters: [PluginCellValue]
     ) async throws -> PluginQueryResult {
         let rawResult = try await connectionActor.executePrepared(query, parameters: parameters)
         return PluginQueryResult(
@@ -975,27 +1104,14 @@ internal final class CassandraPluginDriver: PluginDatabaseDriver, @unchecked Sen
     func fetchTables(schema: String?) async throws -> [PluginTableInfo] {
         let ks = resolveKeyspace(schema)
 
-        // Fetch tables
         let tablesQuery = """
             SELECT table_name FROM system_schema.tables WHERE keyspace_name = '\(escapeSingleQuote(ks))'
         """
         let tablesResult = try await execute(query: tablesQuery)
 
-        var tables = tablesResult.rows.compactMap { row -> PluginTableInfo? in
-            guard let name = row[safe: 0] ?? nil else { return nil }
+        let tables = tablesResult.rows.compactMap { row -> PluginTableInfo? in
+            guard let name = row[safe: 0]?.asText else { return nil }
             return PluginTableInfo(name: name, type: "TABLE")
-        }
-
-        // Fetch materialized views
-        let viewsQuery = """
-            SELECT view_name FROM system_schema.views WHERE keyspace_name = '\(escapeSingleQuote(ks))'
-        """
-        if let viewsResult = try? await execute(query: viewsQuery) {
-            let views = viewsResult.rows.compactMap { row -> PluginTableInfo? in
-                guard let name = row[safe: 0] ?? nil else { return nil }
-                return PluginTableInfo(name: name, type: "VIEW")
-            }
-            tables.append(contentsOf: views)
         }
 
         return tables.sorted { $0.name < $1.name }
@@ -1021,12 +1137,12 @@ internal final class CassandraPluginDriver: PluginDatabaseDriver, @unchecked Sen
         }
 
         let rawColumns = result.rows.compactMap { row -> RawColumn? in
-            guard let name = row[safe: 0] ?? nil,
-                  let dataType = row[safe: 1] ?? nil else {
+            guard let name = row[safe: 0]?.asText,
+                  let dataType = row[safe: 1]?.asText else {
                 return nil
             }
-            let kind = (row[safe: 2] ?? nil) ?? "regular"
-            let position = Int((row[safe: 4] ?? nil) ?? "0") ?? 0
+            let kind = row[safe: 2]?.asText ?? "regular"
+            let position = Int(row[safe: 4]?.asText ?? "0") ?? 0
             let isPrimaryKey = kind == "partition_key" || kind == "clustering"
             return RawColumn(name: name, dataType: dataType, kind: kind, position: position, isPrimaryKey: isPrimaryKey)
         }.sorted { lhs, rhs in
@@ -1059,12 +1175,12 @@ internal final class CassandraPluginDriver: PluginDatabaseDriver, @unchecked Sen
         var allColumns: [String: [PluginColumnInfo]] = [:]
 
         for row in result.rows {
-            guard let tableName = row[safe: 0] ?? nil,
-                  let columnName = row[safe: 1] ?? nil,
-                  let dataType = row[safe: 2] ?? nil else {
+            guard let tableName = row[safe: 0]?.asText,
+                  let columnName = row[safe: 1]?.asText,
+                  let dataType = row[safe: 2]?.asText else {
                 continue
             }
-            let kind = row[safe: 3] ?? nil
+            let kind = row[safe: 3]?.asText
             let isPrimaryKey = kind == "partition_key" || kind == "clustering"
 
             let column = PluginColumnInfo(
@@ -1093,9 +1209,9 @@ internal final class CassandraPluginDriver: PluginDatabaseDriver, @unchecked Sen
         do {
             let result = try await execute(query: query)
             return result.rows.compactMap { row in
-                guard let name = row[safe: 0] ?? nil else { return nil }
-                let kind = (row[safe: 1] ?? nil) ?? "COMPOSITES"
-                let options = (row[safe: 2] ?? nil) ?? ""
+                guard let name = row[safe: 0]?.asText else { return nil }
+                let kind = row[safe: 1]?.asText ?? "COMPOSITES"
+                let options = row[safe: 2]?.asText ?? ""
 
                 // Extract target column from options map
                 var targetColumns: [String] = []
@@ -1167,8 +1283,8 @@ internal final class CassandraPluginDriver: PluginDatabaseDriver, @unchecked Sen
             throw CassandraPluginError.queryFailed("View '\(view)' not found")
         }
 
-        let baseTable = (row[safe: 0] ?? nil) ?? "unknown"
-        let whereClause = (row[safe: 1] ?? nil) ?? ""
+        let baseTable = row[safe: 0]?.asText ?? "unknown"
+        let whereClause = row[safe: 1]?.asText ?? ""
 
         let columns = try await fetchColumns(table: view, schema: ks)
         let colNames = columns.map { "\"\(escapeIdentifier($0.name))\"" }.joined(separator: ", ")
@@ -1192,8 +1308,8 @@ internal final class CassandraPluginDriver: PluginDatabaseDriver, @unchecked Sen
         let countQuery = "SELECT COUNT(*) FROM \"\(escapeIdentifier(ks))\".\"\(escapeIdentifier(table))\" LIMIT 100001"
         let countResult = try? await execute(query: countQuery)
         let rowCount: Int64? = {
-            guard let row = countResult?.rows.first, let countStr = row.first else { return nil }
-            return Int64(countStr ?? "0")
+            guard let row = countResult?.rows.first, let countStr = row.first?.asText else { return nil }
+            return Int64(countStr)
         }()
 
         return PluginTableMetadata(
@@ -1212,7 +1328,7 @@ internal final class CassandraPluginDriver: PluginDatabaseDriver, @unchecked Sen
             "system", "system_schema", "system_auth",
             "system_distributed", "system_traces", "system_virtual_schema",
         ]
-        return result.rows.compactMap { $0[safe: 0] ?? nil }
+        return result.rows.compactMap { $0[safe: 0]?.asText }
             .filter { !systemKeyspaces.contains($0) }
             .sorted()
     }

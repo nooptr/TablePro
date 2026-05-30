@@ -70,7 +70,7 @@ struct ExportTableTreeView: View {
             .frame(width: 18)
 
             Image(systemName: "cylinder")
-                .foregroundStyle(Color(nsColor: .systemBlue))
+                .foregroundStyle(.blue)
                 .font(.body)
 
             Text(database.name)

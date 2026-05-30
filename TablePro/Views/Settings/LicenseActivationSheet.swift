@@ -13,6 +13,7 @@ struct LicenseActivationSheet: View {
     @State private var licenseKeyInput = ""
     @State private var isActivating = false
     @State private var errorMessage: String?
+    @FocusState private var keyFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -40,12 +41,13 @@ struct LicenseActivationSheet: View {
                     .textFieldStyle(.roundedBorder)
                     .disableAutocorrection(true)
                     .multilineTextAlignment(.center)
+                    .focused($keyFocused)
                     .onSubmit { Task { await activate() } }
 
                 if let errorMessage {
                     Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
-                        .foregroundStyle(Color(nsColor: .systemOrange))
+                        .foregroundStyle(.orange)
                 }
             }
             .padding(.horizontal, 32)
@@ -61,7 +63,7 @@ struct LicenseActivationSheet: View {
                         Task { await activate() }
                     }
                     .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.return, modifiers: [])
+                    .keyboardShortcut(.defaultAction)
                     .disabled(licenseKeyInput.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
 
@@ -79,6 +81,7 @@ struct LicenseActivationSheet: View {
             .padding(.bottom, 24)
         }
         .frame(width: 400)
+        .defaultFocus($keyFocused, true)
     }
 
     private func activate() async {

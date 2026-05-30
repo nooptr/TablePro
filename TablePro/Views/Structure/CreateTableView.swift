@@ -33,6 +33,7 @@ struct CreateTableView: View {
 
     let connection: DatabaseConnection
     var coordinator: MainContentCoordinator?
+    let selectionState: GridSelectionState
 
     @State private var structureChangeManager: StructureChangeManager
     @State private var wrappedChangeManager: AnyChangeManager
@@ -50,9 +51,14 @@ struct CreateTableView: View {
     @State private var sortState = SortState()
     @State private var columnLayout = ColumnLayoutState()
 
-    init(connection: DatabaseConnection, coordinator: MainContentCoordinator?) {
+    init(
+        connection: DatabaseConnection,
+        coordinator: MainContentCoordinator?,
+        selectionState: GridSelectionState
+    ) {
         self.connection = connection
         self.coordinator = coordinator
+        self.selectionState = selectionState
 
         let manager = StructureChangeManager()
         _structureChangeManager = State(wrappedValue: manager)
@@ -80,6 +86,8 @@ struct CreateTableView: View {
                 structureChangeManager.addNewColumn()
             }
         }
+        .onDisappear { selectionState.indices = [] }
+        .onChange(of: selectedRows) { _, newRows in selectionState.indices = newRows }
         .onChange(of: selectedTab) { updateGridDelegate() }
         .alert(String(localized: "Create Table Failed"), isPresented: $showError) {
             Button("OK") {}
@@ -236,14 +244,28 @@ struct CreateTableView: View {
             additionalFields: [.primaryKey]
         )
 
-        let tableRows = provider.asTableRows()
+        // Rebuild the row snapshot fresh on every call so cell edits made
+        // through the delegate are visible to the next reloadData. Capturing
+        // a snapshot here would let the cell view re-render with the pre-edit
+        // value. Same rationale as `TableStructureView.structureGrid`.
+        let manager = structureChangeManager
+        let tab = structureTab
+        let dbType = connection.type
         return DataGridView(
-            tableRowsProvider: { tableRows },
+            tableRowsProvider: {
+                StructureRowProvider(
+                    changeManager: manager,
+                    tab: tab,
+                    databaseType: dbType,
+                    additionalFields: [.primaryKey]
+                ).asTableRows()
+            },
             changeManager: wrappedChangeManager,
             isEditable: true,
             configuration: DataGridConfiguration(
                 dropdownColumns: provider.dropdownColumns,
                 typePickerColumns: provider.typePickerColumns,
+                customDropdownOptions: provider.customDropdownOptions,
                 connectionId: connection.id,
                 databaseType: connection.type
             ),
@@ -337,6 +359,23 @@ struct CreateTableView: View {
                         domain: "CreateTableView", code: -1,
                         userInfo: [NSLocalizedDescriptionKey: String(localized: "Not connected to database")]
                     )
+                }
+
+                let decision = await ExecutionGateProvider.shared.authorize(
+                    OperationRequest(
+                        connectionId: connection.id,
+                        databaseType: connection.type,
+                        sql: sql,
+                        kind: .schemaMutation,
+                        caller: .userInterface,
+                        capabilities: .interactiveUser,
+                        operationDescription: String(localized: "Create Table")
+                    )
+                )
+                guard case .authorized = decision else {
+                    errorMessage = decision.deniedReason ?? String(localized: "Operation not permitted")
+                    showError = true
+                    return
                 }
 
                 _ = try await driver.execute(query: sql)

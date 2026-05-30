@@ -407,7 +407,7 @@ private struct HistoryRowSwiftUI: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: entry.wasSuccessful ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .foregroundStyle(entry.wasSuccessful ? Color(nsColor: .systemGreen) : Color(nsColor: .systemRed))
+                .foregroundStyle(entry.wasSuccessful ? .green : .red)
                 .font(.body)
 
             VStack(alignment: .leading, spacing: 2) {

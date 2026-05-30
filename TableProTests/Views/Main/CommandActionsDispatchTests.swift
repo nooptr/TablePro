@@ -8,8 +8,9 @@
 
 import Foundation
 import SwiftUI
-import Testing
 @testable import TablePro
+import TableProPluginKit
+import Testing
 
 @MainActor @Suite("CommandActions Dispatch")
 struct CommandActionsDispatchTests {
@@ -129,5 +130,47 @@ struct CommandActionsDispatchTests {
         actions.pasteRows()
 
         #expect(pasteRowsCalled)
+    }
+
+    // MARK: - addNewRow (structure mode)
+
+    @Test("addNewRow in structure mode calls structureActions.addRow")
+    func addNewRow_structureMode_callsStructureActions() {
+        let (actions, coordinator) = makeSUT()
+        coordinator.tabManager.addTab(databaseName: "testdb")
+
+        if let idx = coordinator.tabManager.selectedTabIndex {
+            coordinator.tabManager.tabs[idx].display.resultsViewMode = .structure
+        }
+
+        let handler = StructureViewActionHandler()
+        var addRowCalled = false
+        handler.addRow = { addRowCalled = true }
+        coordinator.structureActions = handler
+
+        actions.addNewRow()
+
+        #expect(addRowCalled)
+    }
+
+    // MARK: - deleteSelectedRows (structure mode)
+
+    @Test("deleteSelectedRows in structure mode calls structureActions.removeRow")
+    func deleteSelectedRows_structureMode_callsStructureActions() {
+        let (actions, coordinator) = makeSUT()
+        coordinator.tabManager.addTab(databaseName: "testdb")
+
+        if let idx = coordinator.tabManager.selectedTabIndex {
+            coordinator.tabManager.tabs[idx].display.resultsViewMode = .structure
+        }
+
+        let handler = StructureViewActionHandler()
+        var removeRowCalled = false
+        handler.removeRow = { removeRowCalled = true }
+        coordinator.structureActions = handler
+
+        actions.deleteSelectedRows()
+
+        #expect(removeRowCalled)
     }
 }

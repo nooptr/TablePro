@@ -21,6 +21,7 @@ struct TableStructureView: View {
     let connection: DatabaseConnection
     let toolbarState: ConnectionToolbarState
     let coordinator: MainContentCoordinator?
+    let selectionState: GridSelectionState
 
     @State var selectedTab: StructureTab = .columns
     @State var columns: [ColumnInfo] = []
@@ -52,12 +53,20 @@ struct TableStructureView: View {
     @State var columnLayoutPersister: any ColumnLayoutPersisting = FileColumnLayoutPersister()
     @State var actionHandler = StructureViewActionHandler()
     @State var gridDelegate: StructureGridDelegate
+    @State private var footerOwnerId = UUID()
 
-    init(tableName: String, connection: DatabaseConnection, toolbarState: ConnectionToolbarState, coordinator: MainContentCoordinator?) {
+    init(
+        tableName: String,
+        connection: DatabaseConnection,
+        toolbarState: ConnectionToolbarState,
+        coordinator: MainContentCoordinator?,
+        selectionState: GridSelectionState
+    ) {
         self.tableName = tableName
         self.connection = connection
         self.toolbarState = toolbarState
         self.coordinator = coordinator
+        self.selectionState = selectionState
 
         let manager = StructureChangeManager()
         _structureChangeManager = State(wrappedValue: manager)
@@ -78,7 +87,14 @@ struct TableStructureView: View {
             contentArea
         }
         .task(loadInitialData)
-        .onChange(of: selectedTab) { _, newValue in onSelectedTabChanged(newValue) }
+        .onChange(of: selectedRows) { _, newRows in
+            selectionState.indices = newRows
+            publishFooterState()
+        }
+        .onChange(of: selectedTab) { _, newValue in
+            onSelectedTabChanged(newValue)
+            publishFooterState()
+        }
         .onChange(of: columns) { onColumnsChanged() }
         .onChange(of: indexes) { onIndexesChanged() }
         .onChange(of: foreignKeys) { onForeignKeysChanged() }
@@ -108,15 +124,29 @@ struct TableStructureView: View {
             actionHandler.pasteRows = { self.gridDelegate.dataGridPasteRows() }
             actionHandler.undo = { self.gridDelegate.dataGridUndo() }
             actionHandler.redo = { self.gridDelegate.dataGridRedo() }
+            actionHandler.addRow = { self.gridDelegate.dataGridAddRow() }
+            actionHandler.removeRow = { self.gridDelegate.dataGridDeleteRows(self.selectedRows) }
             coordinator?.structureActions = actionHandler
+            publishFooterState()
         }
         .onDisappear {
             coordinator?.toolbarState.hasStructureChanges = false
             coordinator?.structureActions = nil
+            coordinator?.structureFooterState.deactivate(owner: footerOwnerId)
+            selectionState.indices = []
         }
         .onChange(of: structureChangeManager.hasChanges) { _, newValue in
             coordinator?.toolbarState.hasStructureChanges = newValue
             updateGridDelegate()
+        }
+        .onChange(of: structureChangeManager.reloadVersion) { _, _ in
+            // Any mutation that does not toggle hasChanges (add row when changes
+            // already exist, undo to a still-dirty state) only bumps reloadVersion.
+            // Bump displayVersion so SwiftUI re-evaluates structureGrid with a fresh
+            // tableRows snapshot, which lets DataGridView see the new row count and
+            // call reloadData(). Without this, Cmd+Shift+N adds the row to the change
+            // manager but the grid never displays it.
+            displayVersion += 1
         }
         .onReceive(AppCommands.shared.refreshData) { _ in onRefreshData() }
     }
@@ -149,6 +179,56 @@ struct TableStructureView: View {
             Spacer()
         }
         .padding()
+    }
+
+    // MARK: - Footer state (rendered by MainStatusBarView)
+
+    private func publishFooterState() {
+        guard let footer = coordinator?.structureFooterState else { return }
+        guard connection.type.supportsSchemaEditing,
+              let labels = footerLabels(for: selectedTab) else {
+            footer.deactivate(owner: footerOwnerId)
+            return
+        }
+        footer.update(
+            owner: footerOwnerId,
+            canAdd: canAdd(for: selectedTab),
+            canRemove: canRemove(for: selectedTab),
+            addLabel: labels.add,
+            removeLabel: labels.remove
+        )
+    }
+
+    private func canAdd(for tab: StructureTab) -> Bool {
+        switch tab {
+        case .columns: return connection.type.supportsAddColumn
+        case .indexes: return connection.type.supportsAddIndex
+        case .foreignKeys: return connection.type.supportsForeignKeys
+        case .ddl, .parts: return false
+        }
+    }
+
+    private func canRemove(for tab: StructureTab) -> Bool {
+        guard !selectedRows.isEmpty else { return false }
+        switch tab {
+        case .columns: return connection.type.supportsDropColumn
+        case .indexes: return connection.type.supportsDropIndex
+        case .foreignKeys: return connection.type.supportsForeignKeys
+        case .ddl, .parts: return false
+        }
+    }
+
+    private func footerLabels(for tab: StructureTab) -> (add: String, remove: String)? {
+        switch tab {
+        case .columns:
+            return (String(localized: "Add Column"), String(localized: "Remove Column"))
+        case .indexes:
+            return (String(localized: "Add Index"), String(localized: "Remove Index"))
+        case .foreignKeys:
+            return (String(localized: "Add Foreign Key"), String(localized: "Remove Foreign Key"))
+        case .ddl, .parts:
+            return nil
+        }
     }
 
     // MARK: - Tab Label with Count Badge
@@ -186,13 +266,37 @@ struct TableStructureView: View {
     @ViewBuilder
     private var tabContent: some View {
         switch selectedTab {
-        case .columns, .indexes, .foreignKeys:
+        case .columns:
             structureGrid
+        case .indexes:
+            if shouldShowIndexesEmptyState {
+                EmptyStateView.indexes { gridDelegate.dataGridAddRow() }
+            } else {
+                structureGrid
+            }
+        case .foreignKeys:
+            if shouldShowForeignKeysEmptyState {
+                EmptyStateView.foreignKeys { gridDelegate.dataGridAddRow() }
+            } else {
+                structureGrid
+            }
         case .ddl:
             ddlView
         case .parts:
             ClickHousePartsView(tableName: tableName, connectionId: connection.id)
         }
+    }
+
+    private var shouldShowIndexesEmptyState: Bool {
+        loadedTabs.contains(.indexes)
+            && structureChangeManager.workingIndexes.isEmpty
+            && connection.type.supportsAddIndex
+    }
+
+    private var shouldShowForeignKeysEmptyState: Bool {
+        loadedTabs.contains(.foreignKeys)
+            && structureChangeManager.workingForeignKeys.isEmpty
+            && connection.type.supportsForeignKeys
     }
 
     // MARK: - Structure Grid (DataGridView)
@@ -275,9 +379,17 @@ struct TableStructureView: View {
         let customOptions = provider.customDropdownOptions
         let allDropdownColumns = provider.dropdownColumns.union(Set(customOptions.keys))
 
-        let tableRows = provider.asTableRows()
+        // Build the row snapshot fresh on every call rather than capturing it
+        // once at body-evaluation time. After a cell edit / undo / redo the
+        // change manager's working state is updated synchronously, but a
+        // captured snapshot would still hold the pre-edit value, so the
+        // `tableView.reloadData(forRowIndexes:)` issued by the delegate would
+        // re-render the cell from a stale source. Mirror the data tab's pattern
+        // (`MainEditorContentView` rebuilds via `coordinator.tabSessionRegistry`
+        // on every call). `makeCurrentProvider` is cheap because the working
+        // arrays are small (typically <100 entries).
         return DataGridView(
-            tableRowsProvider: { tableRows },
+            tableRowsProvider: { makeCurrentProvider().asTableRows() },
             changeManager: wrappedChangeManager,
             isEditable: canEdit,
             configuration: DataGridConfiguration(
@@ -309,7 +421,7 @@ struct TableStructureView: View {
         VStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle")
                 .font(.largeTitle)
-                .foregroundStyle(Color(nsColor: .systemOrange))
+                .foregroundStyle(.orange)
                 .accessibilityHidden(true)
             Text(message)
                 .foregroundStyle(.secondary)
@@ -342,7 +454,8 @@ struct TableStructureView: View {
             type: .mysql
         ),
         toolbarState: ConnectionToolbarState(),
-        coordinator: nil
+        coordinator: nil,
+        selectionState: GridSelectionState()
     )
     .frame(width: 800, height: 600)
 }

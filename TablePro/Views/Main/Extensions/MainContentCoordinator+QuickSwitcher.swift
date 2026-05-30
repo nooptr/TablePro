@@ -9,23 +9,16 @@ import Foundation
 
 extension MainContentCoordinator {
     func showQuickSwitcher() {
-        quickSwitcherPanel.show(
-            schemaProvider: SchemaProviderRegistry.shared.getOrCreate(for: connection.id),
-            connectionId: connection.id,
-            databaseType: connection.type,
-            onSelect: { [weak self] item in
-                self?.handleQuickSwitcherSelection(item)
-            }
-        )
+        activeSheet = .quickSwitcher
     }
 
     func handleQuickSwitcherSelection(_ item: QuickSwitcherItem) {
         switch item.kind {
         case .table, .systemTable:
-            openTableTab(item.name)
+            openTableTab(item.name, redirectToSibling: true, activateGridFocus: true)
 
         case .view:
-            openTableTab(item.name, isView: true)
+            openTableTab(item.name, isView: true, redirectToSibling: true, activateGridFocus: true)
 
         case .database:
             Task {

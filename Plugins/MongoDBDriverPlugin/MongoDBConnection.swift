@@ -38,7 +38,9 @@ extension MongoDBError: PluginDriverError {
 
 /// Thread-safe MongoDB connection using libmongoc.
 /// All blocking C calls are dispatched to a dedicated serial queue.
-/// Uses `queue.async` + continuations (never `queue.sync`) to prevent deadlocks.
+/// Async entry points use `queue.async` + continuations. Synchronous entry points
+/// detect on-queue re-entry via `queueKey` and call sync helpers directly to
+/// avoid `dispatch_sync` deadlocks when an on-queue block re-enters a public API.
 final class MongoDBConnection: @unchecked Sendable {
     // MARK: - Properties
 
@@ -50,15 +52,14 @@ final class MongoDBConnection: @unchecked Sendable {
     private var client: OpaquePointer?
     #endif
 
+    private static let queueKey = DispatchSpecificKey<ObjectIdentifier>()
     private let queue = DispatchQueue(label: "com.TablePro.mongodb", qos: .userInitiated)
     private let host: String
     private let port: Int
     private let user: String
     private let password: String?
     private let database: String
-    private let sslMode: String
-    private let sslCACertPath: String
-    private let sslClientCertPath: String
+    private let ssl: SSLConfiguration
     private let authSource: String?
     private let readPreference: String?
     private let writeConcern: String?
@@ -113,9 +114,7 @@ final class MongoDBConnection: @unchecked Sendable {
         user: String,
         password: String?,
         database: String,
-        sslMode: String = "Disabled",
-        sslCACertPath: String = "",
-        sslClientCertPath: String = "",
+        ssl: SSLConfiguration = SSLConfiguration(),
         authSource: String? = nil,
         readPreference: String? = nil,
         writeConcern: String? = nil,
@@ -129,9 +128,7 @@ final class MongoDBConnection: @unchecked Sendable {
         self.user = user
         self.password = password
         self.database = database
-        self.sslMode = sslMode
-        self.sslCACertPath = sslCACertPath
-        self.sslClientCertPath = sslClientCertPath
+        self.ssl = ssl
         self.authSource = authSource
         self.readPreference = readPreference
         self.writeConcern = writeConcern
@@ -139,6 +136,11 @@ final class MongoDBConnection: @unchecked Sendable {
         self.authMechanism = authMechanism
         self.replicaSet = replicaSet
         self.extraUriParams = extraUriParams
+        queue.setSpecific(key: Self.queueKey, value: ObjectIdentifier(self))
+    }
+
+    private var isOnQueue: Bool {
+        DispatchQueue.getSpecific(key: Self.queueKey) == ObjectIdentifier(self)
     }
 
     deinit {
@@ -220,25 +222,7 @@ final class MongoDBConnection: @unchecked Sendable {
             "authSource=\(encodedAuthSource)"
         ]
 
-        let sslEnabled = ["Preferred", "Required", "Verify CA", "Verify Identity"].contains(sslMode)
-        if sslEnabled {
-            params.append("tls=true")
-            if sslMode == "Preferred" {
-                params.append("tlsAllowInvalidCertificates=true")
-            }
-            if !sslCACertPath.isEmpty {
-                let encodedCaPath = sslCACertPath
-                    .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)
-                    ?? sslCACertPath
-                params.append("tlsCAFile=\(encodedCaPath)")
-            }
-            if !sslClientCertPath.isEmpty {
-                let encodedCertPath = sslClientCertPath
-                    .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)
-                    ?? sslClientCertPath
-                params.append("tlsCertificateKeyFile=\(encodedCertPath)")
-            }
-        }
+        params.append(contentsOf: MongoDBSSLMapping.uriParameters(for: ssl))
 
         if let rp = readPreference, !rp.isEmpty {
             params.append("readPreference=\(rp)")
@@ -256,7 +240,8 @@ final class MongoDBConnection: @unchecked Sendable {
         var explicitKeys: Set<String> = [
             "connectTimeoutMS", "serverSelectionTimeoutMS",
             "authSource", "authMechanism", "replicaSet",
-            "tls", "tlsAllowInvalidCertificates", "tlsCAFile", "tlsCertificateKeyFile"
+            "tls", "tlsAllowInvalidCertificates", "tlsAllowInvalidHostnames",
+            "tlsCAFile", "tlsCertificateKeyFile"
         ]
         if readPreference != nil, !readPreference!.isEmpty { explicitKeys.insert("readPreference") }
         if writeConcern != nil, !writeConcern!.isEmpty { explicitKeys.insert("w") }
@@ -315,6 +300,9 @@ final class MongoDBConnection: @unchecked Sendable {
                 let errorMsg = bsonErrorMessage(&error)
                 mongoc_client_destroy(newClient)
                 logger.error("MongoDB ping failed: \(errorMsg)")
+                if let sslError = Self.classifySSLError(errorMsg) {
+                    throw sslError
+                }
                 throw MongoDBError(code: error.code, message: errorMsg)
             }
 
@@ -368,7 +356,7 @@ final class MongoDBConnection: @unchecked Sendable {
         if cancelled { _isCancelled = false }
         stateLock.unlock()
         if cancelled {
-            throw MongoDBError(code: 0, message: String(localized: "Query cancelled"))
+            throw CancellationError()
         }
     }
 
@@ -417,7 +405,7 @@ final class MongoDBConnection: @unchecked Sendable {
         stateLock.unlock()
 
         #if canImport(CLibMongoc)
-        let version = queue.sync { fetchServerVersionSync() }
+        let version = isOnQueue ? fetchServerVersionSync() : queue.sync { fetchServerVersionSync() }
         stateLock.lock()
         _cachedServerVersion = version
         stateLock.unlock()
@@ -1044,7 +1032,16 @@ private extension MongoDBConnection {
     func listDatabasesSync(client: OpaquePointer) throws -> [String] {
         try checkCancelled()
 
-        guard let command = jsonToBson("{\"listDatabases\": 1, \"nameOnly\": true}") else {
+        let caps = MongoDBCapabilities.parse(serverVersion())
+        var fields = ["\"listDatabases\": 1"]
+        if caps.supportsListDatabasesNameOnly {
+            fields.append("\"nameOnly\": true")
+        }
+        if caps.supportsAuthorizedDatabases {
+            fields.append("\"authorizedDatabases\": true")
+        }
+        let commandJSON = "{\(fields.joined(separator: ", "))}"
+        guard let command = jsonToBson(commandJSON) else {
             throw MongoDBError(code: 0, message: "Failed to create listDatabases command")
         }
         defer { bson_destroy(command) }
@@ -1168,9 +1165,12 @@ private extension MongoDBConnection {
                 }
             }
 
-            let row: [String?] = columns.map { column in
-                guard let value = dict[column] else { return nil }
-                return BsonDocumentFlattener.stringValue(for: value)
+            let row: [PluginCellValue] = columns.map { column in
+                guard let value = dict[column] else { return .null }
+                if let data = value as? Data {
+                    return .bytes(data)
+                }
+                return PluginCellValue.fromOptional(BsonDocumentFlattener.stringValue(for: value))
             }
             continuation.yield(.rows([row]))
         }
@@ -1252,6 +1252,26 @@ private extension MongoDBConnection {
         #else
         return nil
         #endif
+    }
+
+    static func classifySSLError(_ message: String) -> SSLHandshakeError? {
+        let lower = message.lowercased()
+        if lower.contains("ssl handshake failed") || lower.contains("tls handshake failed") {
+            return .cipherMismatch(serverMessage: message)
+        }
+        if lower.contains("certificate verify failed") || lower.contains("ssl certificate") {
+            return .untrustedCertificate(serverMessage: message)
+        }
+        if lower.contains("hostname") && lower.contains("verification") {
+            return .hostnameMismatch(serverMessage: message)
+        }
+        if lower.contains("tls required") || lower.contains("ssl required") {
+            return .serverRejectedPlaintext(serverMessage: message)
+        }
+        if lower.contains("client certificate required") || lower.contains("peer did not return a certificate") {
+            return .clientCertRequired(serverMessage: message)
+        }
+        return nil
     }
 }
 

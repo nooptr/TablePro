@@ -9,6 +9,7 @@
 //
 
 import Foundation
+import TableProPluginKit
 import Testing
 
 @Suite("PostgreSQLSchemaQueries.listSchemas")
@@ -54,6 +55,17 @@ struct RedshiftListSchemasTests {
     ])
     func rejectsSystemSchemas(name: String) {
         #expect(filterRejects(name, query: PostgreSQLSchemaQueries.listSchemasRedshift))
+    }
+}
+
+@Suite("PostgreSQLSchemaQueries escape character")
+struct PostgreSQLSchemaEscapeTests {
+    @Test("schema queries avoid the backslash escape that Redshift rejects", arguments: [
+        PostgreSQLSchemaQueries.listSchemas, PostgreSQLSchemaQueries.listSchemasRedshift
+    ])
+    func usesNonBackslashEscape(query: String) {
+        #expect(!query.contains("ESCAPE '\\'"))
+        #expect(query.contains("ESCAPE '!'"))
     }
 }
 

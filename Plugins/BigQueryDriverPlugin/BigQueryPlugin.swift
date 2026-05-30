@@ -19,7 +19,6 @@ final class BigQueryPlugin: NSObject, TableProPlugin, DriverPlugin {
     static let databaseDisplayName = "Google BigQuery"
     static let iconName = "bigquery-icon"
     static let defaultPort = 0
-    static let additionalDatabaseTypeIds: [String] = []
     static let systemSchemaNames: [String] = ["INFORMATION_SCHEMA"]
     static let isDownloadable = true
     static let defaultSchemaName = ""
@@ -44,7 +43,7 @@ final class BigQueryPlugin: NSObject, TableProPlugin, DriverPlugin {
     static let tableEntityName = "Tables"
     static let supportsForeignKeyDisable = false
     static let supportsReadOnlyMode = true
-    static let databaseGroupingStrategy: GroupingStrategy = .bySchema
+    static let databaseGroupingStrategy: GroupingStrategy = .hierarchicalSchema
     static let defaultGroupName = "default"
     static let defaultPrimaryKeyColumn: String? = nil
     static let structureColumnFields: [StructureColumnField] = [.name, .type, .nullable, .comment]

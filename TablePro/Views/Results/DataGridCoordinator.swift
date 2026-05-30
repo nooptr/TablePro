@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import SwiftUI
+import TableProPluginKit
 
 // MARK: - Coordinator
 
@@ -10,19 +11,16 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
 {
     var tableRowsProvider: @MainActor () -> TableRows = { TableRows() }
     var tableRowsMutator: @MainActor (@MainActor (inout TableRows) -> Void) -> Void = { _ in }
+    var paginationOffsetProvider: @MainActor () -> Int = { 0 }
     var changeManager: AnyChangeManager
     var isEditable: Bool
     var sortedIDs: [RowID]?
     private(set) var columnDisplayFormats: [ValueDisplayFormat?] = []
-    private let displayCache: NSCache<RowIDKey, RowDisplayBox> = {
-        let cache = NSCache<RowIDKey, RowDisplayBox>()
-        cache.countLimit = 5_000
-        cache.totalCostLimit = 32 * 1024 * 1024
-        cache.name = "TablePro.DataGrid.displayCache"
-        return cache
-    }()
+    private let displayCache = RowDisplayCache()
     weak var delegate: (any DataGridViewDelegate)?
     weak var activeFKPreviewPopover: NSPopover?
+    var activeFKPreviewModel: FKPreviewModel?
+    var activeFKPreviewColumnIndex: Int?
     var dropdownColumns: Set<Int>?
     var typePickerColumns: Set<Int>?
     var customDropdownOptions: [Int: [String]]?
@@ -43,6 +41,13 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
 
     func dataColumnIndex(from identifier: NSUserInterfaceItemIdentifier) -> Int? {
         identitySchema.dataIndex(from: identifier)
+    }
+
+    func visibleColumnDataIndices() -> [Int]? {
+        guard let tableView else { return nil }
+        return tableView.tableColumns
+            .filter { !$0.isHidden && $0.identifier != ColumnIdentitySchema.rowNumberIdentifier }
+            .compactMap { dataColumnIndex(from: $0.identifier) }
     }
 
     func savedColumnLayout(binding: ColumnLayoutState) -> ColumnLayoutState? {
@@ -96,7 +101,9 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
     let cellRegistry: DataGridCellRegistry
     let columnPool = DataGridColumnPool()
     let tableRowsController = TableRowsController()
+    let selectionController = GridSelectionController()
     var overlayEditor: CellOverlayEditor?
+    var overlayViewer: CellOverlayViewer?
 
     var settingsCancellable: AnyCancellable?
     var themeCancellable: AnyCancellable?
@@ -108,11 +115,17 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
     private(set) var cachedColumnCount: Int = 0
     private(set) var enumOrSetColumns: Set<Int> = []
     private(set) var fkColumns: Set<Int> = []
-    var isSyncingSelection = false
+    var isApplyingProgrammaticRowSelection = false
     var isRebuildingColumns: Bool = false
     var isEscapeCancelling = false
     var isCommittingCellEdit = false
     var layoutPersistTask: Task<Void, Never>?
+    var lastUpdateSnapshot: DataGridUpdateSnapshot?
+    private var prewarmTask: Task<Void, Never>?
+    private var prewarmResumeTask: Task<Void, Never>?
+    private var scrollObservers: [NSObjectProtocol] = []
+    private static let prewarmFrameBudget: Duration = .milliseconds(2)
+    private static let prewarmResumeDelay: Duration = .milliseconds(300)
 
     static let rowViewIdentifier = NSUserInterfaceItemIdentifier("TableRowView")
     let visualIndex = RowVisualIndex()
@@ -181,23 +194,30 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
         themeCancellable = AppEvents.shared.themeChanged
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
-                guard let self, let tableView = self.tableView else { return }
-                Self.updateVisibleCellFonts(tableView: tableView)
+                self?.reloadVisibleRowsAndStates()
             }
     }
 
     func releaseData() {
+        prewarmTask?.cancel()
+        prewarmTask = nil
+        prewarmResumeTask?.cancel()
+        prewarmResumeTask = nil
+        detachScrollObservers()
+        selectionController.clear()
         overlayEditor?.dismiss(commit: false)
+        overlayViewer?.dismiss()
         settingsCancellable?.cancel()
         settingsCancellable = nil
         themeCancellable?.cancel()
         themeCancellable = nil
         visualIndex.clear()
-        displayCache.removeAllObjects()
+        displayCache.removeAll()
         columnDisplayFormats = []
         cachedRowCount = 0
         cachedColumnCount = 0
         sortedIDs = nil
+        lastUpdateSnapshot = nil
         columnPool.detachFromTableView()
         if let tableView {
             while let col = tableView.tableColumns.last {
@@ -208,13 +228,24 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
         tableRowsController.detach()
         delegate = nil
         activeFKPreviewPopover?.close()
-        activeFKPreviewPopover = nil
+        clearFKPreviewState()
     }
 
     func updateCache() {
         let tableRows = tableRowsProvider()
         cachedRowCount = sortedIDs?.count ?? tableRows.count
         cachedColumnCount = tableRows.columns.count
+        resizeRowNumberColumnForCurrentRange()
+    }
+
+    func resizeRowNumberColumnForCurrentRange() {
+        guard let tableView,
+              let column = tableView.tableColumns.first(where: {
+                  $0.identifier == ColumnIdentitySchema.rowNumberIdentifier
+              }),
+              !column.isHidden else { return }
+        let maxRowNumber = paginationOffsetProvider() + cachedRowCount
+        DataGridView.sizeRowNumberColumn(column, forMaxRowNumber: maxRowNumber)
     }
 
     func applyInsertedRows(_ indices: IndexSet) {
@@ -235,11 +266,16 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
         guard let tableView else { return }
         invalidateAllDisplayCaches()
         updateCache()
+        selectionController.clear()
         tableView.reloadData()
+        startBackgroundPrewarm()
     }
 
     func displayRow(at displayIndex: Int) -> Row? {
-        let tableRows = tableRowsProvider()
+        displayRow(at: displayIndex, in: tableRowsProvider())
+    }
+
+    func displayRow(at displayIndex: Int, in tableRows: TableRows) -> Row? {
         if let sorted = sortedIDs {
             guard displayIndex >= 0, displayIndex < sorted.count else { return nil }
             return tableRows.row(withID: sorted[displayIndex])
@@ -258,19 +294,18 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
         return displayIndex
     }
 
-    func displayValue(forID id: RowID, column: Int, rawValue: String?, columnType: ColumnType?) -> String? {
-        let key = RowIDKey(id)
-        if let box = displayCache.object(forKey: key),
+    func displayValue(forID id: RowID, column: Int, rawValue: PluginCellValue, columnType: ColumnType?) -> String? {
+        if let box = displayCache.box(forID: id),
            column >= 0, column < box.values.count,
            let cached = box.values[column] {
             return cached
         }
         let format = column >= 0 && column < columnDisplayFormats.count ? columnDisplayFormats[column] : nil
-        let formatted = CellDisplayFormatter.format(rawValue, columnType: columnType, displayFormat: format) ?? rawValue
+        let formatted = CellDisplayFormatter.format(rawValue, columnType: columnType, displayFormat: format) ?? rawValue.asText
 
         let neededCount = max(column + 1, columnDisplayFormats.count, cachedColumnCount)
         let box: RowDisplayBox
-        if let existing = displayCache.object(forKey: key) {
+        if let existing = displayCache.box(forID: id) {
             box = existing
             if box.values.count < neededCount {
                 box.values.reserveCapacity(neededCount)
@@ -285,28 +320,28 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
         if column >= 0, column < box.values.count {
             box.values[column] = formatted
         }
-        displayCache.setObject(box, forKey: key, cost: displayCacheCost(box.values))
+        displayCache.setBox(box, forID: id, cost: displayCacheCost(box.values))
         return formatted
     }
 
     func invalidateDisplayCache() {
-        displayCache.removeAllObjects()
+        displayCache.removeAll()
     }
 
     func invalidateAllDisplayCaches() {
-        displayCache.removeAllObjects()
+        displayCache.removeAll()
         visualIndex.rebuild(from: changeManager, sortedIDs: sortedIDs)
     }
 
     func updateDisplayFormats(_ formats: [ValueDisplayFormat?]) {
         columnDisplayFormats = formats
-        displayCache.removeAllObjects()
+        displayCache.removeAll()
     }
 
     func syncDisplayFormats(_ formats: [ValueDisplayFormat?]) {
         guard formats != columnDisplayFormats else { return }
         columnDisplayFormats = formats
-        displayCache.removeAllObjects()
+        displayCache.removeAll()
     }
 
     func preWarmDisplayCache(upTo rowCount: Int) {
@@ -314,26 +349,105 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
         let displayCount = sortedIDs?.count ?? tableRows.count
         let count = min(rowCount, displayCount)
         guard count > 0 else { return }
-        let columnCount = tableRows.columns.count
         for displayIndex in 0..<count {
-            guard let row = displayRow(at: displayIndex) else { continue }
-            let key = RowIDKey(row.id)
-            guard displayCache.object(forKey: key) == nil else { continue }
-            var values = ContiguousArray<String?>()
-            values.reserveCapacity(columnCount)
-            for _ in 0..<columnCount { values.append(nil) }
-            for col in 0..<min(row.values.count, columnCount) {
-                let columnType = col < tableRows.columnTypes.count ? tableRows.columnTypes[col] : nil
-                let format = col < columnDisplayFormats.count ? columnDisplayFormats[col] : nil
-                values[col] = CellDisplayFormatter.format(
-                    row.values[col],
-                    columnType: columnType,
-                    displayFormat: format
-                ) ?? row.values[col]
-            }
-            let box = RowDisplayBox(values)
-            displayCache.setObject(box, forKey: key, cost: displayCacheCost(values))
+            cacheDisplayRow(at: displayIndex, in: tableRows)
         }
+    }
+
+    /// Fills displayCache off the scroll hot path so viewFor:row: stays a cache hit.
+    func startBackgroundPrewarm() {
+        prewarmResumeTask?.cancel()
+        prewarmResumeTask = nil
+        prewarmTask?.cancel()
+        prewarmTask = Task { @MainActor [weak self] in
+            await self?.runBackgroundPrewarm()
+        }
+    }
+
+    /// Pauses prewarm during live scroll; resumes after a debounce so rapid scrolls do not restart it repeatedly.
+    func attachScrollObservers(scrollView: NSScrollView) {
+        detachScrollObservers()
+        let start = NotificationCenter.default.addObserver(
+            forName: NSScrollView.willStartLiveScrollNotification,
+            object: scrollView,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.pausePrewarmForScroll()
+            }
+        }
+        let end = NotificationCenter.default.addObserver(
+            forName: NSScrollView.didEndLiveScrollNotification,
+            object: scrollView,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.schedulePrewarmResume()
+            }
+        }
+        scrollObservers = [start, end]
+    }
+
+    private func detachScrollObservers() {
+        for observer in scrollObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        scrollObservers.removeAll()
+    }
+
+    private func pausePrewarmForScroll() {
+        prewarmResumeTask?.cancel()
+        prewarmResumeTask = nil
+        prewarmTask?.cancel()
+        prewarmTask = nil
+    }
+
+    private func schedulePrewarmResume() {
+        prewarmResumeTask?.cancel()
+        prewarmResumeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.prewarmResumeDelay)
+            guard !Task.isCancelled, let self else { return }
+            self.startBackgroundPrewarm()
+        }
+    }
+
+    private func runBackgroundPrewarm() async {
+        var nextIndex = 0
+        while !Task.isCancelled {
+            let tableRows = tableRowsProvider()
+            let displayCount = sortedIDs?.count ?? tableRows.count
+            guard nextIndex < displayCount else { return }
+
+            let deadline = ContinuousClock.now.advanced(by: Self.prewarmFrameBudget)
+            while nextIndex < displayCount {
+                if Task.isCancelled { return }
+                cacheDisplayRow(at: nextIndex, in: tableRows)
+                nextIndex += 1
+                if ContinuousClock.now >= deadline { break }
+            }
+            await Task.yield()
+        }
+    }
+
+    private func cacheDisplayRow(at displayIndex: Int, in tableRows: TableRows) {
+        guard let row = displayRow(at: displayIndex, in: tableRows) else { return }
+        guard displayCache.box(forID: row.id) == nil else { return }
+
+        let columnCount = tableRows.columns.count
+        var values = ContiguousArray<String?>()
+        values.reserveCapacity(columnCount)
+        for _ in 0..<columnCount { values.append(nil) }
+        for col in 0..<min(row.values.count, columnCount) {
+            let columnType = col < tableRows.columnTypes.count ? tableRows.columnTypes[col] : nil
+            let format = col < columnDisplayFormats.count ? columnDisplayFormats[col] : nil
+            values[col] = CellDisplayFormatter.format(
+                row.values[col],
+                columnType: columnType,
+                displayFormat: format
+            ) ?? row.values[col].asText
+        }
+        let box = RowDisplayBox(values)
+        displayCache.setBox(box, forID: row.id, cost: displayCacheCost(values))
     }
 
     private func displayCacheCost(_ values: ContiguousArray<String?>) -> Int {
@@ -346,10 +460,10 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
 
     private func invalidateDisplayCache(forDisplayRow displayIndex: Int, column: Int) {
         guard let row = displayRow(at: displayIndex) else { return }
-        let key = RowIDKey(row.id)
-        guard let box = displayCache.object(forKey: key), column >= 0, column < box.values.count else { return }
+        guard let box = displayCache.box(forID: row.id),
+              column >= 0, column < box.values.count else { return }
         box.values[column] = nil
-        displayCache.setObject(box, forKey: key, cost: displayCacheCost(box.values))
+        displayCache.setBox(box, forID: row.id, cost: displayCacheCost(box.values))
     }
 
     func applyDelta(_ delta: Delta) {
@@ -389,13 +503,22 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
             tableView.reloadData(forRowIndexes: rowSet, columnIndexes: colSet)
         case .rowsInserted(let indices):
             guard !indices.isEmpty else { return }
+            overlayEditor?.dismiss(commit: false)
+            overlayViewer?.dismiss()
+            dismissFKPreviewOnColumnChange()
             appendInsertedIDsToSortedIDs(at: indices)
             applyInsertedRows(indices)
         case .rowsRemoved(let indices):
             guard !indices.isEmpty else { return }
+            overlayEditor?.dismiss(commit: false)
+            overlayViewer?.dismiss()
+            dismissFKPreviewOnColumnChange()
             removeMissingIDsFromSortedIDs()
             applyRemovedRows(indices)
         case .columnsReplaced, .fullReplace:
+            overlayEditor?.dismiss(commit: false)
+            overlayViewer?.dismiss()
+            dismissFKPreviewOnColumnChange()
             sortedIDs = nil
             applyFullReplace()
         }
@@ -423,6 +546,17 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
     func invalidateCachesForUndoRedo() {
         invalidateAllDisplayCaches()
         updateCache()
+        reloadVisibleRowsAndStates()
+    }
+
+    /// Repaint visible rows in two layers Apple's NSTableView contract requires:
+    /// `reloadData(forRowIndexes:columnIndexes:)` re-fetches cells via
+    /// `tableView(_:viewFor:row:)` but does not touch row views, so per-row
+    /// decoration (deleted/inserted tint, deleted-row context menu state) goes
+    /// stale. `enumerateAvailableRowViews` then visits each live `NSTableRowView`
+    /// so `applyVisualState` can mutate row-level state without recreating views.
+    /// Both delegates call this after model mutations that don't change row count.
+    func reloadVisibleRowsAndStates() {
         guard let tableView else { return }
         let visibleRange = tableView.rows(in: tableView.visibleRect)
         guard visibleRange.length > 0 else { return }
@@ -431,6 +565,18 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
             columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns)
         )
         refreshVisibleRowVisualStates()
+    }
+
+    /// Single-row equivalent of `reloadVisibleRowsAndStates` for cases where
+    /// only one row's content + visual state changed (cell edit, single-row
+    /// undo delete).
+    func reloadRowAndState(at row: Int) {
+        guard let tableView, row >= 0, row < tableView.numberOfRows else { return }
+        tableView.reloadData(
+            forRowIndexes: IndexSet(integer: row),
+            columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns)
+        )
+        refreshRowVisualState(at: row)
     }
 
     func refreshVisibleRowVisualStates() {
@@ -450,11 +596,19 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
 
     func commitActiveCellEdit() {
         overlayEditor?.dismiss(commit: true)
+        overlayViewer?.dismiss()
         guard let tableView, let window = tableView.window else { return }
         if let firstResponder = window.firstResponder as? NSView,
            firstResponder.isDescendant(of: tableView) {
             window.makeFirstResponder(tableView)
         }
+    }
+
+    @discardableResult
+    internal func focusGrid() -> Bool {
+        guard let tableView, let window = tableView.window else { return false }
+        window.makeFirstResponder(tableView)
+        return true
     }
 
     func beginEditing(displayRow: Int, column: Int) {
@@ -495,6 +649,19 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
 
     @discardableResult
     func rebuildColumnMetadataCache(from tableRows: TableRows) -> Bool {
+        let columns = tableRows.columns
+        let nextSchema = ColumnIdentitySchema(columns: columns)
+        let schemaChanged = nextSchema != identitySchema
+
+        rebuildKindSets(from: tableRows)
+
+        guard schemaChanged else { return false }
+        identitySchema = nextSchema
+        displayCache.removeAll()
+        return true
+    }
+
+    private func rebuildKindSets(from tableRows: TableRows) {
         var enumSet = Set<Int>()
         var fkSet = Set<Int>()
         let columns = tableRows.columns
@@ -504,9 +671,10 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
 
         for i in 0..<columns.count {
             let name = columns[i]
-            if i < types.count {
-                let ct = types[i]
-                if (ct.isEnumType || ct.isSetType) && enumValues[name]?.isEmpty == false {
+            if let values = enumValues[name], !values.isEmpty {
+                let ct = i < types.count ? types[i] : nil
+                let isExcluded = ct?.isJsonType == true || ct?.isBlobType == true || ct?.isBooleanType == true
+                if !isExcluded {
                     enumSet.insert(i)
                 }
             }
@@ -516,40 +684,6 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
         }
         enumOrSetColumns = enumSet
         fkColumns = fkSet
-
-        let nextSchema = ColumnIdentitySchema(columns: columns)
-        guard nextSchema != identitySchema else { return false }
-        identitySchema = nextSchema
-        displayCache.removeAllObjects()
-        return true
-    }
-
-    // MARK: - Font Updates
-
-    @MainActor
-    static func updateVisibleCellFonts(tableView: NSTableView) {
-        let visibleRect = tableView.visibleRect
-        let visibleRange = tableView.rows(in: visibleRect)
-        guard visibleRange.length > 0 else { return }
-
-        let columnCount = tableView.numberOfColumns
-        for row in visibleRange.location..<(visibleRange.location + visibleRange.length) {
-            for col in 0..<columnCount {
-                guard let cellView = tableView.view(atColumn: col, row: row, makeIfNecessary: false) as? NSTableCellView,
-                      let textField = cellView.textField else { continue }
-
-                switch textField.tag {
-                case DataGridFontVariant.rowNumber:
-                    textField.font = ThemeEngine.shared.dataGridFonts.rowNumber
-                case DataGridFontVariant.italic:
-                    textField.font = ThemeEngine.shared.dataGridFonts.italic
-                case DataGridFontVariant.medium:
-                    textField.font = ThemeEngine.shared.dataGridFonts.medium
-                default:
-                    textField.font = ThemeEngine.shared.dataGridFonts.regular
-                }
-            }
-        }
     }
 
     // MARK: - Row Visual State
@@ -571,8 +705,8 @@ final class TableViewCoordinator: NSObject, NSTableViewDelegate, NSTableViewData
 // MARK: - DataGridCellAccessoryDelegate
 
 extension TableViewCoordinator: DataGridCellAccessoryDelegate {
-    func dataGridCellDidClickFKArrow(row: Int, columnIndex: Int) {
-        handleFKArrowAction(row: row, columnIndex: columnIndex)
+    func dataGridCellDidClickFKArrow(row: Int, columnIndex: Int, openInNewTab: Bool) {
+        handleFKArrowAction(row: row, columnIndex: columnIndex, openInNewTab: openInNewTab)
     }
 
     func dataGridCellDidClickChevron(row: Int, columnIndex: Int) {

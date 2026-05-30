@@ -3,6 +3,7 @@
 //  TablePro
 //
 
+import AppKit
 import Foundation
 import os
 import Security
@@ -13,10 +14,31 @@ protocol ForeignAppImporter {
     var id: String { get }
     var displayName: String { get }
     var symbolName: String { get }
+    /// Canonical bundle identifier of the source app. Importers whose source
+    /// app ships in multiple editions (e.g. DBeaver Community / Enterprise)
+    /// should override `installedAppURL()` to look those up as well.
     var appBundleIdentifier: String { get }
-    func isAvailable() -> Bool
+    /// True when importing passwords reads the macOS keychain, which makes the
+    /// system show a per-item access prompt. Importers that read passwords from
+    /// a file (DBeaver, Beekeeper Studio) return false so no prompt is promised.
+    var readsPasswordsFromKeychain: Bool { get }
+    func installedAppURL() -> URL?
     func connectionCount() -> Int
     func importConnections(includePasswords: Bool) throws -> ForeignAppImportResult
+}
+
+extension ForeignAppImporter {
+    /// LaunchServices lookup for the source app. Returns the URL on disk if
+    /// the app is registered with macOS, regardless of whether the user has
+    /// opened it or created any data. Override to consider multiple editions.
+    func installedAppURL() -> URL? {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: appBundleIdentifier)
+    }
+
+    /// Convenience: true when the source app is installed.
+    func isAvailable() -> Bool {
+        installedAppURL() != nil
+    }
 }
 
 // MARK: - Result
@@ -61,7 +83,9 @@ enum ForeignAppImporterRegistry {
     static let all: [any ForeignAppImporter] = [
         TablePlusImporter(),
         SequelAceImporter(),
-        DBeaverImporter()
+        DBeaverImporter(),
+        DataGripImporter(),
+        BeekeeperStudioImporter()
     ]
 }
 
@@ -82,6 +106,8 @@ enum KeychainReadResult {
     case notFound
     case cancelled
 }
+
+typealias ForeignKeychainRead = (_ service: String, _ account: String) -> KeychainReadResult
 
 enum ForeignKeychainReader {
     private static let logger = Logger(subsystem: "com.TablePro", category: "ForeignKeychainReader")

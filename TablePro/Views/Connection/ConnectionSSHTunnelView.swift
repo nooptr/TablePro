@@ -30,7 +30,7 @@ struct ConnectionSSHTunnelView: View {
                     Section {
                         HStack {
                             Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(Color(nsColor: .systemYellow))
+                                .foregroundStyle(.yellow)
                             Text("Selected SSH profile no longer exists.")
                         }
                         Button("Switch to Inline Configuration") {
@@ -307,7 +307,7 @@ struct ConnectionSSHTunnelView: View {
                                 } label: {
                                     Image(systemName: "minus.circle.fill")
                                         .frame(width: 24, height: 24)
-                                        .foregroundStyle(Color(nsColor: .systemRed))
+                                        .foregroundStyle(.red)
                                 }
                                 .buttonStyle(.plain)
                                 .accessibilityLabel(String(localized: "Remove jump host"))

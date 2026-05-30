@@ -162,6 +162,7 @@ extension QueryExecutionCoordinator {
                     }
                     parent.currentQueryTask = nil
                     parent.toolbarState.setExecuting(false)
+                    if error is CancellationError || Task.isCancelled { return }
                     guard capturedGeneration == parent.queryGeneration else { return }
                     handleQueryExecutionError(error, sql: sql, tabId: tabId, connection: conn)
                 }
@@ -279,7 +280,7 @@ extension QueryExecutionCoordinator {
 
                     let stmtTableName = await MainActor.run { parent.extractTableName(from: stmtSQL) }
                     let stmtRows = TableRows.from(
-                        queryRows: result.rows.map { row in row.map { $0.map { String($0) } } },
+                        queryRows: result.rows,
                         columns: result.columns.map { String($0) },
                         columnTypes: result.columnTypes
                     )

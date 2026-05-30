@@ -9,6 +9,7 @@
 //
 
 import Foundation
+import TableProPluginKit
 import Testing
 
 @testable import TablePro
@@ -63,7 +64,7 @@ struct MainContentCoordinatorLazyLoadTests {
     ) {
         let rows = (0..<rowCount).map { i in columns.map { "\($0)_\(i)" as String? } }
         let columnTypes: [ColumnType] = Array(repeating: .text(rawType: nil), count: columns.count)
-        let tableRows = TableRows.from(queryRows: rows, columns: columns, columnTypes: columnTypes)
+        let tableRows = TableRows.from(queryRows: rows.map { row in row.map(PluginCellValue.fromOptional) }, columns: columns, columnTypes: columnTypes)
         coordinator.setActiveTableRows(tableRows, for: tabId)
     }
 
@@ -136,20 +137,18 @@ struct MainContentCoordinatorLazyLoadTests {
         #expect(coordinator.needsLazyLoad == false)
     }
 
-    @Test("Returns early when tab is already executing")
-    func skipsWhenAlreadyExecuting() {
+    @Test("Returns early when a load Task is already registered for this tab")
+    func skipsWhenLoadTaskRegistered() {
         let (coordinator, tabManager) = makeCoordinator()
         let tabId = addTableTab(to: tabManager)
-        seedRows(coordinator, for: tabId, rowCount: 1)
-        guard let idx = tabManager.tabs.firstIndex(where: { $0.id == tabId }) else {
-            Issue.record("expected tab to exist")
-            return
-        }
-        tabManager.tabs[idx].execution.lastExecutedAt = Date()
-        tabManager.tabs[idx].execution.isExecuting = true
-        coordinator.tabSessionRegistry.evict(for: tabId)
+        let inFlight = Task<Void, Never> { _ = try? await Task.sleep(for: .seconds(60)) }
+        defer { inFlight.cancel() }
+        coordinator.tableLoadTasks[tabId] = inFlight
 
         coordinator.lazyLoadCurrentTabIfNeeded()
+
+        #expect(coordinator.tableLoadTasks.count == 1)
+        #expect(coordinator.tableLoadTasks[tabId] != nil)
         #expect(coordinator.needsLazyLoad == false)
     }
 
@@ -184,6 +183,23 @@ struct MainContentCoordinatorLazyLoadTests {
         }
         #expect(coordinator.tabSessionRegistry.tableRows(for: tabId).rows.count == 4)
         #expect(coordinator.needsLazyLoad == false)
+    }
+
+    @Test("Clears an abandoned executing flag when no in-flight task remains")
+    func recoversAbandonedExecutingFlag() {
+        let (coordinator, tabManager) = makeCoordinator()
+        let tabId = addTableTab(to: tabManager)
+        guard let idx = tabManager.tabs.firstIndex(where: { $0.id == tabId }) else {
+            Issue.record("expected tab to exist")
+            return
+        }
+        tabManager.tabs[idx].execution.isExecuting = true
+        coordinator.currentQueryTask = nil
+
+        coordinator.lazyLoadCurrentTabIfNeeded()
+
+        #expect(tabManager.tabs[idx].execution.isExecuting == false)
+        #expect(coordinator.needsLazyLoad == true)
     }
 
     // MARK: - loadEpoch bump triggers reload after eviction

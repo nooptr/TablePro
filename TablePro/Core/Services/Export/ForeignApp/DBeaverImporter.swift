@@ -3,9 +3,11 @@
 //  TablePro
 //
 
+import AppKit
 import CommonCrypto
 import Foundation
 import os
+import TableProPluginKit
 
 struct DBeaverImporter: ForeignAppImporter {
     private static let logger = Logger(subsystem: "com.TablePro", category: "DBeaverImporter")
@@ -14,12 +16,31 @@ struct DBeaverImporter: ForeignAppImporter {
     let displayName = "DBeaver"
     let symbolName = "bird"
     let appBundleIdentifier = "org.jkiss.dbeaver.core.product"
+    let readsPasswordsFromKeychain = false
 
-    var workspaceBaseURL: URL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/DBeaverData/workspace6")
+    /// All known DBeaver Eclipse product identifiers. Community, Enterprise,
+    /// Ultimate, and Lite variants each register a different bundle ID, but
+    /// they all write to the same `~/Library/DBeaverData/workspace*`.
+    private static let knownBundleIdentifiers = [
+        "org.jkiss.dbeaver.core.product",
+        "org.jkiss.dbeaver.ee.core.product",
+        "org.jkiss.dbeaver.ue.product",
+        "org.jkiss.dbeaver.lite.product"
+    ]
 
-    func isAvailable() -> Bool {
-        findDataSourcesFile() != nil
+    /// Root directory containing DBeaver workspace folders. The actual
+    /// workspace path is discovered by scanning for `workspace*` subdirs so
+    /// future versions (workspace7, etc.) keep working without code changes.
+    var dbeaverDataRoot: URL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/DBeaverData")
+
+    func installedAppURL() -> URL? {
+        for bundleId in Self.knownBundleIdentifiers {
+            if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
+                return url
+            }
+        }
+        return nil
     }
 
     func connectionCount() -> Int {
@@ -44,12 +65,9 @@ struct DBeaverImporter: ForeignAppImporter {
 
         let foldersDict = json["folders"] as? [String: [String: Any]] ?? [:]
 
-        var credentialsMap: [String: [String: Any]] = [:]
-        if includePasswords {
-            let credentialsURL = dataSourcesURL.deletingLastPathComponent()
-                .appendingPathComponent("credentials-config.json")
-            credentialsMap = loadCredentials(from: credentialsURL)
-        }
+        let credentialsURL = dataSourcesURL.deletingLastPathComponent()
+            .appendingPathComponent("credentials-config.json")
+        let credentialsMap = loadCredentials(from: credentialsURL)
 
         var exportableConnections: [ExportableConnection] = []
         var groupNames: Set<String> = []
@@ -57,7 +75,10 @@ struct DBeaverImporter: ForeignAppImporter {
 
         for (connId, connDict) in connectionsDict {
             do {
-                let conn = try parseConnection(connId, dict: connDict, folders: foldersDict)
+                let credentialUsername = (credentialsMap[connId]?["#connection"] as? [String: Any])?["user"] as? String
+                let conn = try parseConnection(
+                    connId, dict: connDict, folders: foldersDict, credentialUsername: credentialUsername
+                )
                 let index = exportableConnections.count
                 exportableConnections.append(conn)
 
@@ -99,18 +120,30 @@ struct DBeaverImporter: ForeignAppImporter {
 
     // MARK: - File Discovery
 
+    /// Scans `~/Library/DBeaverData/workspace*` for a project folder that
+    /// contains `.dbeaver/data-sources.json`. Supports any workspace version
+    /// (workspace6, workspace7, ...) by enumeration rather than hardcoding.
     private func findDataSourcesFile() -> URL? {
         let fm = FileManager.default
-        let basePath = workspaceBaseURL.path
-        guard fm.fileExists(atPath: basePath),
-              let contents = try? fm.contentsOfDirectory(atPath: basePath) else { return nil }
+        guard let workspaceDirs = try? fm.contentsOfDirectory(
+            at: dbeaverDataRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return nil }
 
-        for dirName in contents {
-            let candidate = workspaceBaseURL
-                .appendingPathComponent(dirName)
-                .appendingPathComponent(".dbeaver/data-sources.json")
-            if fm.fileExists(atPath: candidate.path) {
-                return candidate
+        let workspaces = workspaceDirs
+            .filter { $0.lastPathComponent.hasPrefix("workspace") }
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+
+        for workspace in workspaces {
+            guard let projects = try? fm.contentsOfDirectory(atPath: workspace.path) else { continue }
+            for projectName in projects {
+                let candidate = workspace
+                    .appendingPathComponent(projectName)
+                    .appendingPathComponent(".dbeaver/data-sources.json")
+                if fm.fileExists(atPath: candidate.path) {
+                    return candidate
+                }
             }
         }
         return nil
@@ -127,7 +160,8 @@ struct DBeaverImporter: ForeignAppImporter {
     private func parseConnection(
         _ connId: String,
         dict: [String: Any],
-        folders: [String: [String: Any]]
+        folders: [String: [String: Any]],
+        credentialUsername: String?
     ) throws -> ExportableConnection {
         let name = dict["name"] as? String ?? connId
         let provider = dict["provider"] as? String ?? ""
@@ -144,7 +178,9 @@ struct DBeaverImporter: ForeignAppImporter {
             port = defaultPort(for: dbType)
         }
         let database = config["database"] as? String ?? config["url"] as? String ?? ""
-        let username = config["user"] as? String ?? ""
+        let username = [credentialUsername, config["user"] as? String]
+            .compactMap { $0 }
+            .first { !$0.isEmpty } ?? ""
 
         let folderPath = dict["folder"] as? String
         let groupName: String?
@@ -335,6 +371,7 @@ struct DBeaverImporter: ForeignAppImporter {
             password: password,
             sshPassword: sshPassword,
             keyPassphrase: nil,
+            sslClientKeyPassphrase: nil,
             totpSecret: nil,
             pluginSecureFields: nil
         )

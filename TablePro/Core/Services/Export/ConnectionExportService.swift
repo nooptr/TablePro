@@ -6,6 +6,7 @@
 import Combine
 import Foundation
 import os
+import TableProPluginKit
 import UniformTypeIdentifiers
 
 // MARK: - Export Error
@@ -265,6 +266,7 @@ enum ConnectionExportService {
             let password = ConnectionStorage.shared.loadPassword(for: connection.id)
             let sshPassword = ConnectionStorage.shared.loadSSHPassword(for: connection.id)
             let keyPassphrase = ConnectionStorage.shared.loadKeyPassphrase(for: connection.id)
+            let sslClientKeyPassphrase = ConnectionStorage.shared.loadSSLClientKeyPassphrase(for: connection.id)
             let totpSecret = ConnectionStorage.shared.loadTOTPSecret(for: connection.id)
 
             // Collect plugin-specific secure fields
@@ -290,13 +292,15 @@ enum ConnectionExportService {
             }
 
             let hasAnyCredential = password != nil || sshPassword != nil
-                || keyPassphrase != nil || totpSecret != nil || pluginSecureFields != nil
+                || keyPassphrase != nil || sslClientKeyPassphrase != nil
+                || totpSecret != nil || pluginSecureFields != nil
 
             if hasAnyCredential {
                 credentialsMap[String(index)] = ExportableCredentials(
                     password: password,
                     sshPassword: sshPassword,
                     keyPassphrase: keyPassphrase,
+                    sslClientKeyPassphrase: sslClientKeyPassphrase,
                     totpSecret: totpSecret,
                     pluginSecureFields: pluginSecureFields
                 )
@@ -374,6 +378,9 @@ enum ConnectionExportService {
             }
             if let keyPassphrase = creds.keyPassphrase {
                 ConnectionStorage.shared.saveKeyPassphrase(keyPassphrase, for: connectionId)
+            }
+            if let sslClientKeyPassphrase = creds.sslClientKeyPassphrase {
+                ConnectionStorage.shared.saveSSLClientKeyPassphrase(sslClientKeyPassphrase, for: connectionId)
             }
             if let totpSecret = creds.totpSecret {
                 ConnectionStorage.shared.saveTOTPSecret(totpSecret, for: connectionId)

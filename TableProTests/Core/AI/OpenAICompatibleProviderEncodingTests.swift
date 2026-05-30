@@ -5,6 +5,7 @@
 
 import Foundation
 @testable import TablePro
+import TableProPluginKit
 import Testing
 
 @Suite("OpenAICompatibleProvider wire encoding")
@@ -35,7 +36,7 @@ struct OpenAICompatibleProviderEncodingTests {
 
     @Test("Plain text turn renders flat content string")
     func plainTextTurn() {
-        let turn = ChatTurn(role: .user, blocks: [.text("hello")])
+        let turn = ChatTurnWire(role: .user, blocks: [.text("hello")])
         let encoded = makeProvider().encodeTurn(turn)
         #expect(encoded.count == 1)
         #expect(encoded[0]["role"] as? String == "user")
@@ -45,7 +46,7 @@ struct OpenAICompatibleProviderEncodingTests {
     @Test("Assistant turn with toolUse emits tool_calls with arguments-as-string")
     func assistantWithToolUse() {
         let toolUse = ToolUseBlock(id: "call_1", name: "list_tables", input: .object([:]))
-        let turn = ChatTurn(role: .assistant, blocks: [.text("checking"), .toolUse(toolUse)])
+        let turn = ChatTurnWire(role: .assistant, blocks: [.text("checking"), .toolUse(toolUse)])
         let messages = makeProvider().encodeTurn(turn)
         #expect(messages.count == 1)
         let message = messages[0]
@@ -64,7 +65,7 @@ struct OpenAICompatibleProviderEncodingTests {
     @Test("Assistant turn with toolUse but no text emits content: NSNull")
     func assistantWithoutText() {
         let toolUse = ToolUseBlock(id: "call_1", name: "list_tables", input: .object([:]))
-        let turn = ChatTurn(role: .assistant, blocks: [.toolUse(toolUse)])
+        let turn = ChatTurnWire(role: .assistant, blocks: [.toolUse(toolUse)])
         let messages = makeProvider().encodeTurn(turn)
         #expect(messages[0]["content"] is NSNull)
     }
@@ -72,7 +73,7 @@ struct OpenAICompatibleProviderEncodingTests {
     @Test("User turn with toolResult emits role:tool with tool_call_id")
     func toolResultBecomesToolMessage() {
         let result = ToolResultBlock(toolUseId: "call_1", content: "rows", isError: false)
-        let turn = ChatTurn(role: .user, blocks: [.toolResult(result)])
+        let turn = ChatTurnWire(role: .user, blocks: [.toolResult(result)])
         let messages = makeProvider().encodeTurn(turn)
         #expect(messages.count == 1)
         #expect(messages[0]["role"] as? String == "tool")
@@ -84,16 +85,69 @@ struct OpenAICompatibleProviderEncodingTests {
     func multipleToolResults() {
         let r1 = ToolResultBlock(toolUseId: "call_1", content: "a", isError: false)
         let r2 = ToolResultBlock(toolUseId: "call_2", content: "b", isError: false)
-        let turn = ChatTurn(role: .user, blocks: [.toolResult(r1), .toolResult(r2)])
+        let turn = ChatTurnWire(role: .user, blocks: [.toolResult(r1), .toolResult(r2)])
         let messages = makeProvider().encodeTurn(turn)
         #expect(messages.count == 2)
         #expect(messages[0]["tool_call_id"] as? String == "call_1")
         #expect(messages[1]["tool_call_id"] as? String == "call_2")
     }
 
+    @Test("Assistant turn with plain reasoning block includes reasoning_content field")
+    func assistantWithPlainReasoning() {
+        let reasoning = ReasoningBlock(text: "I think about this step by step", opaque: nil)
+        let turn = ChatTurnWire(role: .assistant, blocks: [
+            .reasoning(reasoning),
+            .text("Here is my answer")
+        ])
+        let messages = makeProvider().encodeTurn(turn)
+        #expect(messages.count == 1)
+        #expect(messages[0]["role"] as? String == "assistant")
+        #expect(messages[0]["content"] as? String == "Here is my answer")
+        #expect(messages[0]["reasoning_content"] as? String == "I think about this step by step")
+    }
+
+    @Test("Assistant turn with Anthropic-signed reasoning does not include reasoning_content")
+    func assistantWithAnthropicReasoningOmitsField() {
+        let opaque = ReasoningOpaque(kind: .anthropicSignature, itemID: "blk_1", value: "sig123", blockType: "thinking")
+        let reasoning = ReasoningBlock(text: "hidden thinking", opaque: opaque)
+        let turn = ChatTurnWire(role: .assistant, blocks: [
+            .reasoning(reasoning),
+            .text("My answer")
+        ])
+        let messages = makeProvider().encodeTurn(turn)
+        #expect(messages.count == 1)
+        #expect(messages[0]["reasoning_content"] == nil)
+    }
+
+    @Test("Assistant turn with tool calls and plain reasoning includes reasoning_content")
+    func assistantWithToolCallsAndReasoning() {
+        let reasoning = ReasoningBlock(text: "need to check tables", opaque: nil)
+        let toolUse = ToolUseBlock(id: "call_1", name: "list_tables", input: .object([:]))
+        let turn = ChatTurnWire(role: .assistant, blocks: [
+            .reasoning(reasoning),
+            .toolUse(toolUse)
+        ])
+        let messages = makeProvider().encodeTurn(turn)
+        #expect(messages.count == 1)
+        #expect(messages[0]["tool_calls"] != nil)
+        #expect(messages[0]["reasoning_content"] as? String == "need to check tables")
+    }
+
+    @Test("User turn never includes reasoning_content even with reasoning blocks")
+    func userTurnWithReasoningOmitsField() {
+        let reasoning = ReasoningBlock(text: "user reasoning", opaque: nil)
+        let turn = ChatTurnWire(role: .user, blocks: [
+            .reasoning(reasoning),
+            .text("my question")
+        ])
+        let messages = makeProvider().encodeTurn(turn)
+        #expect(messages.count == 1)
+        #expect(messages[0]["reasoning_content"] == nil)
+    }
+
     @Test("Empty text turn returns no messages")
     func emptyTurnYieldsNothing() {
-        let turn = ChatTurn(role: .user, blocks: [.text("")])
+        let turn = ChatTurnWire(role: .user, blocks: [.text("")])
         let messages = makeProvider().encodeTurn(turn)
         #expect(messages.isEmpty)
     }

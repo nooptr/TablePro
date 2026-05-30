@@ -230,9 +230,19 @@ final class SQLExportPlugin: ExportFormatPlugin, SettablePlugin {
         guard !dropTargets.isEmpty else { return }
         for table in dropTargets {
             let tableRef = dataSource.quoteIdentifier(table.name)
-            try fileHandle.write(contentsOf: "DROP TABLE IF EXISTS \(tableRef) CASCADE;\n".toUTF8Data())
+            let keyword = dropStatementKeyword(for: table.tableType)
+            try fileHandle.write(contentsOf: "\(keyword) IF EXISTS \(tableRef) CASCADE;\n".toUTF8Data())
         }
         try fileHandle.write(contentsOf: "\n".toUTF8Data())
+    }
+
+    private func dropStatementKeyword(for tableType: String) -> String {
+        switch tableType {
+        case "view": return "DROP VIEW"
+        case "materialized view": return "DROP MATERIALIZED VIEW"
+        case "foreign table": return "DROP FOREIGN TABLE"
+        default: return "DROP TABLE"
+        }
     }
 
     private func writeDependentTypesAndSequences(
@@ -434,7 +444,7 @@ final class SQLExportPlugin: ExportFormatPlugin, SettablePlugin {
         var wroteAnyRows = false
         var columns: [String] = []
         var columnTypeNames: [String] = []
-        var rowBatch: [[String?]] = []
+        var rowBatch: [[PluginCellValue]] = []
 
         let generatedColumnNames = Set(columnInfo.filter { $0.isGenerated }.map { $0.name })
         let usesOverridingSystemValue = columnInfo.contains { $0.identityKind == .always }
@@ -495,7 +505,7 @@ final class SQLExportPlugin: ExportFormatPlugin, SettablePlugin {
         tableName: String,
         columns: [String],
         columnTypeNames: [String],
-        rows: [[String?]],
+        rows: [[PluginCellValue]],
         batchSize: Int,
         excludedColumnNames: Set<String>,
         usesOverridingSystemValue: Bool,
@@ -527,13 +537,21 @@ final class SQLExportPlugin: ExportFormatPlugin, SettablePlugin {
             try progress.checkCancellation()
 
             let values = includedColumnIndices.map { colIndex -> String in
-                let value = colIndex < row.count ? row[colIndex] : nil
-                guard let val = value else { return "NULL" }
-                if numericIndices.contains(colIndex) && isNumericLiteral(val) {
-                    return val
+                guard colIndex < row.count else { return "NULL" }
+                let cell = row[colIndex]
+                switch cell {
+                case .null:
+                    return "NULL"
+                case .bytes(let data):
+                    let hex = data.map { String(format: "%02X", $0) }.joined()
+                    return "X'\(hex)'"
+                case .text(let val):
+                    if numericIndices.contains(colIndex) && isNumericLiteral(val) {
+                        return val
+                    }
+                    let escaped = dataSource.escapeStringLiteral(val)
+                    return "'\(escaped)'"
                 }
-                let escaped = dataSource.escapeStringLiteral(val)
-                return "'\(escaped)'"
             }.joined(separator: ", ")
 
             valuesBatch.append("  (\(values))")
