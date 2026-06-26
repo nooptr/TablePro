@@ -54,6 +54,8 @@ struct PluginMetadataSnapshot: Sendable {
         var supportsAddIndex: Bool = true
         var supportsDropIndex: Bool = true
         var supportsModifyPrimaryKey: Bool = true
+        var supportsTriggers: Bool = false
+        var supportsTriggerEditing: Bool = false
         var defaultSSLMode: SSLMode = .disabled
         var supportsOpportunisticTLS: Bool = true
         var supportsCloudflareTunnel: Bool = true
@@ -88,6 +90,7 @@ struct PluginMetadataSnapshot: Sendable {
         let defaultSchemaName: String
         let defaultGroupName: String
         let tableEntityName: String
+        let containerEntityName: String
         let defaultPrimaryKeyColumn: String?
         let immutableColumns: [String]
         let systemDatabaseNames: [String]
@@ -100,6 +103,7 @@ struct PluginMetadataSnapshot: Sendable {
             defaultSchemaName: "public",
             defaultGroupName: "main",
             tableEntityName: "Tables",
+            containerEntityName: "Database",
             defaultPrimaryKeyColumn: nil,
             immutableColumns: [],
             systemDatabaseNames: [],
@@ -421,58 +425,7 @@ final class PluginMetadataRegistry: @unchecked Sendable {
             section: .advanced
         )
 
-        let awsIAMFields: [ConnectionField] = [
-            ConnectionField(
-                id: "awsAuth",
-                label: String(localized: "Authentication"),
-                defaultValue: "off",
-                fieldType: .dropdown(options: [
-                    .init(value: "off", label: String(localized: "Password")),
-                    .init(value: "accessKey", label: String(localized: "AWS IAM (Access Key)")),
-                    .init(value: "profile", label: String(localized: "AWS IAM (Profile)")),
-                    .init(value: "sso", label: String(localized: "AWS IAM (SSO)"))
-                ]),
-                section: .authentication,
-                hidesPassword: true
-            ),
-            ConnectionField(
-                id: "awsRegion",
-                label: String(localized: "AWS Region"),
-                placeholder: "us-east-1",
-                section: .authentication,
-                visibleWhen: FieldVisibilityRule(fieldId: "awsAuth", values: ["accessKey", "profile", "sso"])
-            ),
-            ConnectionField(
-                id: "awsAccessKeyId",
-                label: String(localized: "Access Key ID"),
-                placeholder: "AKIA...",
-                section: .authentication,
-                visibleWhen: FieldVisibilityRule(fieldId: "awsAuth", values: ["accessKey"])
-            ),
-            ConnectionField(
-                id: "awsSecretAccessKey",
-                label: String(localized: "Secret Access Key"),
-                placeholder: "wJalr...",
-                fieldType: .secure,
-                section: .authentication,
-                visibleWhen: FieldVisibilityRule(fieldId: "awsAuth", values: ["accessKey"])
-            ),
-            ConnectionField(
-                id: "awsSessionToken",
-                label: String(localized: "Session Token"),
-                placeholder: String(localized: "Optional, for temporary credentials"),
-                fieldType: .secure,
-                section: .authentication,
-                visibleWhen: FieldVisibilityRule(fieldId: "awsAuth", values: ["accessKey"])
-            ),
-            ConnectionField(
-                id: "awsProfileName",
-                label: String(localized: "Profile Name"),
-                placeholder: "default",
-                section: .authentication,
-                visibleWhen: FieldVisibilityRule(fieldId: "awsAuth", values: ["profile", "sso"])
-            )
-        ]
+        let awsIAMFields = AWSAuthFields.standard()
 
         let defaults: [(typeId: String, snapshot: PluginMetadataSnapshot)] = [
             ("MySQL", PluginMetadataSnapshot(
@@ -498,12 +451,15 @@ final class PluginMetadataRegistry: @unchecked Sendable {
                     requiresReconnectForDatabaseSwitch: false,
                     supportsDropDatabase: true,
                     supportsRenameColumn: true,
+                    supportsTriggers: true,
+                    supportsTriggerEditing: true,
                     defaultSSLMode: .preferred
                 ),
                 schema: PluginMetadataSnapshot.SchemaInfo(
                     defaultSchemaName: "public",
                     defaultGroupName: "main",
                     tableEntityName: "Tables",
+                    containerEntityName: "Database",
                     defaultPrimaryKeyColumn: nil,
                     immutableColumns: [],
                     systemDatabaseNames: ["information_schema", "mysql", "performance_schema", "sys"],
@@ -546,12 +502,15 @@ final class PluginMetadataRegistry: @unchecked Sendable {
                     requiresReconnectForDatabaseSwitch: false,
                     supportsDropDatabase: true,
                     supportsRenameColumn: true,
+                    supportsTriggers: true,
+                    supportsTriggerEditing: true,
                     defaultSSLMode: .preferred
                 ),
                 schema: PluginMetadataSnapshot.SchemaInfo(
                     defaultSchemaName: "public",
                     defaultGroupName: "main",
                     tableEntityName: "Tables",
+                    containerEntityName: "Database",
                     defaultPrimaryKeyColumn: nil,
                     immutableColumns: [],
                     systemDatabaseNames: ["information_schema", "mysql", "performance_schema", "sys"],
@@ -595,12 +554,15 @@ final class PluginMetadataRegistry: @unchecked Sendable {
                     requiresReconnectForDatabaseSwitch: true,
                     supportsDropDatabase: true,
                     supportsRenameColumn: true,
+                    supportsTriggers: true,
+                    supportsTriggerEditing: true,
                     defaultSSLMode: .preferred
                 ),
                 schema: PluginMetadataSnapshot.SchemaInfo(
                     defaultSchemaName: "public",
                     defaultGroupName: "main",
                     tableEntityName: "Tables",
+                    containerEntityName: "Database",
                     defaultPrimaryKeyColumn: nil,
                     immutableColumns: [],
                     systemDatabaseNames: ["postgres", "template0", "template1"],
@@ -649,6 +611,7 @@ final class PluginMetadataRegistry: @unchecked Sendable {
                     defaultSchemaName: "public",
                     defaultGroupName: "main",
                     tableEntityName: "Tables",
+                    containerEntityName: "Database",
                     defaultPrimaryKeyColumn: nil,
                     immutableColumns: [],
                     systemDatabaseNames: ["postgres", "template0", "template1"],
@@ -709,6 +672,7 @@ final class PluginMetadataRegistry: @unchecked Sendable {
                     defaultSchemaName: "public",
                     defaultGroupName: "main",
                     tableEntityName: "Tables",
+                    containerEntityName: "Database",
                     defaultPrimaryKeyColumn: nil,
                     immutableColumns: [],
                     systemDatabaseNames: ["postgres", "system", "defaultdb"],
@@ -753,12 +717,15 @@ final class PluginMetadataRegistry: @unchecked Sendable {
                     supportsModifyColumn: false,
                     supportsRenameColumn: true,
                     supportsModifyPrimaryKey: false,
+                    supportsTriggers: true,
+                    supportsTriggerEditing: true,
                     supportsCloudflareTunnel: false
                 ),
                 schema: PluginMetadataSnapshot.SchemaInfo(
                     defaultSchemaName: "public",
                     defaultGroupName: "main",
                     tableEntityName: "Tables",
+                    containerEntityName: "Database",
                     defaultPrimaryKeyColumn: nil,
                     immutableColumns: [],
                     systemDatabaseNames: [],
@@ -937,6 +904,8 @@ final class PluginMetadataRegistry: @unchecked Sendable {
                 supportsAddIndex: driverType.supportsAddIndex,
                 supportsDropIndex: driverType.supportsDropIndex,
                 supportsModifyPrimaryKey: driverType.supportsModifyPrimaryKey,
+                supportsTriggers: driverType.supportsTriggers,
+                supportsTriggerEditing: driverType.supportsTriggerEditing,
                 defaultSSLMode: existingSnapshot?.capabilities.defaultSSLMode ?? .disabled,
                 supportsOpportunisticTLS: existingSnapshot?.capabilities.supportsOpportunisticTLS ?? true,
                 supportsCloudflareTunnel: driverType.supportsSSH,
@@ -946,6 +915,7 @@ final class PluginMetadataRegistry: @unchecked Sendable {
                 defaultSchemaName: driverType.defaultSchemaName,
                 defaultGroupName: driverType.defaultGroupName,
                 tableEntityName: driverType.tableEntityName,
+                containerEntityName: driverType.containerEntityName,
                 defaultPrimaryKeyColumn: driverType.defaultPrimaryKeyColumn,
                 immutableColumns: driverType.immutableColumns,
                 systemDatabaseNames: driverType.systemDatabaseNames,
@@ -979,7 +949,7 @@ final class PluginMetadataRegistry: @unchecked Sendable {
             return .relational
         case "Redshift", "ClickHouse", "DuckDB", "BigQuery":
             return .analytical
-        case "MongoDB":
+        case "MongoDB", "Elasticsearch":
             return .document
         case "Redis":
             return .keyValue
@@ -1004,6 +974,7 @@ final class PluginMetadataRegistry: @unchecked Sendable {
         case "MSSQL":          return String(localized: "Microsoft's enterprise SQL database")
         case "Oracle":         return String(localized: "Enterprise SQL with PL/SQL")
         case "MongoDB":        return String(localized: "JSON-style document database")
+        case "Elasticsearch":  return String(localized: "Search and analytics engine")
         case "Redis":          return String(localized: "In-memory data store and cache")
         case "ClickHouse":     return String(localized: "Column-oriented OLAP for big data")
         case "DuckDB":         return String(localized: "Embedded analytical SQL")

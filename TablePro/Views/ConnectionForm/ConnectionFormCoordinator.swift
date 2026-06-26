@@ -249,7 +249,7 @@ final class ConnectionFormCoordinator {
             finalAdditionalFields.removeValue(forKey: "preConnectScript")
         }
 
-        finalAdditionalFields["promptForPassword"] = auth.promptForPassword ? "true" : nil
+        finalAdditionalFields["promptForPassword"] = auth.effectivePromptForPassword ? "true" : nil
 
         let secureFields = services.pluginManager.additionalConnectionFields(for: network.type)
             .filter(\.isSecure)
@@ -275,7 +275,7 @@ final class ConnectionFormCoordinator {
             sshConfig: sshConfig,
             sslConfig: sslConfig,
             color: customization.color,
-            tagId: customization.tagId,
+            tagIds: customization.tagIds,
             groupId: customization.groupId,
             sshProfileId: ssh.state.enabled ? ssh.state.profileId : nil,
             sshTunnelMode: sshTunnelMode,
@@ -292,7 +292,7 @@ final class ConnectionFormCoordinator {
             additionalFields: finalAdditionalFields.isEmpty ? nil : finalAdditionalFields
         )
 
-        if auth.promptForPassword {
+        if auth.effectivePromptForPassword {
             storage.deletePassword(for: connectionToSave.id)
         } else if !auth.password.isEmpty {
             storage.savePassword(auth.password, for: connectionToSave.id)
@@ -458,7 +458,7 @@ final class ConnectionFormCoordinator {
             sshConfig: sshConfig,
             sslConfig: sslConfig,
             color: customization.color,
-            tagId: customization.tagId,
+            tagIds: customization.tagIds,
             groupId: customization.groupId,
             sshProfileId: ssh.state.enabled ? ssh.state.profileId : nil,
             sshTunnelMode: testTunnelMode,
@@ -472,7 +472,7 @@ final class ConnectionFormCoordinator {
         temporaryTestIds.insert(testConn.id)
 
         let password = auth.password
-        let promptForPassword = auth.promptForPassword
+        let promptForPassword = auth.effectivePromptForPassword
         let connectionType = network.type
         let displayName = network.name.isEmpty ? network.host : network.name
         let sshState = ssh.state
@@ -536,6 +536,12 @@ final class ConnectionFormCoordinator {
                     }
                 }
             } catch {
+                let usesSSO = self?.auth.additionalFieldValues["awsAuth"] == "sso"
+                    || self?.auth.additionalFieldValues["awsAuthMethod"] == "sso"
+                if usesSSO, AWSSSOLoginService.isSSOExpired(error) {
+                    await self?.offerAWSSSOSignIn(testId: testConn.id, window: window)
+                    return
+                }
                 await MainActor.run {
                     self?.cleanupTestSecrets(for: testConn.id)
                     self?.isTesting = false
@@ -556,6 +562,38 @@ final class ConnectionFormCoordinator {
                     }
                 }
             }
+        }
+    }
+
+    private func offerAWSSSOSignIn(testId: UUID, window: NSWindow?) async {
+        cleanupTestSecrets(for: testId)
+        isTesting = false
+        testTask = nil
+        let profileName = auth.additionalFieldValues["awsProfileName"]
+            .flatMap { $0.isEmpty ? nil : $0 } ?? "default"
+        let confirmed = await AlertHelper.confirmCritical(
+            title: String(localized: "AWS SSO Sign-In Required"),
+            message: String(
+                format: String(localized: "The SSO session for profile \"%@\" has expired. Sign in with your browser?"),
+                profileName
+            ),
+            confirmButton: String(localized: "Sign In"),
+            window: window
+        )
+        guard confirmed else { return }
+        do {
+            try await AWSSSOLoginService.signIn(profileName: profileName)
+            AlertHelper.showInfoSheet(
+                title: String(localized: "Signed In"),
+                message: String(localized: "AWS SSO sign-in finished. Test the connection again."),
+                window: window
+            )
+        } catch {
+            AlertHelper.showErrorSheet(
+                title: String(localized: "AWS SSO Sign-In Failed"),
+                message: error.localizedDescription,
+                window: window
+            )
         }
     }
 
@@ -752,8 +790,10 @@ final class ConnectionFormCoordinator {
         if let hex = parsed.statusColor, !hex.isEmpty {
             customization.color = ConnectionURLParser.connectionColor(fromHex: hex)
         }
-        if let env = parsed.envTag, !env.isEmpty {
-            customization.tagId = ConnectionURLParser.tagId(fromEnvName: env)
+        if let env = parsed.envTag, !env.isEmpty,
+           let resolved = ConnectionURLParser.tagId(fromEnvName: env),
+           !customization.tagIds.contains(resolved) {
+            customization.tagIds.append(resolved)
         }
         if parsed.type.pluginTypeId == "libSQL", !parsed.host.isEmpty {
             var urlString = "https://\(parsed.host)"
@@ -764,6 +804,21 @@ final class ConnectionFormCoordinator {
         }
         if parsed.type.pluginTypeId == "Cloudflare D1", !parsed.host.isEmpty {
             writeFieldByRegistry("cfAccountId", value: parsed.host)
+        }
+        if parsed.type.pluginTypeId == "DuckDB" {
+            if parsed.host.isEmpty {
+                writeFieldByRegistry("duckdbMode", value: "local")
+                writeFieldByRegistry("duckdbFilePath", value: parsed.database)
+            } else {
+                writeFieldByRegistry("duckdbMode", value: "remote")
+                writeFieldByRegistry("duckdbHost", value: parsed.host)
+                if let port = parsed.port {
+                    writeFieldByRegistry("duckdbPort", value: String(port))
+                }
+                if !parsed.database.isEmpty {
+                    writeFieldByRegistry("duckdbAlias", value: parsed.database)
+                }
+            }
         }
         if let connectionName = parsed.connectionName, !connectionName.isEmpty {
             network.name = connectionName

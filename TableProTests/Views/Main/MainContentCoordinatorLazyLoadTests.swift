@@ -143,7 +143,7 @@ struct MainContentCoordinatorLazyLoadTests {
         let tabId = addTableTab(to: tabManager)
         let inFlight = Task<Void, Never> { _ = try? await Task.sleep(for: .seconds(60)) }
         defer { inFlight.cancel() }
-        coordinator.tableLoadTasks[tabId] = inFlight
+        coordinator.tableLoadTasks[tabId] = (UUID(), inFlight)
 
         coordinator.lazyLoadCurrentTabIfNeeded()
 
@@ -163,6 +163,20 @@ struct MainContentCoordinatorLazyLoadTests {
         coordinator.lazyLoadCurrentTabIfNeeded()
 
         #expect(coordinator.needsLazyLoad == true)
+    }
+
+    @Test("restoreSchemaAndRunQuery defers via needsLazyLoad instead of running a query when the driver is not ready")
+    func restoreSchemaDefersWhenDriverNil() async {
+        let (coordinator, tabManager) = makeCoordinator()
+        let tabId = addTableTab(to: tabManager)
+        coordinator.needsLazyLoad = false
+
+        await coordinator.restoreSchemaAndRunQuery("public")
+
+        #expect(coordinator.needsLazyLoad == true)
+        if let idx = tabManager.tabs.firstIndex(where: { $0.id == tabId }) {
+            #expect(tabManager.tabs[idx].execution.isExecuting == false)
+        }
     }
 
     // MARK: - Idempotency

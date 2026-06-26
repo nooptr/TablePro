@@ -82,6 +82,30 @@ struct OpenTableTabTests {
         #expect(tabManager.selectedTab?.filterState.isVisible == false)
     }
 
+    @Test("openTableTab converts a createTable tab in place after the table is created")
+    @MainActor
+    func convertsCreateTableTabInPlace() {
+        let connection = TestFixtures.makeConnection(database: "db_a")
+        let tabManager = QueryTabManager()
+        let coordinator = MainContentCoordinator(
+            connection: connection,
+            tabManager: tabManager,
+            changeManager: DataChangeManager(),
+            toolbarState: ConnectionToolbarState()
+        )
+        defer { coordinator.teardown() }
+
+        tabManager.addCreateTableTab(databaseName: "db_a")
+        #expect(tabManager.tabs.count == 1)
+        #expect(tabManager.selectedTab?.tabType == .createTable)
+
+        coordinator.openTableTab("users")
+
+        #expect(tabManager.tabs.count == 1)
+        #expect(tabManager.selectedTab?.tabType == .table)
+        #expect(tabManager.selectedTab?.tableContext.tableName == "users")
+    }
+
     @Test("Clicking the active table again is a no-op")
     @MainActor
     func clickingActiveTableAgainIsNoOp() throws {
@@ -122,6 +146,25 @@ struct OpenTableTabTests {
         let coordinator = Self.makeCoordinator()
         defer { coordinator.teardown() }
         try coordinator.tabManager.addTableTab(tableName: "users", databaseType: .mysql, databaseName: "db")
+        #expect(coordinator.isActiveTabReusable == false)
+    }
+
+    @Test("A createTable tab without a committable design is reusable")
+    @MainActor
+    func createTableTabIsReusable() {
+        let coordinator = Self.makeCoordinator()
+        defer { coordinator.teardown() }
+        coordinator.tabManager.addCreateTableTab(databaseName: "db")
+        #expect(coordinator.isActiveTabReusable == true)
+    }
+
+    @Test("A createTable tab with a committable design is protected and not reusable")
+    @MainActor
+    func createTableTabWithPendingDesignIsNotReusable() {
+        let coordinator = Self.makeCoordinator()
+        defer { coordinator.teardown() }
+        coordinator.tabManager.addCreateTableTab(databaseName: "db")
+        coordinator.toolbarState.hasCreateTablePending = true
         #expect(coordinator.isActiveTabReusable == false)
     }
 
@@ -192,6 +235,90 @@ struct OpenTableTabTests {
         #expect(tabManager.tabs.count == 1)
         #expect(tabManager.selectedTab?.tableContext.tableName == "orders")
         #expect(tabManager.selectedTab?.isPreview == false)
+    }
+
+    // MARK: - Activate already-open tab (issue #1613)
+
+    @Test("Clicking a table open in a non-selected tab selects it instead of duplicating")
+    @MainActor
+    func clickingTableInNonSelectedTabSelectsIt() throws {
+        let connection = TestFixtures.makeConnection(database: "db_a")
+        let tabManager = QueryTabManager()
+        let coordinator = MainContentCoordinator(
+            connection: connection,
+            tabManager: tabManager,
+            changeManager: DataChangeManager(),
+            toolbarState: ConnectionToolbarState()
+        )
+        defer { coordinator.teardown() }
+
+        try tabManager.addTableTab(tableName: "users", databaseType: connection.type, databaseName: "db_a")
+        try tabManager.addTableTab(tableName: "orders", databaseType: connection.type, databaseName: "db_a")
+        #expect(tabManager.tabs.count == 2)
+        #expect(tabManager.selectedTab?.tableContext.tableName == "orders")
+
+        coordinator.openTableTab("users")
+
+        #expect(tabManager.tabs.count == 2)
+        #expect(tabManager.selectedTab?.tableContext.tableName == "users")
+    }
+
+    @Test("activateIfAlreadyOpen returns false when no open tab matches")
+    @MainActor
+    func activateIfAlreadyOpenReturnsFalseWhenNoMatch() throws {
+        let connection = TestFixtures.makeConnection(database: "db_a")
+        let tabManager = QueryTabManager()
+        let coordinator = MainContentCoordinator(
+            connection: connection,
+            tabManager: tabManager,
+            changeManager: DataChangeManager(),
+            toolbarState: ConnectionToolbarState()
+        )
+        defer { coordinator.teardown() }
+
+        try tabManager.addTableTab(tableName: "orders", databaseType: connection.type, databaseName: "db_a")
+
+        let activated = coordinator.activateIfAlreadyOpen(
+            tableName: "users",
+            databaseName: "db_a",
+            schemaName: nil,
+            showStructure: false,
+            activateGridFocus: false,
+            includeSiblings: true
+        )
+
+        #expect(activated == false)
+        #expect(tabManager.selectedTab?.tableContext.tableName == "orders")
+    }
+
+    @Test("activateIfAlreadyOpen selects an existing in-window tab and applies structure mode")
+    @MainActor
+    func activateIfAlreadyOpenSelectsExistingTabWithStructure() throws {
+        let connection = TestFixtures.makeConnection(database: "db_a")
+        let tabManager = QueryTabManager()
+        let coordinator = MainContentCoordinator(
+            connection: connection,
+            tabManager: tabManager,
+            changeManager: DataChangeManager(),
+            toolbarState: ConnectionToolbarState()
+        )
+        defer { coordinator.teardown() }
+
+        try tabManager.addTableTab(tableName: "users", databaseType: connection.type, databaseName: "db_a")
+        try tabManager.addTableTab(tableName: "orders", databaseType: connection.type, databaseName: "db_a")
+
+        let activated = coordinator.activateIfAlreadyOpen(
+            tableName: "users",
+            databaseName: "db_a",
+            schemaName: nil,
+            showStructure: true,
+            activateGridFocus: false,
+            includeSiblings: true
+        )
+
+        #expect(activated == true)
+        #expect(tabManager.selectedTab?.tableContext.tableName == "users")
+        #expect(tabManager.selectedTab?.display.resultsViewMode == .structure)
     }
 
     @MainActor

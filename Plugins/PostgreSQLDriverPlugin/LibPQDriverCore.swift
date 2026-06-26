@@ -11,17 +11,23 @@ import TableProPluginKit
 
 final class LibPQDriverCore: @unchecked Sendable {
     private let config: DriverConnectionConfig
+    private let schemaFallbackQueries: [String]
     private var libpqConnection: LibPQPluginConnection?
 
     var currentSchema: String = "public"
+    private var selectedSchema: String?
 
     var onPostConnect: (@Sendable () async -> Void)?
 
     var serverVersion: String? { libpqConnection?.serverVersion() }
     var serverVersionNumber: Int32 { libpqConnection?.serverVersionNumber() ?? 0 }
 
-    init(config: DriverConnectionConfig) {
+    init(
+        config: DriverConnectionConfig,
+        schemaFallbackQueries: [String] = PostgreSQLSchemaQueries.schemaFallbackQueries
+    ) {
         self.config = config
+        self.schemaFallbackQueries = schemaFallbackQueries
     }
 
     // MARK: - Connection
@@ -40,12 +46,44 @@ final class LibPQDriverCore: @unchecked Sendable {
         try await pqConn.connect()
         libpqConnection = pqConn
 
-        if let schemaResult = try? await pqConn.executeQuery("SELECT current_schema()"),
-           let schema = schemaResult.rows.first?.first?.asText {
+        switch await probeSchema(pqConn, query: PostgreSQLSchemaQueries.currentSchema) {
+        case .schema(let schema):
             currentSchema = schema
+        case .empty:
+            if let fallback = await firstFallbackSchema(pqConn) {
+                currentSchema = fallback
+                _ = try? await pqConn.executeQuery(PostgreSQLSchemaQueries.setSearchPath(toSchema: fallback))
+            }
+        case .failed:
+            break
+        }
+
+        if let selectedSchema,
+           (try? await pqConn.executeQuery(PostgreSQLSchemaQueries.setSearchPath(toSchema: selectedSchema))) != nil {
+            currentSchema = selectedSchema
         }
 
         await onPostConnect?()
+    }
+
+    private func firstFallbackSchema(_ pqConn: LibPQPluginConnection) async -> String? {
+        for query in schemaFallbackQueries {
+            if case .schema(let schema) = await probeSchema(pqConn, query: query) {
+                return schema
+            }
+        }
+        return nil
+    }
+
+    private func probeSchema(_ pqConn: LibPQPluginConnection, query: String) async -> PostgreSQLSchemaProbe {
+        let result = try? await pqConn.executeQuery(query)
+        return PostgreSQLSchemaQueries.probe(rows: result?.rows)
+    }
+
+    func applySchema(_ schema: String) async throws {
+        _ = try await execute(query: PostgreSQLSchemaQueries.setSearchPath(toSchema: schema))
+        selectedSchema = schema
+        currentSchema = schema
     }
 
     func disconnect() {
@@ -180,9 +218,7 @@ extension LibPQBackedDriver {
     }
 
     func switchSchema(to schema: String) async throws {
-        let escapedName = schema.replacingOccurrences(of: "\"", with: "\"\"")
-        _ = try await core.execute(query: "SET search_path TO \"\(escapedName)\", public")
-        core.currentSchema = schema
+        try await core.applySchema(schema)
     }
 
     var currentSchema: String? { core.currentSchema }
@@ -193,9 +229,5 @@ extension LibPQBackedDriver {
 
     func escapeLiteral(_ str: String) -> String {
         escapeStringLiteral(str)
-    }
-
-    var escapedSchema: String {
-        escapeLiteral(core.currentSchema)
     }
 }

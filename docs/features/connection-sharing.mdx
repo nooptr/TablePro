@@ -56,13 +56,21 @@ Duplicates are unchecked. Check to import, then pick **As Copy**, **Replace**, o
   />
 </Frame>
 
+## On iPhone
+
+TablePro for iPhone reads and writes the same `.tablepro` file, so connections move between your Mac and your phone.
+
+**Import:** tap the **more** menu (•••) above the connection list and choose **Import Connections**, then pick a `.tablepro` file. You can also open a `.tablepro` file from the Files app or accept one over AirDrop, and it opens straight into TablePro. The same preview shows each connection with its status, and you choose **As Copy**, **Replace**, or **Skip** for duplicates. Encrypted files prompt for the passphrase first.
+
+**Export:** tap the **more** menu and choose **Export Connections** to share a `.tablepro` file through the system share sheet. Passwords are left out by default. To include them, turn on **Include passwords** and set a passphrase that encrypts the file.
+
 ## Import from Other Apps
 
 Bring your connections over from TablePlus, Sequel Ace, DBeaver, DataGrip, or Navicat. Passwords can be imported too. The source app doesn't need to be running.
 
 1. **File** > **Import from Other App...**
 2. Pick the source app and click **Continue**. Navicat opens a file picker: choose the `.ncx` file you exported from Navicat.
-3. Review the list, uncheck anything you don't want, then click **Import**.
+3. Review the list. Duplicates match by host, port, database, and username. Uncheck anything you don't want, or choose **As Copy**, **Replace**, or **Skip** for duplicates, then click **Import**.
 
 <Frame caption="Pick the source app">
   <img
@@ -86,6 +94,8 @@ Groups and folders carry over.
 | DBeaver | MySQL, PostgreSQL, SQLite, SQL Server, Oracle, and more | Decrypted from config file |
 | DataGrip | MySQL, PostgreSQL, SQLite, SQL Server, Oracle, and more | From Keychain or `c.kdbx` |
 | Navicat | MySQL, MariaDB, PostgreSQL, SQLite, SQL Server, Oracle, MongoDB | Decrypted from `.ncx` file |
+
+DBeaver is detected from its data folder, so every edition is picked up: Community, Lite, Enterprise, Ultimate, and Team. The app doesn't need to be installed for its saved connections to import.
 
 DataGrip stores connections per project. TablePro imports the connections from the projects DataGrip is tracking (its recent projects), along with their SSH tunnel and SSL settings, and the SSH tunnel password when DataGrip saved one. If a connection is missing, open its project in DataGrip once so it returns to the recent list. Connections protected by a DataGrip master password can't be read.
 

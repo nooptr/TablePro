@@ -41,18 +41,11 @@ final class AuthPaneViewModel {
     }
 
     var hidesPassword: Bool {
-        authFields.contains { field in
-            guard field.hidesPassword else { return false }
-            switch field.fieldType {
-            case .toggle:
-                return additionalFieldValues[field.id] == "true"
-            case .dropdown:
-                let value = additionalFieldValues[field.id] ?? field.defaultValue
-                return value != field.defaultValue
-            default:
-                return true
-            }
-        }
+        authFields.hidesPassword(forValues: additionalFieldValues)
+    }
+
+    var effectivePromptForPassword: Bool {
+        promptForPassword && !hidesPassword
     }
 
     var usePgpass: Bool {
@@ -112,6 +105,12 @@ final class AuthPaneViewModel {
                 values[field.id] = secureValue
             }
         }
+        if connection.type.pluginTypeId == "DuckDB",
+           (values["duckdbFilePath"] ?? "").isEmpty,
+           !connection.database.isEmpty {
+            values["duckdbFilePath"] = connection.database
+        }
+
         additionalFieldValues = values
 
         if let savedPassword = storage.loadPassword(for: connection.id) {

@@ -148,13 +148,16 @@ nonisolated final class FreeTDSConnection: @unchecked Sendable {
         }
         defer { dbloginfree(login) }
 
-        _ = dbsetlname(login, options.user, Int32(DBSETUSER))
-        _ = dbsetlname(login, options.password, Int32(DBSETPWD))
-        _ = dbsetlname(login, options.applicationName, Int32(DBSETAPP))
-        _ = dbsetlname(login, "us_english", Int32(DBSETNATLANG))
-        _ = dbsetlname(login, "UTF-8", Int32(DBSETCHARSET))
+        for parameter in MSSQLLoginParameters.build(
+            user: options.user,
+            password: options.password,
+            applicationName: options.applicationName,
+            encryptionFlag: options.encryptionFlag,
+            database: options.database
+        ) {
+            _ = dbsetlname(login, parameter.value, parameter.field.dbsetName)
+        }
         _ = dbsetlversion(login, UInt8(DBVERSION_74))
-        _ = dbsetlname(login, options.encryptionFlag, Int32(DBSETENCRYPT))
 
         // dbsetlogintime is process-global; setting before dbopen bounds this call. Concurrent
         // connectSync from another FreeTDSConnection would race, but the serial connect queue and
@@ -166,17 +169,10 @@ nonisolated final class FreeTDSConnection: @unchecked Sendable {
         guard let proc = dbopen(login, serverName) else {
             let detail = freetdsGetError(for: nil)
             let msg = detail.isEmpty ? "Check host, port, credentials, and TLS settings" : detail
-            if let kind = FreeTDSConnection.classifySSLError(detail) {
+            if let kind = MSSQLTLSClassifier.classifySSLError(detail) {
                 throw MSSQLCoreError.tlsHandshakeFailed(kind: kind, serverMessage: detail)
             }
             throw MSSQLCoreError.connectionFailed("Failed to connect to \(options.host):\(options.port): \(msg)")
-        }
-
-        if !options.database.isEmpty {
-            if dbuse(proc, options.database) == FAIL {
-                _ = dbclose(proc)
-                throw MSSQLCoreError.connectionFailed("Cannot open database '\(options.database)'")
-            }
         }
 
         self.dbproc = proc
@@ -530,24 +526,18 @@ nonisolated final class FreeTDSConnection: @unchecked Sendable {
         }
         return raw
     }
+}
 
-    static func classifySSLError(_ message: String) -> MSSQLTLSFailureKind? {
-        let lower = message.lowercased()
-        if lower.contains("encryption is required") || lower.contains("server requires encryption") {
-            return .serverRejectedPlaintext
+private extension MSSQLLoginField {
+    var dbsetName: Int32 {
+        switch self {
+        case .user: return Int32(DBSETUSER)
+        case .password: return Int32(DBSETPWD)
+        case .application: return Int32(DBSETAPP)
+        case .nationalLanguage: return Int32(DBSETNATLANG)
+        case .charset: return Int32(DBSETCHARSET)
+        case .encryption: return Int32(DBSETENCRYPT)
+        case .database: return Int32(DBSETDBNAME)
         }
-        if lower.contains("encryption not supported") || lower.contains("server does not support encryption") {
-            return .serverRequiresPlaintext
-        }
-        if lower.contains("certificate verify failed") || lower.contains("certificate is not trusted") {
-            return .untrustedCertificate
-        }
-        if lower.contains("does not match host") {
-            return .hostnameMismatch
-        }
-        if lower.contains("ssl handshake") || lower.contains("tls handshake") || lower.contains("openssl error") {
-            return .cipherMismatch
-        }
-        return nil
     }
 }

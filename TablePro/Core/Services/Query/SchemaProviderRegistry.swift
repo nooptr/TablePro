@@ -40,15 +40,9 @@ final class SchemaProviderRegistry {
             .store(in: &cancellables)
     }
 
-    func invalidateColumnCache(for connectionId: UUID?) {
-        if let id = connectionId {
-            guard let provider = providers[id] else { return }
-            Task { await provider.clearColumnCache() }
-            return
-        }
-        for provider in providers.values {
-            Task { await provider.clearColumnCache() }
-        }
+    func invalidateColumnCache(for connectionId: UUID) {
+        guard let provider = providers[connectionId] else { return }
+        Task { await provider.clearColumnCache() }
     }
 
     func provider(for connectionId: UUID) -> SQLSchemaProvider? {
@@ -64,14 +58,22 @@ final class SchemaProviderRegistry {
             return existing
         }
         let source = SQLSchemaProvider.ColumnMetadataSource(
-            fetchColumns: { table in
+            fetchColumns: { table, schema in
                 try await DatabaseManager.shared.withMetadataDriver(connectionId: connectionId) { driver in
-                    try await driver.fetchColumns(table: table)
+                    if let schema {
+                        return try await driver.fetchColumns(table: table, schema: schema)
+                    }
+                    return try await driver.fetchColumns(table: table)
                 }
             },
             fetchAllColumns: {
                 try await DatabaseManager.shared.withMetadataDriver(connectionId: connectionId, workload: .bulk) { driver in
                     try await driver.fetchAllColumns()
+                }
+            },
+            fetchSchemaTables: { schema in
+                try await DatabaseManager.shared.withMetadataDriver(connectionId: connectionId) { driver in
+                    try await driver.fetchTables(schema: schema)
                 }
             }
         )

@@ -24,9 +24,10 @@ struct OracleError: Error {
         case notConnected
         case connectionFailed
         case queryFailed
+        case protocolError
         case authVerifierUnsupported(flag: String)
         case authVersionNotSupported
-        case authConnectionDropped
+        case authConnectionDropped(phase: String?)
     }
 
     let message: String
@@ -119,6 +120,7 @@ final class OracleConnectionWrapper: @unchecked Sendable {
     private let serviceName: String
     private let useSID: Bool
     private let sslConfig: SSLConfiguration
+    private let nativeNetworkEncryption: Bool
 
     private struct LockedState: Sendable {
         var isConnected = false
@@ -142,7 +144,8 @@ final class OracleConnectionWrapper: @unchecked Sendable {
         database: String,
         serviceName: String = "",
         useSID: Bool = false,
-        sslConfig: SSLConfiguration = SSLConfiguration()
+        sslConfig: SSLConfiguration = SSLConfiguration(),
+        nativeNetworkEncryption: Bool = false
     ) {
         self.host = host
         self.port = port
@@ -152,6 +155,7 @@ final class OracleConnectionWrapper: @unchecked Sendable {
         self.serviceName = serviceName
         self.useSID = useSID
         self.sslConfig = sslConfig
+        self.nativeNetworkEncryption = nativeNetworkEncryption
     }
 
     // MARK: - Connection
@@ -160,7 +164,7 @@ final class OracleConnectionWrapper: @unchecked Sendable {
         let identifier = serviceName.isEmpty ? database : serviceName
         let service: OracleServiceMethod = useSID ? .sid(identifier) : .serviceName(identifier)
         let tls = try OracleSSLMapping.tls(for: sslConfig)
-        let config = OracleNIO.OracleConnection.Configuration(
+        var config = OracleNIO.OracleConnection.Configuration(
             host: host,
             port: port,
             service: service,
@@ -168,6 +172,7 @@ final class OracleConnectionWrapper: @unchecked Sendable {
             password: password,
             tls: tls
         )
+        config.nativeNetworkEncryption = nativeNetworkEncryption
 
         let connectionId = Self.connectionCounter.withLock { state -> Int in
             state += 1
@@ -189,9 +194,10 @@ final class OracleConnectionWrapper: @unchecked Sendable {
             let target = useSID ? "\(self.host):\(self.port):\(identifier)" : "\(self.host):\(self.port)/\(identifier)"
             osLogger.debug("Connected to Oracle \(target)")
         } catch let sqlError as OracleSQLError {
-            let detail = sqlError.serverInfo?.message ?? sqlError.description
-            osLogger.error("Oracle connection failed: \(detail)")
-            if let sslError = Self.classifySSLError(detail) {
+            let detail = Self.connectFailureDetail(sqlError)
+            let phase = sqlError.handshakePhase ?? "unknown"
+            osLogger.error("Oracle connection failed at phase \(phase, privacy: .public) (\(sqlError.code.description, privacy: .public)): \(detail)")
+            if let sslError = OracleSSLClassifier.classifySSLError(detail) {
                 throw sslError
             }
             let category = classifyConnectError(sqlError)
@@ -202,48 +208,35 @@ final class OracleConnectionWrapper: @unchecked Sendable {
         } catch let nioSslError as NIOSSLError {
             let detail = String(describing: nioSslError)
             osLogger.error("Oracle TLS error: \(detail)")
-            throw Self.classifySSLError(detail) ?? SSLHandshakeError.unknown(serverMessage: detail)
+            throw OracleSSLClassifier.classifySSLError(detail) ?? SSLHandshakeError.unknown(serverMessage: detail)
         } catch {
             let detail = String(describing: error)
             osLogger.error("Oracle connection failed: \(detail)")
-            if let sslError = Self.classifySSLError(detail) {
+            if let sslError = OracleSSLClassifier.classifySSLError(detail) {
                 throw sslError
             }
             throw OracleError(message: detail, category: .connectionFailed)
         }
     }
 
-    static func classifySSLError(_ message: String) -> SSLHandshakeError? {
-        let lower = message.lowercased()
-        if lower.contains("ora-28759") || lower.contains("failure to open file") && lower.contains("wallet") {
-            return .clientCertRequired(serverMessage: message)
-        }
-        if lower.contains("ora-29024") {
-            return .cipherMismatch(serverMessage: message)
-        }
-        if lower.contains("ora-28860") {
-            return .cipherMismatch(serverMessage: message)
-        }
-        if lower.contains("certificate") && (lower.contains("verify") || lower.contains("untrusted")) {
-            return .untrustedCertificate(serverMessage: message)
-        }
-        return nil
-    }
-
-
     private func classifyConnectError(_ error: OracleSQLError) -> OracleError.Category {
-        let codeDescription = error.code.description
-        if codeDescription.hasPrefix("unsupportedVerifierType") {
-            return .authVerifierUnsupported(flag: codeDescription)
-        }
-        switch codeDescription {
-        case "uncleanShutdown":
-            return .authConnectionDropped
-        case "serverVersionNotSupported":
+        switch OracleConnectErrorClassifier.classify(error.code.description) {
+        case .verifierUnsupported(let flag):
+            return .authVerifierUnsupported(flag: flag)
+        case .versionNotSupported:
             return .authVersionNotSupported
-        default:
+        case .connectionDropped:
+            return .authConnectionDropped(phase: error.handshakePhase)
+        case .connectionFailed:
             return .connectionFailed
         }
+    }
+
+    private static func connectFailureDetail(_ error: OracleSQLError) -> String {
+        if let refused = error.underlying as? OracleListenerRefusedError {
+            return OracleListenerRefusal.detail(code: refused.code)
+        }
+        return error.serverInfo?.message ?? error.description
     }
 
     private static func connectErrorMessage(
@@ -257,9 +250,28 @@ final class OracleConnectionWrapper: @unchecked Sendable {
             return String(localized: "The Oracle server closed the connection during the login handshake.")
         case .authVerifierUnsupported:
             return String(localized: "This account uses a password verifier the database driver does not support.")
-        case .generic, .notConnected, .connectionFailed, .queryFailed:
+        case .generic, .notConnected, .connectionFailed, .queryFailed, .protocolError:
             return serverDetail
         }
+    }
+
+    private func mapQueryError(_ sqlError: OracleSQLError) -> OracleError {
+        guard Self.isChannelFatal(sqlError) else {
+            return OracleError(message: sqlError.serverInfo?.message ?? sqlError.description)
+        }
+        state.withLock { current in
+            current.isConnected = false
+            current.nioConnection = nil
+        }
+        osLogger.error("Oracle connection reset after fatal protocol error: \(sqlError.code.description)")
+        return OracleError(
+            message: String(localized: "The server sent an unexpected message and the connection was reset. Run the query again."),
+            category: .protocolError
+        )
+    }
+
+    private static func isChannelFatal(_ error: OracleSQLError) -> Bool {
+        OracleChannelFatalCode.isChannelFatal(error.code.description)
     }
 
     func disconnect() {
@@ -345,9 +357,8 @@ final class OracleConnectionWrapper: @unchecked Sendable {
                 isTruncated: truncated
             )
         } catch let sqlError as OracleSQLError {
-            let detail = sqlError.serverInfo?.message ?? sqlError.description
             await queryGate.release()
-            throw OracleError(message: detail)
+            throw mapQueryError(sqlError)
         } catch let error as OracleError {
             await queryGate.release()
             throw error
@@ -431,9 +442,8 @@ final class OracleConnectionWrapper: @unchecked Sendable {
             await queryGate.release()
             continuation.finish()
         } catch let sqlError as OracleSQLError {
-            let detail = sqlError.serverInfo?.message ?? sqlError.description
             await queryGate.release()
-            throw OracleError(message: detail)
+            throw mapQueryError(sqlError)
         } catch is CancellationError {
             await queryGate.release()
             throw CancellationError()

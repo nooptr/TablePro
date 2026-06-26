@@ -18,7 +18,7 @@ struct MainWindowToolbarValidationTests {
         hasDataPendingChanges: Bool = false,
         blocksAllWrites: Bool = false,
         fileBased: Bool = false,
-        supportsDatabaseSwitching: Bool = true,
+        supportsContainerSwitching: Bool = true,
         supportsImport: Bool = true,
         supportsServerDashboard: Bool = true
     ) -> MainWindowToolbar.ValidationContext {
@@ -29,7 +29,7 @@ struct MainWindowToolbarValidationTests {
             hasDataPendingChanges: hasDataPendingChanges,
             blocksAllWrites: blocksAllWrites,
             fileBased: fileBased,
-            supportsDatabaseSwitching: supportsDatabaseSwitching,
+            supportsContainerSwitching: supportsContainerSwitching,
             supportsImport: supportsImport,
             supportsServerDashboard: supportsServerDashboard
         )
@@ -81,8 +81,8 @@ struct MainWindowToolbarValidationTests {
 
     @Test("Database switcher requires plugin support")
     func databaseRequiresPluginSupport() {
-        let unsupported = makeContext(connected: true, supportsDatabaseSwitching: false)
-        let supported = makeContext(connected: true, supportsDatabaseSwitching: true)
+        let unsupported = makeContext(connected: true, supportsContainerSwitching: false)
+        let supported = makeContext(connected: true, supportsContainerSwitching: true)
         #expect(MainWindowToolbar.isEnabled(itemIdentifier: MainWindowToolbar.database, context: unsupported) == false)
         #expect(MainWindowToolbar.isEnabled(itemIdentifier: MainWindowToolbar.database, context: supported) == true)
     }
@@ -145,7 +145,7 @@ struct MainWindowToolbarValidationTests {
 
     @Test("Toolbar identifier is stable across instances so AppKit autosave can persist customizations")
     func toolbarIdentifierIsStable() {
-        #expect(MainWindowToolbar.toolbarIdentifier == "com.TablePro.main.toolbar")
+        #expect(MainWindowToolbar.toolbarIdentifier == "com.TablePro.main.toolbar.v2")
     }
 
     @Test("Toolbar is configured for user customization and autosave")

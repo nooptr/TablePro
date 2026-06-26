@@ -30,6 +30,10 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
         didSet { view.window?.title = windowTitle }
     }
 
+    var windowSubtitle: String {
+        didSet { view.window?.subtitle = windowSubtitle }
+    }
+
     // MARK: - Split View Items
 
     private var sidebarSplitItem: NSSplitViewItem!
@@ -39,7 +43,15 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
     private var sidebarContainer: SidebarContainerViewController!
     private var detailHosting: NSHostingController<AnyView>!
     private var inspectorHosting: NSHostingController<AnyView>!
-    private var hasMaterializedInspector = false
+
+    // MARK: - Panel Layout State
+
+    private var splitAutosaveName: NSSplitView.AutosaveName {
+        if let connectionId = payload?.connectionId ?? currentSession?.connection.id {
+            return "com.TablePro.mainSplit.\(connectionId.uuidString)"
+        }
+        return "com.TablePro.mainSplit"
+    }
 
     // MARK: - Toolbar
 
@@ -77,6 +89,40 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
         return String(localized: "SQL Query")
     }
 
+    static func resolveDefaultSubtitle(tab: QueryTab?, connection: DatabaseConnection) -> String {
+        tableSubtitle(
+            isTable: tab?.tabType == .table,
+            tableName: tab?.tableContext.tableName,
+            databaseName: tab?.tableContext.databaseName ?? "",
+            schemaName: tab?.tableContext.schemaName,
+            fallback: connection.name
+        )
+    }
+
+    static func resolveDefaultSubtitle(payload: EditorTabPayload?, connection: DatabaseConnection) -> String {
+        tableSubtitle(
+            isTable: payload?.tabType == .table,
+            tableName: payload?.tableName,
+            databaseName: payload?.databaseName ?? "",
+            schemaName: payload?.schemaName,
+            fallback: connection.name
+        )
+    }
+
+    private static func tableSubtitle(
+        isTable: Bool,
+        tableName: String?,
+        databaseName: String,
+        schemaName: String?,
+        fallback: String
+    ) -> String {
+        guard isTable, let tableName, !tableName.isEmpty, !databaseName.isEmpty else { return fallback }
+        if let schemaName, !schemaName.isEmpty {
+            return "\(databaseName) · \(schemaName)"
+        }
+        return databaseName
+    }
+
     // MARK: - Init
 
     init(payload: EditorTabPayload?, sessionState: SessionStateFactory.SessionState?) {
@@ -105,8 +151,15 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
         }
         self.currentSession = resolvedSession
 
+        let subtitleConnection = self.payloadConnection ?? resolvedSession?.connection
+        if let subtitleConnection {
+            self.windowSubtitle = Self.resolveDefaultSubtitle(payload: payload, connection: subtitleConnection)
+        } else {
+            self.windowSubtitle = ""
+        }
+
         if let session = resolvedSession {
-            self.rightPanelState = RightPanelState()
+            self.rightPanelState = RightPanelState(connectionId: session.connection.id)
             let state: SessionStateFactory.SessionState
             if let payloadId = payload?.id,
                let pending = SessionStateFactory.consumePending(for: payloadId) {
@@ -139,45 +192,31 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
 
         splitView.dividerStyle = .thin
         splitView.isVertical = true
-        splitView.autosaveName = "com.TablePro.mainSplit"
 
-        sidebarContainer = SidebarContainerViewController(rootView: AnyView(buildSidebarView()))
+        sidebarContainer = SidebarContainerViewController(rootView: AnyView(Color.clear))
         sidebarSplitItem = NSSplitViewItem(sidebarWithViewController: sidebarContainer)
         sidebarSplitItem.canCollapse = true
-        sidebarSplitItem.minimumThickness = 280
-        sidebarSplitItem.maximumThickness = 600
+        sidebarSplitItem.minimumThickness = Self.sidebarMinThickness
+        sidebarSplitItem.maximumThickness = Self.sidebarMaxThickness
         addSplitViewItem(sidebarSplitItem)
 
-        detailHosting = NSHostingController(rootView: AnyView(buildDetailView()))
+        detailHosting = NSHostingController(rootView: AnyView(Color.clear))
         detailSplitItem = NSSplitViewItem(viewController: detailHosting)
-        detailSplitItem.minimumThickness = 400
+        detailSplitItem.minimumThickness = Self.detailMinThickness
         detailSplitItem.holdingPriority = .defaultLow
         addSplitViewItem(detailSplitItem)
 
-        let inspectorPresented = UserDefaults.standard.bool(forKey: Self.inspectorPresentedKey)
-        let initialInspectorContent: AnyView
-        if inspectorPresented {
-            initialInspectorContent = AnyView(buildInspectorView())
-            hasMaterializedInspector = true
-        } else {
-            initialInspectorContent = AnyView(Color.clear)
-        }
-        inspectorHosting = NSHostingController(rootView: initialInspectorContent)
+        inspectorHosting = NSHostingController(rootView: AnyView(Color.clear))
         inspectorSplitItem = NSSplitViewItem(inspectorWithViewController: inspectorHosting)
         inspectorSplitItem.canCollapse = true
-        inspectorSplitItem.minimumThickness = 270
-        inspectorSplitItem.maximumThickness = 400
+        inspectorSplitItem.minimumThickness = Self.inspectorMinThickness
+        inspectorSplitItem.maximumThickness = NSSplitViewItem.unspecifiedDimension
         addSplitViewItem(inspectorSplitItem)
 
-        if currentSession?.driver == nil {
-            sidebarSplitItem.isCollapsed = true
-        } else if let session = currentSession, let coordinator = sessionState?.coordinator {
-            sidebarContainer.updateSidebarState(
-                SharedSidebarState.forConnection(session.connection.id),
-                windowState: coordinator.windowSidebarState
-            )
-        }
-        inspectorSplitItem.isCollapsed = !inspectorPresented
+        splitView.autosaveName = splitAutosaveName
+        applyDefaultCollapseStateIfNoAutosave()
+
+        rebuildPanes()
     }
 
     override func splitViewDidResizeSubviews(_ notification: Notification) {
@@ -185,20 +224,12 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
         recomputeWindowMinSize()
     }
 
-    private func materializeInspectorIfNeeded() {
-        guard !hasMaterializedInspector, let inspectorHosting else { return }
-        hasMaterializedInspector = true
-        inspectorHosting.rootView = AnyView(buildInspectorView())
-    }
-
     override func viewWillAppear() {
         super.viewWillAppear()
         guard let window = view.window else { return }
 
         window.title = windowTitle
-        if let session = currentSession {
-            window.subtitle = session.connection.name
-        }
+        window.subtitle = windowSubtitle
 
         if let sessionState {
             sessionState.coordinator.inspectorProxy = self
@@ -206,10 +237,9 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
             installToolbar(coordinator: sessionState.coordinator)
         }
 
-        if let currentSession, let coordinator = sessionState?.coordinator {
+        if let currentSession, sessionState != nil {
             sidebarContainer.updateSidebarState(
-                SharedSidebarState.forConnection(currentSession.connection.id),
-                windowState: coordinator.windowSidebarState
+                SharedSidebarState.forConnection(currentSession.connection.id)
             )
         }
 
@@ -280,12 +310,8 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
                 sessionState?.coordinator.teardown()
                 sessionState = nil
                 currentSession = nil
-                sidebarContainer.updateSidebarState(nil, windowState: nil)
-                if view.window?.isVisible == true {
-                    sidebarSplitItem.animator().isCollapsed = true
-                } else {
-                    sidebarSplitItem.isCollapsed = true
-                }
+                sidebarContainer.updateSidebarState(nil)
+                sidebarContainer.rootView = AnyView(buildSidebarView())
             }
             return
         }
@@ -298,11 +324,11 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
         if payload?.tableName == nil,
            windowTitle == String(localized: "SQL Query") || windowTitle.hasSuffix(" Query") {
             windowTitle = newSession.connection.name
+            windowSubtitle = newSession.connection.name
         }
-        view.window?.subtitle = newSession.connection.name
 
         if rightPanelState == nil {
-            rightPanelState = RightPanelState()
+            rightPanelState = RightPanelState(connectionId: newSession.connection.id)
         }
         if sessionState == nil {
             let state = SessionStateFactory.create(connection: newSession.connection, payload: payload)
@@ -312,12 +338,6 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
             installToolbar(coordinator: state.coordinator)
         }
 
-        let collapseSidebar = newSession.driver == nil
-        if view.window?.isVisible == true {
-            sidebarSplitItem.animator().isCollapsed = collapseSidebar
-        } else {
-            sidebarSplitItem.isCollapsed = collapseSidebar
-        }
         rebuildPanes()
     }
 
@@ -325,10 +345,9 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
 
     private func rebuildPanes() {
         sidebarContainer.rootView = AnyView(buildSidebarView())
-        if let currentSession, let coordinator = sessionState?.coordinator {
+        if let currentSession, sessionState != nil {
             sidebarContainer.updateSidebarState(
-                SharedSidebarState.forConnection(currentSession.connection.id),
-                windowState: coordinator.windowSidebarState
+                SharedSidebarState.forConnection(currentSession.connection.id)
             )
         }
         detailHosting.rootView = AnyView(buildDetailView())
@@ -383,6 +402,7 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
                 connection: currentSession.connection,
                 payload: payload,
                 windowTitle: windowTitleBinding,
+                windowSubtitle: windowSubtitleBinding,
                 sidebarState: SharedSidebarState.forConnection(currentSession.connection.id),
                 pendingTruncates: sessionPendingTruncatesBinding,
                 pendingDeletes: sessionPendingDeletesBinding,
@@ -466,6 +486,13 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
         )
     }
 
+    private var windowSubtitleBinding: Binding<String> {
+        Binding(
+            get: { [weak self] in self?.windowSubtitle ?? "" },
+            set: { [weak self] in self?.windowSubtitle = $0 }
+        )
+    }
+
     // MARK: - InspectorVisibilityProxy
 
     var isInspectorVisible: Bool {
@@ -474,15 +501,13 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
     }
 
     func showInspector() {
-        materializeInspectorIfNeeded()
+        inspectorHosting.rootView = AnyView(buildInspectorView())
         inspectorSplitItem?.animator().isCollapsed = false
-        UserDefaults.standard.set(true, forKey: Self.inspectorPresentedKey)
         recomputeWindowMinSize()
     }
 
     func hideInspector() {
         inspectorSplitItem?.animator().isCollapsed = true
-        UserDefaults.standard.set(false, forKey: Self.inspectorPresentedKey)
         recomputeWindowMinSize()
     }
 
@@ -521,15 +546,19 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
 
     private static let baseWindowMinWidth: CGFloat = 720
     private static let baseWindowMinHeight: CGFloat = 480
+    private static let sidebarMinThickness: CGFloat = 280
+    private static let sidebarMaxThickness: CGFloat = 600
+    private static let detailMinThickness: CGFloat = 400
+    private static let inspectorMinThickness: CGFloat = 270
 
     private func recomputeWindowMinSize() {
         guard let window = view.window else { return }
         let sidebarVisible = !(sidebarSplitItem?.isCollapsed ?? true)
         let inspectorVisible = !(inspectorSplitItem?.isCollapsed ?? true)
 
-        let detailMin: CGFloat = detailSplitItem?.minimumThickness ?? 400
-        let sidebarMin: CGFloat = sidebarSplitItem?.minimumThickness ?? 280
-        let inspectorMin: CGFloat = inspectorSplitItem?.minimumThickness ?? 270
+        let detailMin = Self.detailMinThickness
+        let sidebarMin = Self.sidebarMinThickness
+        let inspectorMin = Self.inspectorMinThickness
         let dividerThickness = splitView.dividerThickness
 
         var width: CGFloat = detailMin
@@ -561,7 +590,11 @@ internal final class MainSplitViewController: NSSplitViewController, InspectorVi
         }
     }
 
-    // MARK: - Constants
+    // MARK: - Panel Layout Persistence
 
-    private static let inspectorPresentedKey = "com.TablePro.rightPanel.isPresented"
+    private func applyDefaultCollapseStateIfNoAutosave() {
+        let key = "NSSplitView Subview Frames \(splitAutosaveName)"
+        guard UserDefaults.standard.object(forKey: key) == nil else { return }
+        inspectorSplitItem.isCollapsed = true
+    }
 }

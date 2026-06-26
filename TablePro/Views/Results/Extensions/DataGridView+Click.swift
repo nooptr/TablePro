@@ -7,15 +7,7 @@ import AppKit
 import SwiftUI
 
 extension TableViewCoordinator {
-    // MARK: - Click Handlers
-
-    @objc func handleDoubleClick(_ sender: NSTableView) {
-        let row = sender.clickedRow
-        let column = sender.clickedColumn
-        guard row >= 0, column > 0 else { return }
-        guard let columnIndex = DataGridView.dataColumnIndex(for: column, in: sender, schema: identitySchema) else { return }
-        handleCellInteraction(row: row, tableColumn: column, columnIndex: columnIndex, tableView: sender)
-    }
+    // MARK: - Cell Interaction
 
     func handleCellInteraction(row: Int, tableColumn: Int, columnIndex: Int, tableView: NSTableView) {
         guard let context = makeCellContext(row: row, columnIndex: columnIndex) else { return }
@@ -62,9 +54,6 @@ extension TableViewCoordinator {
             isTableEditable: isEditable,
             isRowDeleted: changeManager.isRowDeleted(row),
             isImmutableColumn: immutable.contains(columnName),
-            columnName: columnName,
-            connectionId: connectionId,
-            tableName: tableName,
             displayFormatOverride: override
         )
     }
@@ -76,11 +65,7 @@ extension TableViewCoordinator {
         guard row >= 0, columnIndex >= 0 else { return }
         guard !changeManager.isRowDeleted(row) else { return }
         guard let tableView else { return }
-        guard let column = DataGridView.tableColumnIndex(
-            for: columnIndex,
-            in: tableView,
-            schema: identitySchema
-        ) else { return }
+        guard let column = tableColumnIndex(for: columnIndex) else { return }
 
         if let dropdownCols = dropdownColumns, dropdownCols.contains(columnIndex) {
             showDropdownMenu(tableView: tableView, row: row, column: column, columnIndex: columnIndex)

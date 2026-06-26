@@ -85,7 +85,7 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
         case let d as Date:
             return Self.iso8601Formatter.string(from: d)
         case let data as Data:
-            return data.map { String(format: "%02x", $0) }.joined()
+            return data.hexEncoded
         case let uuid as UUID:
             return uuid.uuidString
         default:
@@ -114,6 +114,10 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
     func disconnect() {
         pluginDriver.disconnect()
         status = .disconnected
+    }
+
+    func ping() async throws {
+        try await pluginDriver.ping()
     }
 
     func applyQueryTimeout(_ seconds: Int) async throws {
@@ -250,6 +254,35 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
             )
         }
     }
+
+    func fetchTriggers(table: String) async throws -> [TriggerInfo] {
+        let pluginTriggers = try await pluginDriver.fetchTriggers(table: table, schema: pluginDriver.currentSchema)
+        return pluginTriggers.map { trigger in
+            TriggerInfo(
+                name: trigger.name,
+                timing: trigger.timing,
+                event: trigger.event,
+                statement: trigger.statement,
+                enabled: trigger.enabled
+            )
+        }
+    }
+
+    func createTriggerTemplate(table: String) -> String? {
+        pluginDriver.createTriggerTemplate(table: table, schema: pluginDriver.currentSchema)
+    }
+
+    func fetchTriggerDefinition(name: String, table: String) async throws -> String? {
+        try await pluginDriver.fetchTriggerDefinition(name: name, table: table, schema: pluginDriver.currentSchema)
+    }
+
+    func generateDropTriggerSQL(name: String, table: String) -> String? {
+        pluginDriver.generateDropTriggerSQL(name: name, table: table, schema: pluginDriver.currentSchema)
+    }
+
+    var triggerEditUsesReplace: Bool { pluginDriver.triggerEditUsesReplace }
+
+    var supportsTransactionalDDL: Bool { pluginDriver.supportsTransactionalDDL }
 
     func fetchApproximateRowCount(table: String) async throws -> Int? {
         try await pluginDriver.fetchApproximateRowCount(table: table, schema: pluginDriver.currentSchema)
@@ -390,6 +423,14 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
 
     func dropDatabase(name: String) async throws {
         try await pluginDriver.dropDatabase(name: name)
+    }
+
+    func fetchSessionContexts() async throws -> [PluginSessionContext]? {
+        try await pluginDriver.fetchSessionContexts()
+    }
+
+    func switchSessionContext(id: String, to value: String) async throws {
+        try await pluginDriver.switchSessionContext(id: id, to: value)
     }
 
     // MARK: - Batch Operations
@@ -623,6 +664,9 @@ final class PluginDriverAdapter: DatabaseDriver, SchemaSwitchable {
         )
         result.isTruncated = pluginResult.isTruncated
         result.statusMessage = pluginResult.statusMessage
+        result.columnMeta = pluginResult.columnMeta?.map {
+            ResultColumnMeta(isPrimaryKey: $0.isPrimaryKey, isNullable: $0.isNullable, isAutoIncrement: $0.isIdentity)
+        }
         return result
     }
 

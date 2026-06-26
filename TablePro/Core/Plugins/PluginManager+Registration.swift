@@ -34,7 +34,6 @@ extension PluginManager {
                     driverPlugins[additionalId] = driver
                 }
 
-                // Self-register plugin metadata from the DriverPlugin protocol.
                 let snapshot = PluginMetadataRegistry.shared.buildMetadataSnapshot(
                     from: driverType,
                     isDownloadable: driverType.isDownloadable
@@ -262,6 +261,31 @@ extension PluginManager {
         return Array(importPlugins.values)
     }
 
+    func importPlugins(for databaseType: DatabaseType) -> [any ImportFormatPlugin] {
+        guard supportsImport(for: databaseType) else { return [] }
+        let typeId = databaseType.rawValue
+        return allImportPlugins()
+            .filter { plugin in
+                let supported = type(of: plugin).supportedDatabaseTypeIds
+                let excluded = type(of: plugin).excludedDatabaseTypeIds
+                if !supported.isEmpty && !supported.contains(typeId) { return false }
+                if excluded.contains(typeId) { return false }
+                return true
+            }
+            .sorted { lhs, rhs in
+                let lhsRowBased = type(of: lhs).requiresTargetTable
+                let rhsRowBased = type(of: rhs).requiresTargetTable
+                if lhsRowBased != rhsRowBased { return !lhsRowBased }
+                return type(of: lhs).formatDisplayName < type(of: rhs).formatDisplayName
+            }
+    }
+
+    func importFormatOptions(for databaseType: DatabaseType) -> [ImportFormatOption] {
+        importPlugins(for: databaseType).map {
+            ImportFormatOption(id: type(of: $0).formatId, name: type(of: $0).formatDisplayName)
+        }
+    }
+
     /// Returns a temporary plugin driver for query building (buildBrowseQuery), or nil
     /// if the plugin doesn't implement custom query building (NoSQL hooks).
     func queryBuildingDriver(for databaseType: DatabaseType) -> (any PluginDatabaseDriver)? {
@@ -316,6 +340,20 @@ extension PluginManager {
             .capabilities.supportsSchemaSwitching ?? false
     }
 
+    func containerSwitchTarget(for databaseType: DatabaseType) -> ContainerSwitchTarget? {
+        if supportsDatabaseSwitching(for: databaseType) {
+            return .database
+        }
+        if supportsSchemaSwitching(for: databaseType) {
+            return .schema
+        }
+        return nil
+    }
+
+    func supportsContainerSwitching(for databaseType: DatabaseType) -> Bool {
+        containerSwitchTarget(for: databaseType) != nil
+    }
+
     func supportsImport(for databaseType: DatabaseType) -> Bool {
         PluginMetadataRegistry.shared.snapshot(forTypeId: databaseType.pluginTypeId)?
             .capabilities.supportsImport ?? true
@@ -349,6 +387,15 @@ extension PluginManager {
     func tableEntityName(for databaseType: DatabaseType) -> String {
         PluginMetadataRegistry.shared.snapshot(forTypeId: databaseType.pluginTypeId)?
             .schema.tableEntityName ?? "Tables"
+    }
+
+    func containerEntityName(for databaseType: DatabaseType) -> String {
+        PluginMetadataRegistry.shared.snapshot(forTypeId: databaseType.pluginTypeId)?
+            .schema.containerEntityName ?? "Database"
+    }
+
+    func containerEntityNamePlural(for databaseType: DatabaseType) -> String {
+        containerEntityName(for: databaseType) + "s"
     }
 
     func supportsCascadeDrop(for databaseType: DatabaseType) -> Bool {

@@ -26,6 +26,8 @@ struct ExportDialog: View {
     @State private var showProgressDialog = false
     @State private var showSuccessDialog = false
     @State private var exportedFileURL: URL?
+    @State private var settingsSnapshot: PluginSettingsSnapshot?
+    @State private var exportSucceeded = false
 
     // MARK: - User Preferences
 
@@ -70,17 +72,14 @@ struct ExportDialog: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Content
             HStack(spacing: 0) {
                 if !isQueryResultsMode {
-                    // Left: Table tree view
                     tableSelectionView
                         .frame(minWidth: leftPanelWidth)
 
                     Divider()
                 }
 
-                // Right: Export options
                 exportOptionsView
                     .frame(width: 280)
             }
@@ -88,17 +87,24 @@ struct ExportDialog: View {
 
             Divider()
 
-            // Footer
             footerView
         }
         .frame(width: dialogWidth)
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear {
             let available = availableFormats
-            if !available.contains(where: { type(of: $0).formatId == config.formatId }) {
-                if let first = available.first {
-                    config.formatId = type(of: first).formatId
-                }
+            if let lastFormatId = TransferDialogStorage.shared.loadLastExportFormatId(),
+               available.contains(where: { type(of: $0).formatId == lastFormatId }) {
+                config.formatId = lastFormatId
+            } else if !available.contains(where: { type(of: $0).formatId == config.formatId }),
+                      let first = available.first {
+                config.formatId = type(of: first).formatId
+            }
+            captureSettingsSnapshot()
+        }
+        .onDisappear {
+            if !exportSucceeded {
+                restoreSettingsSnapshot()
             }
         }
         .onChange(of: config.formatId) {
@@ -199,7 +205,6 @@ struct ExportDialog: View {
 
     private var tableSelectionView: some View {
         VStack(spacing: 0) {
-            // Header with title and selection count
             HStack {
                 Text("Items")
                     .font(.subheadline.weight(.medium))
@@ -222,7 +227,6 @@ struct ExportDialog: View {
 
             Divider()
 
-            // Tree view or loading indicator
             if isLoading {
                 VStack {
                     Spacer()
@@ -260,7 +264,6 @@ struct ExportDialog: View {
 
     private var exportOptionsView: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Format picker with selection count
             VStack(alignment: .leading, spacing: 12) {
                 if availableFormats.isEmpty {
                     HStack {
@@ -323,12 +326,21 @@ struct ExportDialog: View {
 
             Divider()
 
-            // Format-specific options
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     if let settable = currentPlugin as? any SettablePluginDiscoverable,
                        let optionsView = settable.settingsView() {
                         optionsView
+
+                        HStack {
+                            Spacer()
+                            Button("Reset to Defaults") {
+                                resetCurrentFormatSettings()
+                            }
+                            .buttonStyle(.link)
+                            .font(.callout)
+                        }
+                        .padding(.top, 8)
                     }
                 }
                 .padding(.horizontal, 16)
@@ -339,7 +351,6 @@ struct ExportDialog: View {
 
             Divider()
 
-            // File name section
             VStack(alignment: .leading, spacing: 6) {
                 Text("File name")
                     .font(.subheadline)
@@ -357,7 +368,6 @@ struct ExportDialog: View {
                         .fixedSize()
                 }
 
-                // Show validation error if filename is invalid
                 if let validationError = fileNameValidationError {
                     Text(validationError)
                         .font(.subheadline)
@@ -486,7 +496,6 @@ struct ExportDialog: View {
             return String(localized: "Filename cannot be '.' or '..' or contain path traversal")
         }
 
-        // Check for Windows reserved device names (case-insensitive)
         let baseName = name.components(separatedBy: ".").first ?? name
         if Self.windowsReservedNames.contains(baseName.uppercased()) {
             return String(format: String(localized: "'%@' is a reserved Windows device name"), baseName)
@@ -515,6 +524,29 @@ struct ExportDialog: View {
     }
 
     // MARK: - Actions
+
+    private func captureSettingsSnapshot() {
+        settingsSnapshot = PluginSettingsSnapshot(
+            plugins: availableFormats.compactMap { $0 as? any SettablePluginDiscoverable }
+        )
+    }
+
+    private func restoreSettingsSnapshot() {
+        settingsSnapshot?.restore()
+        settingsSnapshot = nil
+    }
+
+    private func resetCurrentFormatSettings() {
+        guard let settable = currentPlugin as? any SettablePluginDiscoverable else { return }
+        settable.resetSettingsToDefaults()
+        settingsSnapshot?.recapture(settable)
+    }
+
+    private func recordSuccessfulExport() {
+        exportSucceeded = true
+        TransferDialogStorage.shared.saveLastExportFormatId(config.formatId)
+        settingsSnapshot = nil
+    }
 
     /// Instantly populate the current database from sidebar tables (no network).
     private func populateFromSidebarTables() {
@@ -634,7 +666,6 @@ struct ExportDialog: View {
             databaseItems = items
             isLoading = false
 
-            // Set default filename based on selection
             if preselectedTables.count == 1, let first = preselectedTables.first {
                 config.fileName = first
             } else if !connection.database.isEmpty {
@@ -803,6 +834,7 @@ struct ExportDialog: View {
 
             showProgressDialog = false
             isExporting = false
+            recordSuccessfulExport()
 
             if hideSuccessDialog {
                 isPresented = false
@@ -847,6 +879,7 @@ struct ExportDialog: View {
 
             showProgressDialog = false
             isExporting = false
+            recordSuccessfulExport()
 
             if hideSuccessDialog {
                 isPresented = false

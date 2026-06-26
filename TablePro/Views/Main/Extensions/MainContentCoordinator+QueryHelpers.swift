@@ -11,18 +11,8 @@ extension MainContentCoordinator {
         queryExecutionCoordinator.resolveRowCap(sql: sql, tabType: tabType)
     }
 
-    func parseSchemaMetadata(_ schema: SchemaResult) -> ParsedSchemaMetadata {
+    func parseSchemaMetadata(_ schema: FetchedTableSchema) -> ParsedSchemaMetadata {
         queryExecutionCoordinator.parseSchemaMetadata(schema)
-    }
-
-    func awaitSchemaResult(
-        parallelTask: Task<SchemaResult, Error>?,
-        tableName: String
-    ) async -> SchemaResult? {
-        await queryExecutionCoordinator.awaitSchemaResult(
-            parallelTask: parallelTask,
-            tableName: tableName
-        )
     }
 
     func isMetadataCached(tabId: UUID, tableName: String) -> Bool {
@@ -70,14 +60,14 @@ extension MainContentCoordinator {
         tabId: UUID,
         capturedGeneration: Int,
         connectionType: DatabaseType,
-        schemaResult: SchemaResult?
+        schemaTask: Task<FetchedTableSchema, Error>?
     ) {
         queryExecutionCoordinator.launchPhase2Work(
             tableName: tableName,
             tabId: tabId,
             capturedGeneration: capturedGeneration,
             connectionType: connectionType,
-            schemaResult: schemaResult
+            schemaTask: schemaTask
         )
     }
 

@@ -154,6 +154,13 @@ struct AppMenuCommands: Commands {
         settingsManager.keyboard.keyboardShortcut(for: action)
     }
 
+    private var openContainerMenuTitle: String {
+        let containerName = actions.map {
+            PluginManager.shared.containerEntityName(for: $0.currentDatabaseType)
+        } ?? "Database"
+        return String(format: String(localized: "Open %@..."), containerName)
+    }
+
     /// Prefers the focused scene value; falls back to the coordinator back-reference
     /// so Cmd+W still routes through `closeTab()` (with its unsaved-changes dialog)
     /// when focus is inside an AppKit subview and `@FocusedValue` has not resolved.
@@ -230,11 +237,16 @@ struct AppMenuCommands: Commands {
         //    - Clean method calls, no global event bus
         //
         // 3. **NotificationCenter** (Multi-listener broadcasts only):
-        //    - refreshData (Sidebar + Coordinator + StructureView)
+        //    - refreshData: targeted per-connection data-changed signal
         //    - Legitimate broadcasts where multiple views respond
 
         // File menu
         CommandGroup(replacing: .newItem) {
+            Button(String(localized: "New Connection...")) {
+                WindowOpener.shared.openConnectionForm()
+            }
+            .optionalKeyboardShortcut(shortcut(for: .newConnection))
+
             Button("Manage Connections") {
                 WindowOpener.shared.openWelcome()
             }
@@ -261,11 +273,11 @@ struct AppMenuCommands: Commands {
             }
             .disabled(!(actions?.isConnected ?? false) || actions?.isReadOnly ?? false)
 
-            Button("Open Database...") {
+            Button(openContainerMenuTitle) {
                 actions?.openDatabaseSwitcher()
             }
             .optionalKeyboardShortcut(shortcut(for: .openDatabase))
-            .disabled(!(actions?.isConnected ?? false) || !(actions?.supportsDatabaseSwitching ?? false))
+            .disabled(!(actions?.isConnected ?? false) || !(actions?.supportsContainerSwitching ?? false))
 
             Button(String(localized: "Open File...")) {
                 actions?.openSQLFile()
@@ -339,14 +351,11 @@ struct AppMenuCommands: Commands {
             }
             .disabled(!(actions?.isConnected ?? false))
 
-            Button("Import...") {
-                actions?.importTables()
-            }
-            .optionalKeyboardShortcut(shortcut(for: .importData))
-            .disabled(
-                !(actions?.isConnected ?? false)
-                    || actions?.isReadOnly ?? false
-                    || !(actions.map { PluginManager.shared.supportsImport(for: $0.currentDatabaseType) } ?? true)
+            ImportMenuItems(
+                formats: actions?.availableImportFormats ?? [],
+                isDisabled: !(actions?.isConnected ?? false) || (actions?.isReadOnly ?? false),
+                shortcut: shortcut(for: .importData),
+                action: { formatId in actions?.importTables(formatId: formatId) }
             )
 
             Button(String(localized: "Backup Dump\u{2026}")) {
@@ -414,7 +423,7 @@ struct AppMenuCommands: Commands {
             .disabled(!(actions?.isQueryExecuting ?? false))
 
             Button("Refresh") {
-                AppCommands.shared.refreshData.send(nil)
+                actions?.refresh()
             }
             .optionalKeyboardShortcut(shortcut(for: .refresh))
             .disabled(!(actions?.isConnected ?? false))
@@ -533,6 +542,18 @@ struct AppMenuCommands: Commands {
             }
             .optionalKeyboardShortcut(commandFRoute == .tableFilter ? nil : KeyboardShortcut("f", modifiers: .command))
             .disabled(commandFRoute == .tableFilter)
+
+            Button(String(localized: "Find Next")) {
+                EditorEventRouter.shared.findNext()
+            }
+            .optionalKeyboardShortcut(shortcut(for: .findNext))
+            .disabled(!(actions?.isConnected ?? false))
+
+            Button(String(localized: "Find Previous")) {
+                EditorEventRouter.shared.findPrevious()
+            }
+            .optionalKeyboardShortcut(shortcut(for: .findPrevious))
+            .disabled(!(actions?.isConnected ?? false))
 
             Divider()
 
@@ -669,7 +690,6 @@ struct AppMenuCommands: Commands {
 
         // Tab navigation shortcuts — native macOS window tabs
         CommandGroup(after: .windowArrangement) {
-            // Tab switching by number (Cmd+1 through Cmd+9)
             ForEach(1...9, id: \.self) { number in
                 Button("Select Tab \(number)") {
                     actions?.selectTab(number: number)
@@ -737,7 +757,6 @@ struct AppMenuCommands: Commands {
 
 @main
 struct TableProApp: App {
-    // Connect AppKit delegate for proper window configuration
     @NSApplicationDelegateAdaptor(AppDelegate.self)
     var appDelegate
 
@@ -746,11 +765,17 @@ struct TableProApp: App {
     @State private var commandRegistry = CommandActionsRegistry.shared
 
     init() {
+        AppSettingsStorage.shared.migrateStartupBehaviorToReopenLastIfNeeded()
         AIProviderRegistration.registerAll()
 
         // Perform startup cleanup of query history if auto-cleanup is enabled
         Task {
             await QueryHistoryManager.shared.performStartupCleanup()
+        }
+
+        Task { @MainActor in
+            let activeIds = Set(ConnectionStorage.shared.loadConnections().map(\.id))
+            await SQLFavoriteManager.shared.pruneOrphaned(activeConnectionIds: activeIds)
         }
     }
 

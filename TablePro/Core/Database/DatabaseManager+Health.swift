@@ -17,7 +17,6 @@ extension DatabaseManager {
     /// Start health monitoring for a connection
     internal func startHealthMonitor(for connectionId: UUID) async {
         Self.logger.info("startHealthMonitor called for \(connectionId) (existing monitors: \(self.healthMonitors.count))")
-        // Stop any existing monitor
         await stopHealthMonitor(for: connectionId)
 
         let monitor = ConnectionHealthMonitor(
@@ -42,7 +41,7 @@ extension DatabaseManager {
                     return false
                 }
                 do {
-                    _ = try await mainDriver.execute(query: "SELECT 1")
+                    try await mainDriver.ping()
                     return true
                 } catch {
                     Self.logger.debug("Ping failed for \(connectionId): \(error.localizedDescription)")
@@ -62,6 +61,9 @@ extension DatabaseManager {
                         session.driver = result.driver
                         session.effectiveConnection = result.effectiveConnection
                         session.status = .connected
+                        if let schemaDriver = result.driver as? SchemaSwitchable {
+                            session.currentSchema = schemaDriver.currentSchema
+                        }
                     }
                     return true
                 } catch {
@@ -109,7 +111,6 @@ extension DatabaseManager {
     /// Creates a fresh driver, connects, and applies timeout for the given session.
     /// For SSH-tunneled sessions, rebuilds the tunnel before connecting the driver.
     internal func reconnectDriver(for session: ConnectionSession) async throws -> ReconnectResult {
-        // Disconnect existing driver
         session.driver?.disconnect()
 
         // Rebuild the tunnel if needed; otherwise reuse effective connection
@@ -147,21 +148,48 @@ extension DatabaseManager {
             throw error
         }
 
+        await applyTimeoutAndStartupCommands(
+            on: driver,
+            startupCommands: session.connection.startupCommands,
+            connectionName: session.connection.name
+        )
+        await restoreSchemaAndDatabase(
+            on: driver,
+            savedSchema: session.currentSchema,
+            savedDatabase: databaseSwitchRequiresReconnect(session.connection) ? nil : session.currentDatabase
+        )
+
+        return ReconnectResult(driver: driver, effectiveConnection: connectionForDriver)
+    }
+
+    func applyTimeoutAndStartupCommands(
+        on driver: DatabaseDriver,
+        startupCommands: String?,
+        connectionName: String
+    ) async {
         let timeoutSeconds = AppSettingsManager.shared.general.queryTimeoutSeconds
         do {
             try await driver.applyQueryTimeout(timeoutSeconds)
         } catch {
             Self.logger.warning(
-                "Query timeout not supported for \(session.connection.name): \(error.localizedDescription)"
+                "Query timeout not supported for \(connectionName): \(error.localizedDescription)"
             )
         }
 
-        await executeStartupCommands(
-            session.connection.startupCommands, on: driver, connectionName: session.connection.name
-        )
+        await executeStartupCommands(startupCommands, on: driver, connectionName: connectionName)
+    }
 
-        if let savedSchema = session.currentSchema,
-           let schemaDriver = driver as? SchemaSwitchable {
+    private func databaseSwitchRequiresReconnect(_ connection: DatabaseConnection) -> Bool {
+        PluginMetadataRegistry.shared.snapshot(forTypeId: connection.type.pluginTypeId)?
+            .capabilities.requiresReconnectForDatabaseSwitch ?? false
+    }
+
+    func restoreSchemaAndDatabase(
+        on driver: DatabaseDriver,
+        savedSchema: String?,
+        savedDatabase: String?
+    ) async {
+        if let savedSchema, let schemaDriver = driver as? SchemaSwitchable {
             do {
                 try await schemaDriver.switchSchema(to: savedSchema)
             } catch {
@@ -169,17 +197,13 @@ extension DatabaseManager {
             }
         }
 
-        // Restore database for MSSQL if session had a non-default database
-        if let savedDatabase = session.currentDatabase,
-           let adapter = driver as? PluginDriverAdapter {
+        if let savedDatabase, let adapter = driver as? PluginDriverAdapter {
             do {
                 try await adapter.switchDatabase(to: savedDatabase)
             } catch {
                 Self.logger.warning("Failed to restore database '\(savedDatabase)' on reconnect: \(error.localizedDescription)")
             }
         }
-
-        return ReconnectResult(driver: driver, effectiveConnection: connectionForDriver)
     }
 
     /// Stop health monitoring for a connection
@@ -202,7 +226,6 @@ extension DatabaseManager {
 
         Self.logger.info("Manual reconnect requested for: \(session.connection.name)")
 
-        // Update status to connecting
         updateSession(sessionId) { session in
             session.status = .connecting
         }
@@ -210,7 +233,6 @@ extension DatabaseManager {
         await SchemaService.shared.invalidate(connectionId: sessionId)
         await DatabaseTreeMetadataService.shared.handleReconnect(connectionId: sessionId)
 
-        // Stop existing health monitor
         await stopHealthMonitor(for: sessionId)
 
         do {
@@ -222,7 +244,10 @@ extension DatabaseManager {
 
             // Resolve password for prompt-for-password connections
             var passwordOverride = activeSessions[sessionId]?.cachedPassword
-            if session.connection.promptForPassword && passwordOverride == nil {
+            if session.connection.promptForPassword,
+               !pluginManager.hidesPassword(for: session.connection),
+               passwordOverride == nil
+            {
                 let isApiOnly = pluginManager.connectionMode(for: session.connection.type) == .apiOnly
                 guard let prompted = await PasswordPromptHelper.prompt(
                     connectionName: session.connection.name,
@@ -235,7 +260,6 @@ extension DatabaseManager {
                 passwordOverride = prompted
             }
 
-            // Create new driver and connect
             let driver = try await DatabaseDriverFactory.createDriver(
                 for: effectiveConnection,
                 passwordOverride: passwordOverride,
@@ -243,43 +267,24 @@ extension DatabaseManager {
             )
             try await driver.connect()
 
-            let timeoutSeconds = AppSettingsManager.shared.general.queryTimeoutSeconds
-            do {
-                try await driver.applyQueryTimeout(timeoutSeconds)
-            } catch {
-                Self.logger.warning(
-                    "Query timeout not supported for \(session.connection.name): \(error.localizedDescription)"
-                )
-            }
-
-            await executeStartupCommands(
-                session.connection.startupCommands, on: driver, connectionName: session.connection.name
+            await applyTimeoutAndStartupCommands(
+                on: driver,
+                startupCommands: session.connection.startupCommands,
+                connectionName: session.connection.name
+            )
+            await restoreSchemaAndDatabase(
+                on: driver,
+                savedSchema: activeSessions[sessionId]?.currentSchema,
+                savedDatabase: databaseSwitchRequiresReconnect(session.connection) ? nil : activeSessions[sessionId]?.currentDatabase
             )
 
-            if let savedSchema = activeSessions[sessionId]?.currentSchema,
-               let schemaDriver = driver as? SchemaSwitchable {
-                do {
-                    try await schemaDriver.switchSchema(to: savedSchema)
-                } catch {
-                    Self.logger.warning("Failed to restore schema '\(savedSchema)' on reconnect: \(error.localizedDescription)")
-                }
-            }
-
-            // Restore database for MSSQL if session had a non-default database
-            if let savedDatabase = activeSessions[sessionId]?.currentDatabase,
-               let adapter = driver as? PluginDriverAdapter {
-                do {
-                    try await adapter.switchDatabase(to: savedDatabase)
-                } catch {
-                    Self.logger.warning("Failed to restore database '\(savedDatabase)' on reconnect: \(error.localizedDescription)")
-                }
-            }
-
-            // Update session
             updateSession(sessionId) { session in
                 session.driver = driver
                 session.status = .connected
                 session.effectiveConnection = effectiveConnection
+                if let schemaDriver = driver as? SchemaSwitchable {
+                    session.currentSchema = schemaDriver.currentSchema
+                }
                 if let passwordOverride, !session.connection.usesAWSIAM {
                     session.cachedPassword = passwordOverride
                 }

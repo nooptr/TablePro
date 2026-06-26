@@ -18,25 +18,47 @@ struct MainStatusBarLayoutTests {
         let view = MainStatusBarView(
             snapshot: StatusBarSnapshot(tab: nil, tableRows: nil),
             filterState: TabFilterState(),
-            hiddenColumns: [],
-            allColumns: [],
             selectedRowIndices: [],
             viewMode: .constant(.data),
-            onFirstPage: {},
-            onPreviousPage: {},
-            onNextPage: {},
-            onLastPage: {},
-            onPageSizeChange: { _ in },
-            onShowAll: {},
-            onGoToPage: { _ in },
-            onToggleColumn: { _ in },
-            onShowAllColumns: {},
-            onHideAllColumns: { _ in },
+            paginationCallbacks: PaginationCallbacks(
+                onFirst: {},
+                onPrevious: {},
+                onNext: {},
+                onLast: {},
+                onPageSizeChange: { _ in },
+                onShowAll: {},
+                onGoToPage: { _ in }
+            ),
+            columnState: StatusBarColumnState(
+                hidden: [],
+                all: [],
+                onToggle: { _ in },
+                onShowAll: {},
+                onHideAll: { _ in }
+            ),
+            structureState: StatusBarStructureState(
+                footer: StructureFooterState(),
+                onAdd: {},
+                onRemove: {}
+            ),
             onToggleFilters: {},
-            structureFooterState: nil,
-            onStructureAdd: nil,
-            onStructureRemove: nil
+            onFetchAll: nil,
+            onAddRow: nil
         )
         #expect(type(of: view.body) != Never.self)
+    }
+
+    @Test("Add Row button shows only in Data mode when adding is allowed")
+    func addRowVisibilityByMode() {
+        #expect(MainStatusBarView.showsAddRow(viewMode: .data, canAddRow: true))
+        #expect(!MainStatusBarView.showsAddRow(viewMode: .structure, canAddRow: true))
+        #expect(!MainStatusBarView.showsAddRow(viewMode: .json, canAddRow: true))
+    }
+
+    @Test("Add Row button is hidden when adding is not allowed")
+    func addRowHiddenWhenNotAllowed() {
+        #expect(!MainStatusBarView.showsAddRow(viewMode: .data, canAddRow: false))
+        #expect(!MainStatusBarView.showsAddRow(viewMode: .structure, canAddRow: false))
+        #expect(!MainStatusBarView.showsAddRow(viewMode: .json, canAddRow: false))
     }
 }

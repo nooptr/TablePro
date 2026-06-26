@@ -95,7 +95,6 @@ internal final class ThemeRegistryInstaller {
         // Remove old files without triggering theme reload or fallback
         _ = try removeRegistryFiles(for: plugin.id)
 
-        // Write new themes
         var installedThemes: [InstalledRegistryTheme] = []
         for theme in stagedThemes {
             try ThemeStorage.saveRegistryTheme(theme)
@@ -213,7 +212,7 @@ internal final class ThemeRegistryInstaller {
 
         let downloadedData = try Data(contentsOf: tempDownloadURL)
         let digest = SHA256.hash(data: downloadedData)
-        let hexChecksum = digest.map { String(format: "%02x", $0) }.joined()
+        let hexChecksum = digest.hexEncoded
 
         if hexChecksum != resolved.sha256.lowercased() {
             throw PluginError.checksumMismatch

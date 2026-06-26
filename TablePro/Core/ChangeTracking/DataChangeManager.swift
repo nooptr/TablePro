@@ -50,10 +50,11 @@ final class DataChangeManager: ChangeManaging {
     var insertedRowIndices: Set<Int> { pending.insertedRowIndices }
 
     var tableName: String = ""
+    var schemaName: String?
     var primaryKeyColumns: [String] = []
     /// First PK column, for contexts that need a single column (paste, filters)
     var primaryKeyColumn: String? { primaryKeyColumns.first }
-    var databaseType: DatabaseType = .mysql
+    var databaseType: DatabaseType?
     var pluginDriver: (any PluginDatabaseDriver)?
 
     var columns: [String] = []
@@ -92,12 +93,14 @@ final class DataChangeManager: ChangeManaging {
 
     func configureForTable(
         tableName: String,
+        schemaName: String? = nil,
         columns: [String],
         primaryKeyColumns: [String],
-        databaseType: DatabaseType = .mysql,
+        databaseType: DatabaseType,
         triggerReload: Bool = true
     ) {
         self.tableName = tableName
+        self.schemaName = schemaName
         self.columns = columns
         self.primaryKeyColumns = primaryKeyColumns
         self.databaseType = databaseType
@@ -109,6 +112,10 @@ final class DataChangeManager: ChangeManaging {
         if triggerReload {
             reloadVersion += 1
         }
+    }
+
+    func setPrimaryKeyColumns(_ primaryKeyColumns: [String]) {
+        self.primaryKeyColumns = primaryKeyColumns
     }
 
     // MARK: - Change Tracking
@@ -396,6 +403,7 @@ final class DataChangeManager: ChangeManaging {
             let pluginInsertedRowData: [Int: [PluginCellValue]] = insertedRowData
             if let statements = pluginDriver.generateStatements(
                 table: tableName,
+                schema: schemaName,
                 columns: columns,
                 primaryKeyColumns: primaryKeyColumns,
                 changes: pluginChanges,
@@ -407,9 +415,15 @@ final class DataChangeManager: ChangeManaging {
             }
         }
 
+        guard let databaseType else {
+            throw DatabaseError.queryFailed(
+                "Cannot generate statements: table dialect not configured"
+            )
+        }
+
         if PluginManager.shared.editorLanguage(for: databaseType) != .sql {
             throw DatabaseError.queryFailed(
-                "Cannot generate statements for \(databaseType.rawValue) — plugin driver not initialized"
+                "Cannot generate statements for \(databaseType.rawValue): plugin driver not initialized"
             )
         }
 
@@ -479,8 +493,9 @@ final class DataChangeManager: ChangeManaging {
         pending.snapshot(primaryKeyColumns: primaryKeyColumns, columns: columns)
     }
 
-    func restoreState(from state: TabChangeSnapshot, tableName: String, databaseType: DatabaseType) {
+    func restoreState(from state: TabChangeSnapshot, tableName: String, schemaName: String? = nil, databaseType: DatabaseType) {
         self.tableName = tableName
+        self.schemaName = schemaName
         self.columns = state.columns
         self.primaryKeyColumns = state.primaryKeyColumns
         self.databaseType = databaseType

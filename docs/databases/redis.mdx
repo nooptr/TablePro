@@ -39,6 +39,10 @@ Open URLs like `redis://:password@host:6379/0` or `rediss://` (TLS) from your br
 **Redis Cloud**: Requires SSL/TLS, enable in connection form
 **Remote**: Use [SSH tunneling](/databases/ssh-tunneling) for production
 
+## Amazon ElastiCache (IAM)
+
+Set **Authentication** to an AWS IAM mode (Access Key, Profile, or SSO) to connect to an IAM-enabled ElastiCache cache. TablePro generates a short-lived IAM auth token and uses it as the Redis password; the username is your IAM-enabled Redis user. Enter the AWS region and the cache name (replication group ID), and enable TLS, which ElastiCache IAM requires. Profiles resolve from `~/.aws/config` and `~/.aws/credentials`, including `credential_process`, SSO, and assumed roles.
+
 ## SSL/TLS
 
 Configure in the **SSL/TLS** pane of the connection form. Managed services like Upstash and Redis Cloud require TLS. Use `rediss://` for URL imports.
@@ -60,6 +64,8 @@ For untrusted-CA endpoints (Upstash, internal load balancers), pick **Required (
 **Key-Value Viewing**: String (plain text), Hash (key-value rows), List (with index), Set (individual rows), Sorted Set (with scores), JSON (syntax-highlighted).
 
 **TTL Management**: View TTL for each key. `-1` = no expiration, `-2` = doesn't exist. Update TTL directly from interface.
+
+**Key Filtering**: Toggle the filter bar to search keys by pattern. Patterns use Redis glob syntax (`*` matches any sequence, `?` matches one character, `[ae]` matches a character set) and are case-sensitive, the same as `redis-cli`. The type scope narrows results to one value type (String, Hash, List, Set, Sorted Set, Stream). Matching runs server-side with `SCAN MATCH` and `SCAN TYPE` across the whole keyspace, scanning up to 10,000 matching keys; a truncation indicator appears when more exist. Filtering by key value or TTL is not supported, since Redis has no server-side primitive for it.
 
 **Redis CLI** (execute commands directly):
 

@@ -30,6 +30,7 @@ struct MainContentView: View {
 
     // Shared state from parent
     @Binding var windowTitle: String
+    @Binding var windowSubtitle: String
     @Bindable var schemaService = SchemaService.shared
     var sidebarState: SharedSidebarState
     @Binding var pendingTruncates: Set<String>
@@ -68,6 +69,7 @@ struct MainContentView: View {
         connection: DatabaseConnection,
         payload: EditorTabPayload?,
         windowTitle: Binding<String>,
+        windowSubtitle: Binding<String>,
         sidebarState: SharedSidebarState,
         pendingTruncates: Binding<Set<String>>,
         pendingDeletes: Binding<Set<String>>,
@@ -81,6 +83,7 @@ struct MainContentView: View {
         self.connection = connection
         self.payload = payload
         self._windowTitle = windowTitle
+        self._windowSubtitle = windowSubtitle
         self.sidebarState = sidebarState
         self._pendingTruncates = pendingTruncates
         self._pendingDeletes = pendingDeletes
@@ -105,7 +108,7 @@ struct MainContentView: View {
                 titleVisibility: .visible,
                 presenting: coordinator.databaseToDrop
             ) { name in
-                Button(String(localized: "Drop Database"), role: .destructive) {
+                Button(String(format: String(localized: "Drop %@"), containerEntityName), role: .destructive) {
                     Task { await dropDatabase(name: name) }
                 }
                 Button(String(localized: "Cancel"), role: .cancel) {
@@ -128,9 +131,17 @@ struct MainContentView: View {
 
     private var dropConfirmationTitle: String {
         if let name = coordinator.databaseToDrop {
-            return String(format: String(localized: "Drop database “%@”?"), name)
+            return String(
+                format: String(localized: "Drop %1$@ “%2$@”?"),
+                containerEntityName.lowercased(),
+                name
+            )
         }
         return ""
+    }
+
+    private var containerEntityName: String {
+        PluginManager.shared.containerEntityName(for: coordinator.connection.type)
     }
 
     private func dropDatabase(name: String) async {
@@ -176,7 +187,7 @@ struct MainContentView: View {
                 databaseType: connection.type,
                 viewModel: viewModel,
                 onCreated: { newDatabaseName in
-                    Task { await coordinator.switchDatabase(to: newDatabaseName) }
+                    Task { await coordinator.switchContainer(to: newDatabaseName) }
                 }
             )
         case .exportDialog:
@@ -213,7 +224,7 @@ struct MainContentView: View {
                     )
                 }
             }
-        case .importDialog:
+        case .importDialog(let formatId):
             let importDismiss = Binding<Bool>(
                 get: { coordinator.activeSheet != nil },
                 set: { if !$0 {
@@ -225,8 +236,26 @@ struct MainContentView: View {
             ImportDialog(
                 isPresented: importDismiss,
                 connection: connection,
-                initialFileURL: coordinator.importFileURL
+                initialFileURL: coordinator.importFileURL,
+                initialFormatId: formatId
             )
+        case .rowImport(let formatId):
+            let rowDismiss = Binding<Bool>(
+                get: { coordinator.activeSheet != nil },
+                set: { if !$0 {
+                    coordinator.activeSheet = nil
+                    coordinator.importFileURL = nil
+                }
+                }
+            )
+            if let url = coordinator.importFileURL {
+                RowImportSheet(
+                    isPresented: rowDismiss,
+                    connection: connection,
+                    fileURL: url,
+                    formatId: formatId
+                )
+            }
         case .backupDatabase:
             BackupDatabaseFlow(
                 isPresented: dismissBinding,
@@ -249,14 +278,6 @@ struct MainContentView: View {
                 databaseType: connection.type,
                 onExecute: coordinator.executeMaintenance
             )
-        case .quickSwitcher:
-            QuickSwitcherSheet(
-                isPresented: dismissBinding,
-                schemaProvider: SchemaProviderRegistry.shared.getOrCreate(for: connection.id),
-                connectionId: connection.id,
-                databaseType: connection.type,
-                onSelect: coordinator.handleQuickSwitcherSelection
-            )
         case .sqlPreview:
             SQLReviewSheet(
                 isPresented: dismissBinding,
@@ -275,7 +296,8 @@ struct MainContentView: View {
             pendingTruncates: pendingTruncates,
             pendingDeletes: pendingDeletes,
             hasStructureChanges: toolbarState.hasStructureChanges,
-            isFileDirty: tabManager.selectedTab?.content.isFileDirty ?? false
+            isFileDirty: tabManager.selectedTab?.content.isFileDirty ?? false,
+            hasCreateTablePending: toolbarState.hasCreateTablePending
         )
     }
 
@@ -440,9 +462,6 @@ struct MainContentView: View {
             },
             onClearFilters: {
                 coordinator.clearFiltersAndReload()
-            },
-            onRefresh: {
-                coordinator.runQuery()
             },
             onFirstPage: {
                 coordinator.goToFirstPage()

@@ -15,19 +15,8 @@ extension QueryExecutionCoordinator {
         QueryExecutor.resolveRowCap(sql: sql, tabType: tabType, databaseType: parent.connection.type)
     }
 
-    func parseSchemaMetadata(_ schema: SchemaResult) -> ParsedSchemaMetadata {
+    func parseSchemaMetadata(_ schema: FetchedTableSchema) -> ParsedSchemaMetadata {
         QueryExecutor.parseSchemaMetadata(schema)
-    }
-
-    func awaitSchemaResult(
-        parallelTask: Task<SchemaResult, Error>?,
-        tableName: String
-    ) async -> SchemaResult? {
-        await QueryExecutor.awaitSchemaResult(
-            connectionId: parent.connectionId,
-            parallelTask: parallelTask,
-            tableName: tableName
-        )
     }
 
     func isMetadataCached(tabId: UUID, tableName: String) -> Bool {
@@ -36,21 +25,21 @@ extension QueryExecutionCoordinator {
         }
         let tab = parent.tabManager.tabs[idx]
         let tableRows = parent.tabSessionRegistry.tableRows(for: tab.id)
-        guard tab.tableContext.tableName == tableName,
-              !tableRows.columnDefaults.isEmpty,
-              !tab.tableContext.primaryKeyColumns.isEmpty else {
-            return false
-        }
         let enumSetColumnNames: [String] = tableRows.columns.enumerated().compactMap { i, name in
             guard i < tableRows.columnTypes.count,
                   tableRows.columnTypes[i].isEnumType || tableRows.columnTypes[i].isSetType else { return nil }
             return name
         }
-        if !enumSetColumnNames.isEmpty,
-           !enumSetColumnNames.allSatisfy({ tableRows.columnEnumValues[$0] != nil }) {
-            return false
-        }
-        return true
+        let enumsReady = enumSetColumnNames.allSatisfy { tableRows.columnEnumValues[$0] != nil }
+        let cached = tab.tableContext.tableName == tableName
+            && !tableRows.columnDefaults.isEmpty
+            && !tab.tableContext.primaryKeyColumns.isEmpty
+            && tableRows.foreignKeysFetched
+            && enumsReady
+        helpersLogger.info(
+            "[fk] cache check table=\(tableName, privacy: .public) defaults=\(tableRows.columnDefaults.count) pks=\(tab.tableContext.primaryKeyColumns.count) fkFetched=\(tableRows.foreignKeysFetched) fks=\(tableRows.columnForeignKeys.count) enumsReady=\(enumsReady) cached=\(cached)"
+        )
+        return cached
     }
 
     func applyPhase1Result( // swiftlint:disable:this function_parameter_count
@@ -96,10 +85,13 @@ extension QueryExecutionCoordinator {
             }
         }
 
+        var foreignKeysFetched = false
+
         if let metadata {
             columnDefaults = metadata.columnDefaults
-            columnForeignKeys = metadata.columnForeignKeys
+            columnForeignKeys = metadata.columnForeignKeys ?? [:]
             columnNullable = metadata.columnNullable
+            foreignKeysFetched = metadata.columnForeignKeys != nil
             for (col, vals) in metadata.columnEnumValues {
                 columnEnumValues[col] = vals
             }
@@ -108,6 +100,7 @@ extension QueryExecutionCoordinator {
             columnDefaults = existing.columnDefaults
             columnForeignKeys = existing.columnForeignKeys
             columnNullable = existing.columnNullable
+            foreignKeysFetched = existing.foreignKeysFetched
             for (col, vals) in existing.columnEnumValues where columnEnumValues[col] == nil {
                 columnEnumValues[col] = vals
             }
@@ -120,7 +113,8 @@ extension QueryExecutionCoordinator {
             columnDefaults: columnDefaults,
             columnForeignKeys: columnForeignKeys,
             columnEnumValues: columnEnumValues,
-            columnNullable: columnNullable
+            columnNullable: columnNullable,
+            foreignKeysFetched: foreignKeysFetched
         )
         parent.setActiveTableRows(newTableRows, for: existingTabId)
 
@@ -157,11 +151,11 @@ extension QueryExecutionCoordinator {
 
             if isTruncated {
                 tab.pagination.hasMoreRows = true
-                tab.pagination.baseQueryForMore = sql
                 tab.pagination.isLoadingMore = false
             } else {
                 tab.pagination.resetLoadMore()
             }
+            tab.pagination.baseQueryForMore = sql
 
             if tab.display.isResultsCollapsed {
                 tab.display.isResultsCollapsed = false
@@ -182,18 +176,10 @@ extension QueryExecutionCoordinator {
             parent.tabManager.mutate(at: idx) { $0.tableContext.primaryKeyColumns = resolvedPKs }
         }
 
-        applyDefaultSortIfPending(
-            tabId: tabId,
-            tabIndex: idx,
-            tableName: tableName,
-            columns: columns,
-            resolvedPKs: resolvedPKs,
-            connectionType: conn.type
-        )
-
         if parent.tabManager.selectedTabId == tabId {
             parent.changeManager.configureForTable(
                 tableName: tableName ?? "",
+                schemaName: parent.tabManager.tabs[idx].tableContext.schemaName,
                 columns: columns,
                 primaryKeyColumns: resolvedPKs,
                 databaseType: conn.type
@@ -254,111 +240,126 @@ extension QueryExecutionCoordinator {
         )
     }
 
-    private func applyDefaultSortIfPending(
-        tabId: UUID,
-        tabIndex: Int,
-        tableName: String?,
-        columns: [String],
-        resolvedPKs: [String],
-        connectionType: DatabaseType
-    ) {
-        guard tabIndex < parent.tabManager.tabs.count else { return }
-        let tab = parent.tabManager.tabs[tabIndex]
-        guard !tab.execution.didEvaluateDefaultSort,
-              tab.tabType == .table,
-              !tab.sortState.isSorting,
-              !columns.isEmpty,
-              let tableName, !tableName.isEmpty,
-              parent.tabManager.selectedTabId == tabId else {
-            return
-        }
-
-        let behavior = AppSettingsManager.shared.dataGrid.defaultSortBehavior
-        let hint = PluginManager.shared.defaultSortHint(for: connectionType, table: tableName)
-        let resolved = DefaultSortResolver.resolveSortState(
-            behavior: behavior,
-            pluginHint: hint,
-            primaryKeyColumns: resolvedPKs,
-            allColumns: columns
-        )
-
-        guard resolved.isSorting else {
-            parent.tabManager.mutate(at: tabIndex) { $0.execution.didEvaluateDefaultSort = true }
-            return
-        }
-
-        parent.tabManager.mutate(at: tabIndex) { tab in
-            tab.execution.didEvaluateDefaultSort = true
-            tab.sortState = resolved
-            tab.pagination.reset()
-        }
-        parent.filterCoordinator.rebuildTableQuery(at: tabIndex)
-        parent.runQuery()
-    }
-
     func launchPhase2Work(
         tableName: String,
         tabId: UUID,
         capturedGeneration: Int,
         connectionType: DatabaseType,
-        schemaResult: SchemaResult?
+        schemaTask: Task<FetchedTableSchema, Error>?
     ) {
-        resolveRowCount(
-            tableName: tableName,
-            tabId: tabId,
-            capturedGeneration: capturedGeneration,
-            connectionType: connectionType
-        )
-
         let isNonSQL = PluginManager.shared.editorLanguage(for: connectionType) != .sql
-        guard !isNonSQL else { return }
         Task(priority: .utility) { [weak self, parent] in
             guard let self else { return }
             guard !parent.isTearingDown else { return }
 
-            let columnInfo: [ColumnInfo]
-            if let schema = schemaResult {
-                columnInfo = schema.columnInfo
-            } else {
-                columnInfo = (try? await DatabaseManager.shared.withMetadataDriver(connectionId: parent.connectionId) { driver in
-                    try await driver.fetchColumns(table: tableName)
-                }) ?? []
+            let schema = try? await schemaTask?.value
+            if schemaTask != nil, schema == nil {
+                helpersLogger.error("[fk] phase2 schema fetch failed or cancelled table=\(tableName, privacy: .public)")
             }
 
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                if let schema {
+                    applySchemaMetadata(schema, tabId: tabId, tableName: tableName)
+                }
+                if capturedGeneration == parent.queryGeneration {
+                    resolveRowCount(
+                        tableName: tableName,
+                        tabId: tabId,
+                        capturedGeneration: capturedGeneration,
+                        connectionType: connectionType
+                    )
+                }
+            }
+
+            guard !isNonSQL, let schema else { return }
+
             let columnEnumValues = await parent.fetchEnumValues(
-                columnInfo: columnInfo,
+                columnInfo: schema.columns,
                 tableName: tableName,
                 connectionType: connectionType
             )
+            guard !columnEnumValues.isEmpty else { return }
 
-            guard !columnEnumValues.isEmpty else {
-                return
-            }
             await MainActor.run { [weak self] in
-                guard let self else { return }
-                guard capturedGeneration == parent.queryGeneration else { return }
-                guard !Task.isCancelled else { return }
-                guard parent.tabManager.tabs.contains(where: { $0.id == tabId }) else { return }
-                let existing = parent.tabSessionRegistry.tableRows(for: tabId)
-                let hasNewValues = columnEnumValues.contains { key, value in
-                    existing.columnEnumValues[key] != value
-                }
-                if hasNewValues {
-                    parent.mutateActiveTableRows(for: tabId) { rows in
-                        for (col, vals) in columnEnumValues {
-                            rows.columnEnumValues[col] = vals
-                        }
-                        return .columnsReplaced
-                    }
-                    parent.tabManager.mutate(tabId: tabId) { $0.metadataVersion += 1 }
-                    if let activeIdx = parent.tabManager.selectedTabIndex,
-                       activeIdx < parent.tabManager.tabs.count,
-                       parent.tabManager.tabs[activeIdx].id == tabId {
-                        parent.dataTabDelegate?.tableViewCoordinator?.refreshForeignKeyColumns()
-                    }
-                }
+                guard let self, !Task.isCancelled else { return }
+                applyEnumValues(columnEnumValues, tabId: tabId, tableName: tableName)
             }
         }
+    }
+
+    private func tabShowsTable(_ tabId: UUID, _ tableName: String) -> Bool {
+        parent.tabManager.tabs.contains { $0.id == tabId && $0.tableContext.tableName == tableName }
+    }
+
+    private func isActiveTab(_ tabId: UUID) -> Bool {
+        guard let activeIdx = parent.tabManager.selectedTabIndex,
+              activeIdx < parent.tabManager.tabs.count else { return false }
+        return parent.tabManager.tabs[activeIdx].id == tabId
+    }
+
+    private func applySchemaMetadata(_ schema: FetchedTableSchema, tabId: UUID, tableName: String) {
+        guard tabShowsTable(tabId, tableName) else {
+            helpersLogger.info("[fk] phase2 apply skipped, tab closed or table changed table=\(tableName, privacy: .public)")
+            return
+        }
+        applyPhase2Metadata(parsed: QueryExecutor.parseSchemaMetadata(schema), tabId: tabId)
+    }
+
+    private func applyEnumValues(_ values: [String: [String]], tabId: UUID, tableName: String) {
+        guard tabShowsTable(tabId, tableName) else { return }
+        let existing = parent.tabSessionRegistry.tableRows(for: tabId)
+        let hasNewValues = values.contains { key, value in
+            existing.columnEnumValues[key] != value
+        }
+        guard hasNewValues else { return }
+
+        parent.mutateActiveTableRows(for: tabId) { rows in
+            for (col, vals) in values {
+                rows.columnEnumValues[col] = vals
+            }
+            return .columnsReplaced
+        }
+        parent.tabManager.mutate(tabId: tabId) { $0.metadataVersion += 1 }
+        if isActiveTab(tabId) {
+            parent.dataTabDelegate?.tableViewCoordinator?.refreshForeignKeyColumns()
+        }
+    }
+
+    private func applyPhase2Metadata(parsed: ParsedSchemaMetadata, tabId: UUID) {
+        guard parent.tabManager.tabs.contains(where: { $0.id == tabId }) else { return }
+
+        parent.mutateActiveTableRows(for: tabId) { rows in
+            rows.updateDisplayMetadata(
+                columnDefaults: parsed.columnDefaults,
+                columnForeignKeys: parsed.columnForeignKeys,
+                columnNullable: parsed.columnNullable
+            )
+        }
+
+        parent.tabManager.mutate(tabId: tabId) { tab in
+            if !parsed.primaryKeyColumns.isEmpty {
+                tab.tableContext.primaryKeyColumns = parsed.primaryKeyColumns
+            }
+            if let approxCount = parsed.approximateRowCount, approxCount > 0,
+               !tab.filterState.hasAppliedFilters {
+                tab.pagination.totalRowCount = approxCount
+                tab.pagination.isApproximateRowCount = true
+            }
+            tab.metadataVersion += 1
+        }
+
+        if parent.tabManager.selectedTabId == tabId, !parsed.primaryKeyColumns.isEmpty {
+            parent.changeManager.setPrimaryKeyColumns(parsed.primaryKeyColumns)
+        }
+
+        let refreshed = isActiveTab(tabId)
+        if refreshed {
+            parent.dataTabDelegate?.tableViewCoordinator?.refreshForeignKeyColumns()
+        }
+        helpersLogger.info(
+            "[fk] phase2 applied tab=\(tabId, privacy: .public) fks=\(parsed.columnForeignKeys?.count ?? -1) defaults=\(parsed.columnDefaults.count) activeTabRefreshed=\(refreshed)"
+        )
     }
 
     func launchPhase2Count(
@@ -524,8 +525,11 @@ extension QueryExecutionCoordinator {
     }
 
     func restoreSchemaAndRunQuery(_ schema: String) async {
-        guard let driver = DatabaseManager.shared.driver(for: parent.connectionId),
-              let schemaDriver = driver as? SchemaSwitchable,
+        guard let driver = DatabaseManager.shared.driver(for: parent.connectionId) else {
+            parent.needsLazyLoad = true
+            return
+        }
+        guard let schemaDriver = driver as? SchemaSwitchable,
               schemaDriver.currentSchema != nil else {
             parent.runQuery()
             return

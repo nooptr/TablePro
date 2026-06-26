@@ -49,4 +49,33 @@ struct URLClassifierTests {
         }
         #expect(intent == nil)
     }
+
+    @Test("SQL file routes to openSQLFile", arguments: ["sql", "psql", "pgsql", "PSQL"])
+    func routesSQLFile(ext: String) {
+        let sqlURL = URL(fileURLWithPath: "/tmp/query.\(ext)")
+        let intent = URLClassifier.classify(sqlURL)
+        guard case .some(.success(.openSQLFile(let routed))) = intent else {
+            Issue.record("Expected .openSQLFile, got \(String(describing: intent))")
+            return
+        }
+        #expect(routed == sqlURL)
+    }
+
+    @Test("DuckDB file routes to openDatabaseFile with the DuckDB type", arguments: ["duckdb", "ddb"])
+    func routesDuckDBFile(ext: String) {
+        let fileURL = URL(fileURLWithPath: "/tmp/warehouse.\(ext)")
+        let intent = URLClassifier.classify(fileURL)
+        guard case .some(.success(.openDatabaseFile(let routed, let dbType))) = intent else {
+            Issue.record("Expected .openDatabaseFile, got \(String(describing: intent))")
+            return
+        }
+        #expect(routed == fileURL)
+        #expect(dbType == .duckdb)
+    }
+
+    @Test("Unknown file extension returns nil")
+    func returnsNilForUnknownExtension() {
+        let intent = URLClassifier.classify(URL(fileURLWithPath: "/tmp/file.xyz"))
+        #expect(intent == nil)
+    }
 }

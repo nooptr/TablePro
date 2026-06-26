@@ -34,6 +34,9 @@ protocol DatabaseDriver: AnyObject {
     /// Test the connection (connect and immediately disconnect)
     func testConnection() async throws -> Bool
 
+    /// Check the connection is alive without mutating session state
+    func ping() async throws
+
     // MARK: - Configuration
 
     /// Apply query execution timeout (seconds, 0 = no limit)
@@ -82,6 +85,16 @@ protocol DatabaseDriver: AnyObject {
 
     /// Fetch foreign keys for a specific table
     func fetchForeignKeys(table: String) async throws -> [ForeignKeyInfo]
+
+    /// Fetch triggers for a specific table
+    func fetchTriggers(table: String) async throws -> [TriggerInfo]
+
+    /// Trigger editing hooks (optional — nil when unsupported)
+    func createTriggerTemplate(table: String) -> String?
+    func fetchTriggerDefinition(name: String, table: String) async throws -> String?
+    func generateDropTriggerSQL(name: String, table: String) -> String?
+    var triggerEditUsesReplace: Bool { get }
+    var supportsTransactionalDDL: Bool { get }
 
     /// Fetch foreign keys for all tables in the current database/schema in bulk.
     /// Default implementation falls back to per-table fetchForeignKeys.
@@ -142,6 +155,10 @@ protocol DatabaseDriver: AnyObject {
     func createDatabase(_ request: CreateDatabaseRequest) async throws
 
     func dropDatabase(name: String) async throws
+
+    func fetchSessionContexts() async throws -> [PluginSessionContext]?
+
+    func switchSessionContext(id: String, to value: String) async throws
 
     // MARK: - Maintenance
 
@@ -213,16 +230,11 @@ extension DatabaseDriver {
     var queryBuildingPluginDriver: (any PluginDatabaseDriver)? { nil }
 
     func quoteIdentifier(_ name: String) -> String {
-        let q = "\""
-        let escaped = name.replacingOccurrences(of: q, with: q + q)
-        return "\(q)\(escaped)\(q)"
+        SQLEscaping.quoteIdentifier(name)
     }
 
     func escapeStringLiteral(_ value: String) -> String {
-        var result = value
-        result = result.replacingOccurrences(of: "'", with: "''")
-        result = result.replacingOccurrences(of: "\0", with: "")
-        return result
+        SQLEscaping.escapeStringLiteral(value)
     }
 
     func createViewTemplate() -> String? { nil }
@@ -240,6 +252,18 @@ extension DatabaseDriver {
         try await fetchColumns(table: table)
     }
 
+    func fetchTriggers(table: String) async throws -> [TriggerInfo] { [] }
+
+    func createTriggerTemplate(table: String) -> String? { nil }
+    func fetchTriggerDefinition(name: String, table: String) async throws -> String? { nil }
+    func generateDropTriggerSQL(name: String, table: String) -> String? { nil }
+    var triggerEditUsesReplace: Bool { false }
+    var supportsTransactionalDDL: Bool { false }
+
+    func ping() async throws {
+        _ = try await execute(query: "SELECT 1")
+    }
+
     func testConnection() async throws -> Bool {
         try await connect()
         disconnect()
@@ -252,6 +276,10 @@ extension DatabaseDriver {
     }
 
     func createDatabaseFormSpec() async throws -> CreateDatabaseFormSpec? { nil }
+
+    func fetchSessionContexts() async throws -> [PluginSessionContext]? { nil }
+
+    func switchSessionContext(id: String, to value: String) async throws {}
 
     func createDatabase(_ request: CreateDatabaseRequest) async throws {
         throw NSError(
@@ -310,6 +338,20 @@ extension DatabaseDriver {
         let all = try await fetchAllForeignKeys()
         let nameSet = Set(tableNames)
         return all.filter { nameSet.contains($0.key) }
+    }
+
+    func fetchIndexes(forTables tableNames: [String]) async throws -> [String: [IndexInfo]] {
+        var result: [String: [IndexInfo]] = [:]
+        for tableName in tableNames {
+            do {
+                let indexes = try await fetchIndexes(table: tableName)
+                if !indexes.isEmpty { result[tableName] = indexes }
+            } catch {
+                Logger(subsystem: "com.TablePro", category: "DatabaseDriver")
+                    .debug("Failed to fetch indexes for \(tableName): \(error.localizedDescription)")
+            }
+        }
+        return result
     }
 
     /// Default fetchAllColumns: falls back to per-table fetchColumns (N+1).
@@ -377,7 +419,6 @@ extension DatabaseDriver {
     var supportsTransactions: Bool { true }
 
     func cancelQuery() throws {
-        // No-op by default
     }
 
     /// Default timeout implementation — delegates to each plugin's PluginDatabaseDriver.
@@ -400,17 +441,7 @@ enum DatabaseDriverFactory {
         passwordOverride: String? = nil,
         awaitPlugins: Bool
     ) async throws -> DatabaseDriver {
-        let pluginId = connection.type.pluginTypeId
-        if PluginManager.shared.driverPlugin(for: connection.type) == nil,
-           !PluginManager.shared.hasFinishedInitialLoad {
-            logger.info("Plugin '\(pluginId)' not loaded yet, waiting for background load")
-            await PluginManager.shared.waitForInitialLoad()
-        }
-        if PluginManager.shared.driverPlugin(for: connection.type) == nil,
-           PluginManager.shared.hasOutdatedRejectedPlugin(forTypeId: pluginId) {
-            logger.info("Plugin '\(pluginId)' is installed but outdated, waiting for reconciliation to update it")
-            await PluginManager.shared.awaitReconciliation()
-        }
+        await PluginManager.shared.prepareForConnecting(to: connection.type)
         return try await createDriverFromPlugin(for: connection, passwordOverride: passwordOverride)
     }
 
@@ -460,11 +491,34 @@ enum DatabaseDriverFactory {
         fields: [String: String]
     ) async throws -> String {
         let source = fields["awsAuth"] ?? "accessKey"
+        let credentials = try await AWSCredentialResolver.resolve(source: source, fields: fields)
+
+        if connection.type == .redis {
+            guard let region = fields["awsRegion"].flatMap({ $0.isEmpty ? nil : $0 }) else {
+                throw AWSAuthError.regionUnknown(host: connection.host)
+            }
+            guard connection.sslConfig.mode != .disabled else {
+                throw AWSAuthError.missingConfiguration(
+                    String(localized: "ElastiCache IAM authentication requires TLS. Enable SSL in the connection's SSL settings.")
+                )
+            }
+            guard let replicationGroupId = fields["awsReplicationGroupId"].flatMap({ $0.isEmpty ? nil : $0 }) else {
+                throw AWSAuthError.missingConfiguration(
+                    String(localized: "Enter the ElastiCache cache name (replication group ID) to use IAM authentication.")
+                )
+            }
+            return ElastiCacheAuthTokenGenerator.generateToken(
+                replicationGroupId: replicationGroupId,
+                region: region,
+                userId: connection.username,
+                credentials: credentials
+            )
+        }
+
         let explicitRegion = fields["awsRegion"].flatMap { $0.isEmpty ? nil : $0 }
         guard let region = explicitRegion ?? RDSEndpoint.region(forHost: connection.host) else {
             throw AWSAuthError.regionUnknown(host: connection.host)
         }
-        let credentials = try await AWSCredentialResolver.resolve(source: source, fields: fields)
         return RDSAuthTokenGenerator.generateToken(
             host: connection.host,
             port: connection.port,
@@ -479,7 +533,7 @@ enum DatabaseDriverFactory {
         fields: [String: String],
         override: String? = nil
     ) async throws -> String {
-        if connection.usesAWSIAM {
+        if connection.usesAWSIAM, !connection.resolvesAWSIAMInDriver {
             return try await resolveIAMPassword(for: connection, fields: fields)
         }
         if let override { return override }

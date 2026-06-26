@@ -100,7 +100,6 @@ Built-in drivers ship with the app. Plugin drivers install on demand from the [p
 - Query history with full-text search
 - iCloud sync for connections, groups, tags, settings, and SSH profiles
 - AI chat, inline suggestions, and Explain/Optimize
-- Built-in terminal with mysql, psql, redis-cli, mongosh (SSH and Docker aware)
 - MCP server and URL scheme for Raycast, Cursor, Claude Desktop
 - Plugin system, write your own database driver in Swift
 
@@ -111,6 +110,33 @@ brew install --cask tablepro
 ```
 
 Or download from [GitHub Releases](https://github.com/TableProApp/TablePro/releases).
+
+## How to Build
+
+Building TablePro requires macOS 14 or later and Xcode 15 or later.
+
+Run the first-time setup from the repository root:
+
+```bash
+scripts/download-libs.sh
+touch Secrets.xcconfig
+```
+
+Build a Debug app without code signing:
+
+```bash
+xcodebuild \
+  -project TablePro.xcodeproj \
+  -scheme TablePro \
+  -configuration Debug \
+  -skipPackagePluginValidation \
+  CODE_SIGNING_ALLOWED=NO \
+  build
+```
+
+The app is written to `~/Library/Developer/Xcode/DerivedData/TablePro-*/Build/Products/Debug/TablePro.app`.
+
+To build and run a signed app, configure your personal Apple team, a unique bundle identifier, and the Debug entitlements in Xcode. See [Building with a personal Apple team](CONTRIBUTING.md#building-with-a-personal-apple-team) for the required settings.
 
 ## Documentation
 

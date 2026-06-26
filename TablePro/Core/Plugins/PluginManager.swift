@@ -5,6 +5,7 @@
 
 import Combine
 import Foundation
+import Network
 import os
 import Security
 import SwiftUI
@@ -13,7 +14,8 @@ import TableProPluginKit
 @MainActor @Observable
 final class PluginManager {
     static let shared = PluginManager()
-    static let currentPluginKitVersion = 17
+    static let currentPluginKitVersion = 18
+    static let minimumCompatiblePluginKitVersion = 18
     static let currentInspectorKitVersion = 1
     private static let disabledPluginsKey = "com.TablePro.disabledPlugins"
     private static let legacyDisabledPluginsKey = "disabledPlugins"
@@ -115,6 +117,8 @@ final class PluginManager {
     @ObservationIgnored internal var reconciliationAttempts: [String: Int] = [:]
     @ObservationIgnored internal var reconciliationManifestAttempts = 0
     @ObservationIgnored private var connectionStatusSubscription: AnyCancellable?
+    @ObservationIgnored internal var pluginNetworkMonitor: NWPathMonitor?
+    @ObservationIgnored internal var lastNetworkSatisfied = false
     @ObservationIgnored internal var installsInFlight: Set<String> = []
 
     var queryBuildingDriverCache: [String: (any PluginDatabaseDriver)?] = [:]
@@ -235,6 +239,7 @@ final class PluginManager {
 
             self.refreshRegistryUpdateSet()
             self.subscribeToConnectionStatusChanges()
+            self.startNetworkReachabilityMonitor()
             self.scheduleReconciliation()
         }
     }
@@ -420,6 +425,18 @@ final class PluginManager {
         let bundleId = bundle.bundleIdentifier ?? url.lastPathComponent
         guard !activatedBundleIds.contains(bundleId) else { return }
 
+        let entry = plugins.first(where: { $0.id == bundleId })
+
+        if entry?.source != .builtIn {
+            do {
+                try verifyCodeSignature(bundle: bundle)
+            } catch {
+                Self.logger.error("Refusing to activate lazy plugin '\(bundleId)': code-signature re-check failed before load: \(error.localizedDescription)")
+                recordLazyActivationRejection(url: url, bundleId: bundleId, entry: entry, error: error)
+                return
+            }
+        }
+
         guard bundle.load() else {
             Self.logger.error("Failed to load lazy bundle '\(bundleId)' at \(url.lastPathComponent)")
             return
@@ -432,7 +449,7 @@ final class PluginManager {
 
         validateCapabilityDeclarations(principalClass, pluginId: bundleId)
 
-        let isEnabled = plugins.first(where: { $0.id == bundleId })?.isEnabled ?? false
+        let isEnabled = entry?.isEnabled ?? false
         if isEnabled {
             let instance = principalClass.init()
             registerCapabilities(instance, pluginId: bundleId)
@@ -441,6 +458,26 @@ final class PluginManager {
         activatedBundleIds.insert(bundleId)
         queryBuildingDriverCache.removeAll()
         Self.logger.info("Activated plugin '\(bundleId)' on demand")
+    }
+
+    private func recordLazyActivationRejection(url: URL, bundleId: String, entry: PluginEntry?, error: Error) {
+        guard !rejectedPlugins.contains(where: { $0.url == url }) else { return }
+        var providedDatabaseTypeIds: [String] = []
+        if let entry {
+            if let primaryTypeId = entry.databaseTypeId {
+                providedDatabaseTypeIds.append(primaryTypeId)
+            }
+            providedDatabaseTypeIds.append(contentsOf: entry.additionalTypeIds)
+        }
+        rejectedPlugins.append(RejectedPlugin(
+            url: url,
+            bundleId: bundleId,
+            registryId: Self.readRegistryMetadata(for: url)?.pluginId,
+            name: entry?.name ?? bundleId,
+            reason: error.localizedDescription,
+            isOutdated: false,
+            providedDatabaseTypeIds: providedDatabaseTypeIds
+        ))
     }
 
     private struct ValidatedBundle: @unchecked Sendable {
@@ -468,7 +505,7 @@ final class PluginManager {
                     current: currentPluginKitVersion
                 )
             }
-            if version < currentPluginKitVersion {
+            if version < minimumCompatiblePluginKitVersion {
                 throw PluginError.pluginOutdated(
                     pluginVersion: version,
                     requiredVersion: currentPluginKitVersion
@@ -516,6 +553,16 @@ final class PluginManager {
         return bundle
     }
 
+    nonisolated static func bundleShortVersion(at url: URL) -> String? {
+        let infoPlistURL = url.appendingPathComponent("Contents/Info.plist")
+        guard let data = try? Data(contentsOf: infoPlistURL),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil),
+              let dictionary = plist as? [String: Any] else {
+            return nil
+        }
+        return dictionary["CFBundleShortVersionString"] as? String
+    }
+
     nonisolated private static func validateAndLoadBundles(
         _ pending: [(url: URL, source: PluginSource)]
     ) async -> [ValidatedBundle] {
@@ -545,9 +592,8 @@ final class PluginManager {
         let inspectorType = principalClass as? any DocumentInspectorPlugin.Type
 
         let disabled = disabledPluginIds
-        let info = bundle.infoDictionary ?? [:]
         let version: String
-        if let declared = info["CFBundleShortVersionString"] as? String {
+        if let declared = Self.bundleShortVersion(at: url) {
             version = declared
         } else {
             Self.logger.warning("Plugin '\(bundleId)' missing CFBundleShortVersionString; defaulting to 0.0.0")
@@ -784,6 +830,12 @@ final class PluginManager {
         guard let driver = driverPlugins[type.pluginTypeId] else { return .useAppDefault }
         guard let provider = driver as? PluginDefaultSortProvider else { return .useAppDefault }
         return provider.defaultSortHint(forTable: table)
+    }
+
+    func browseFilterDescriptor(for type: DatabaseType) -> BrowseFilterDescriptor? {
+        guard let driver = driverPlugins[type.pluginTypeId] else { return nil }
+        guard let provider = driver as? PluginBrowseFilterProvider else { return nil }
+        return provider.browseFilterDescriptor
     }
 
     func replaceExistingPlugin(bundleId: String) {

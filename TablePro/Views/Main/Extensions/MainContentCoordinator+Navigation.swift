@@ -18,7 +18,6 @@ extension MainContentCoordinator {
     func openTableTab(
         _ table: TableInfo,
         showStructure: Bool = false,
-        redirectToSibling: Bool = false,
         forceNonPreview: Bool = false,
         activateGridFocus: Bool = false
     ) {
@@ -27,7 +26,6 @@ extension MainContentCoordinator {
             schema: table.schema,
             showStructure: showStructure,
             isView: table.type == .view,
-            redirectToSibling: redirectToSibling,
             forceNonPreview: forceNonPreview,
             activateGridFocus: activateGridFocus
         )
@@ -38,9 +36,9 @@ extension MainContentCoordinator {
         schema: String? = nil,
         showStructure: Bool = false,
         isView: Bool = false,
-        redirectToSibling: Bool = false,
         forceNonPreview: Bool = false,
-        activateGridFocus: Bool = false
+        activateGridFocus: Bool = false,
+        forceNewWindowTab: Bool = false
     ) {
         let navigationModel = PluginMetadataRegistry.shared.snapshot(
             forTypeId: connection.type.pluginTypeId
@@ -57,20 +55,17 @@ extension MainContentCoordinator {
         }
 
         let resolvedSchema = schema
-        let createAsPreview = !forceNonPreview && AppSettingsManager.shared.tabs.enablePreviewTabs
+        let createAsPreview = !forceNonPreview && !forceNewWindowTab
+            && AppSettingsManager.shared.tabs.enablePreviewTabs
 
-        // Fast path: if this table is already the active tab in the same database, skip all work
-        if let current = tabManager.selectedTab,
-           current.tabType == .table,
-           current.tableContext.tableName == tableName,
-           current.tableContext.databaseName == currentDatabase,
-           current.tableContext.schemaName == resolvedSchema {
-            if showStructure, let (_, tabIndex) = tabManager.selectedTabAndIndex {
-                tabManager.mutate(at: tabIndex) { $0.display.resultsViewMode = .structure }
-            }
-            if activateGridFocus {
-                focusActiveGrid()
-            }
+        if !forceNewWindowTab, activateIfAlreadyOpen(
+            tableName: tableName,
+            databaseName: currentDatabase,
+            schemaName: resolvedSchema,
+            showStructure: showStructure,
+            activateGridFocus: activateGridFocus,
+            includeSiblings: navigationModel != .inPlace
+        ) {
             return
         }
 
@@ -98,29 +93,6 @@ extension MainContentCoordinator {
             return
         }
 
-        // Opt-in cross-window navigation: if requested (e.g. quick switcher),
-        // and another window already shows this table, focus that window.
-        // Default-off so sidebar clicks and other window-local actions stay
-        // window-local instead of stealing focus to a sibling.
-        if redirectToSibling {
-            for sibling in MainContentCoordinator.allActiveCoordinators()
-                where sibling !== self && sibling.connectionId == connectionId {
-                let hasMatch = sibling.tabManager.tabs.contains { tab in
-                    tab.tabType == .table
-                        && tab.tableContext.tableName == tableName
-                        && tab.tableContext.databaseName == currentDatabase
-                        && tab.tableContext.schemaName == resolvedSchema
-                }
-                guard hasMatch,
-                      let windowId = sibling.windowId,
-                      let window = WindowLifecycleMonitor.shared.window(for: windowId) else { continue }
-                pendingGridFocusOnOpen = false
-                window.makeKeyAndOrderFront(nil)
-                return
-            }
-        }
-
-        // If no tabs exist (empty state), add a table tab directly.
         if tabManager.tabs.isEmpty {
             addFirstTableTab(
                 tableName: tableName,
@@ -165,7 +137,7 @@ extension MainContentCoordinator {
             return
         }
 
-        if isActiveTabReusable {
+        if isActiveTabReusable, !forceNewWindowTab {
             reuseActiveTab(
                 for: tableName,
                 currentDatabase: currentDatabase,
@@ -189,6 +161,50 @@ extension MainContentCoordinator {
             isPreview: createAsPreview
         )
         WindowManager.shared.openTab(payload: payload)
+    }
+
+    func activateIfAlreadyOpen(
+        tableName: String,
+        databaseName: String,
+        schemaName: String?,
+        showStructure: Bool,
+        activateGridFocus: Bool,
+        includeSiblings: Bool
+    ) -> Bool {
+        func matches(_ tab: QueryTab) -> Bool {
+            tab.tabType == .table
+                && tab.tableContext.tableName == tableName
+                && tab.tableContext.databaseName == databaseName
+                && tab.tableContext.schemaName == schemaName
+        }
+
+        if let match = tabManager.tabs.first(where: matches) {
+            if tabManager.selectedTabId != match.id {
+                tabManager.selectedTabId = match.id
+            }
+            applyStructureMode(showStructure, toTab: match.id, in: tabManager)
+            if activateGridFocus {
+                requestGridFocus()
+            }
+            return true
+        }
+
+        guard includeSiblings else { return false }
+
+        for sibling in MainContentCoordinator.allActiveCoordinators()
+            where sibling !== self && sibling.connectionId == connectionId {
+            guard let match = sibling.tabManager.tabs.first(where: matches) else { continue }
+            sibling.pendingGridFocusOnOpen = activateGridFocus
+            applyStructureMode(showStructure, toTab: match.id, in: sibling.tabManager)
+            sibling.selectTabAndFocusWindow(match.id)
+            return true
+        }
+        return false
+    }
+
+    private func applyStructureMode(_ showStructure: Bool, toTab tabId: UUID, in tabManager: QueryTabManager) {
+        guard showStructure, let index = tabManager.tabs.firstIndex(where: { $0.id == tabId }) else { return }
+        tabManager.mutate(at: index) { $0.display.resultsViewMode = .structure }
     }
 
     private func addFirstTableTab(
@@ -228,15 +244,12 @@ extension MainContentCoordinator {
             }
             toolbarState.isTableTab = true
         }
-        updatePreviewSubtitle(isPreview: createAsPreview)
         restoreLastHiddenColumnsForTable(tableName)
         restoreFiltersForTable(tableName)
         if isInPlace, let dbIndex = Int(currentDatabase) {
             selectRedisDatabaseAndQuery(dbIndex)
-        } else if !selectedTabHiddenColumns.isEmpty {
-            requeryWithColumnScope()
         } else {
-            runQuery()
+            lazyLoadCurrentTabIfNeeded()
         }
     }
 
@@ -273,10 +286,12 @@ extension MainContentCoordinator {
             }
             toolbarState.isTableTab = true
         }
-        updatePreviewSubtitle(isPreview: createAsPreview)
         restoreLastHiddenColumnsForTable(tableName)
         restoreFiltersForTable(tableName)
-        executeSelectedTableTabQuery()
+        if let tabId = tabManager.selectedTab?.id {
+            cancelTableLoad(for: tabId)
+        }
+        lazyLoadCurrentTabIfNeeded()
     }
 
     // MARK: - Preview Tabs
@@ -288,6 +303,7 @@ extension MainContentCoordinator {
             || tab.hasUserActiveSort {
             return false
         }
+        if tab.tabType == .createTable { return !toolbarState.hasCreateTablePending }
         if tab.isPreview { return true }
         if tab.tabType == .query,
            tab.execution.lastExecutedAt == nil,
@@ -301,13 +317,6 @@ extension MainContentCoordinator {
         guard let (tab, tabIndex) = tabManager.selectedTabAndIndex,
               tab.isPreview else { return }
         tabManager.mutate(at: tabIndex) { $0.isPreview = false }
-        updatePreviewSubtitle(isPreview: false)
-    }
-
-    private func updatePreviewSubtitle(isPreview: Bool) {
-        contentWindow?.subtitle = isPreview
-            ? String(format: String(localized: "%@ - Preview"), connection.name)
-            : connection.name
     }
 
     func showAllTablesMetadata() {
@@ -373,19 +382,21 @@ extension MainContentCoordinator {
     }
 
     /// Switch to a different database (called from database switcher)
-    func switchDatabase(to database: String) async {
-        clearFilterState()
+    func switchDatabase(to database: String, clearTabs: Bool = true) async {
+        if clearTabs { clearFilterState() }
         let previousDatabase = toolbarState.currentDatabase
         toolbarState.currentDatabase = database
 
         do {
             try await DatabaseManager.shared.switchDatabase(to: database, for: connectionId)
 
-            closeSiblingNativeWindows()
-            persistence.saveNowSync(tabs: tabManager.tabs, selectedTabId: tabManager.selectedTabId)
-            tabSessionRegistry.removeAll()
-            tabManager.tabs = []
-            tabManager.selectedTabId = nil
+            if clearTabs {
+                closeSiblingNativeWindows()
+                persistence.saveNowSync(tabs: tabManager.tabs, selectedTabId: tabManager.selectedTabId)
+                tabSessionRegistry.removeAll()
+                tabManager.tabs = []
+                tabManager.selectedTabId = nil
+            }
             await SchemaService.shared.invalidate(connectionId: connectionId)
 
             await refreshTables()
@@ -394,11 +405,32 @@ extension MainContentCoordinator {
 
             navigationLogger.error("Failed to switch database: \(error.localizedDescription, privacy: .public)")
             AlertHelper.showErrorSheet(
-                title: String(localized: "Database Switch Failed"),
+                title: String(
+                    format: String(localized: "%@ Switch Failed"),
+                    PluginManager.shared.containerEntityName(for: connection.type)
+                ),
                 message: error.localizedDescription,
                 window: contentWindow
             )
         }
+    }
+
+    /// Switch the active container (database, or schema for schema-switching-only
+    /// engines like BigQuery), routing by the plugin's container switch target.
+    func switchContainer(to container: String) async {
+        switch PluginManager.shared.containerSwitchTarget(for: connection.type) {
+        case .schema:
+            await switchSchema(to: container)
+        case .database, nil:
+            await switchDatabase(to: container)
+        }
+    }
+
+    private var schemaEntityName: String {
+        guard PluginManager.shared.containerSwitchTarget(for: connection.type) == .schema else {
+            return String(localized: "Schema")
+        }
+        return PluginManager.shared.containerEntityName(for: connection.type)
     }
 
     func switchSchema(to schema: String) async {
@@ -417,24 +449,17 @@ extension MainContentCoordinator {
             return
         }
 
-        clearFilterState()
         let previousSchema = toolbarState.currentSchema
         toolbarState.currentSchema = schema
 
         do {
             try await DatabaseManager.shared.switchSchema(to: schema, for: connectionId)
-
-            closeSiblingNativeWindows()
-            persistence.saveNowSync(tabs: tabManager.tabs, selectedTabId: tabManager.selectedTabId)
-            tabSessionRegistry.removeAll()
-            tabManager.tabs = []
-            tabManager.selectedTabId = nil
         } catch {
             toolbarState.currentSchema = previousSchema
 
             navigationLogger.error("Failed to switch schema: \(error.localizedDescription, privacy: .public)")
             AlertHelper.showErrorSheet(
-                title: String(localized: "Schema Switch Failed"),
+                title: String(format: String(localized: "%@ Switch Failed"), schemaEntityName),
                 message: error.localizedDescription,
                 window: contentWindow
             )
@@ -528,12 +553,7 @@ extension MainContentCoordinator {
     // MARK: - Redis Key Tree Navigation
 
     func browseRedisNamespace(_ prefix: String) {
-        let separator = connection.additionalFields["redisSeparator"] ?? ":"
-        let escapedPrefix = prefix.replacingOccurrences(of: "\"", with: "\\\"")
-        let query = "SCAN 0 MATCH \"\(escapedPrefix)*\" COUNT 200"
-        let title = prefix.hasSuffix(separator) ? String(prefix.dropLast(separator.count)) : prefix
-        tabManager.addTab(initialQuery: query, title: title)
-        runQuery()
+        applyBrowseSearch(BrowseSearchState(pattern: "\(prefix)*"))
     }
 
     func openRedisKey(_ keyName: String, keyType: String) {

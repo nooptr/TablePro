@@ -14,7 +14,11 @@ import TableProPluginKit
 // MARK: - Session Management
 
 extension DatabaseManager {
-    func connectToSession(_ requestedConnection: DatabaseConnection) async throws {
+    func connectToSession(
+        _ requestedConnection: DatabaseConnection,
+        passwordOverride incomingPasswordOverride: String? = nil,
+        sshPasswordOverride: String? = nil
+    ) async throws {
         let connection = resolvedConnectionDefinition(for: requestedConnection)
 
         if let existing = activeSessions[connection.id], existing.driver != nil {
@@ -40,7 +44,10 @@ extension DatabaseManager {
 
         let effectiveConnection: DatabaseConnection
         do {
-            effectiveConnection = try await buildEffectiveConnection(for: resolvedConnection)
+            effectiveConnection = try await buildEffectiveConnection(
+                for: resolvedConnection,
+                sshPasswordOverride: sshPasswordOverride
+            )
         } catch {
             finalizeConnectionFailure(for: connection.id, cancelled: Task.isCancelled)
             throw error
@@ -57,8 +64,8 @@ extension DatabaseManager {
             }
         }
 
-        var passwordOverride: String?
-        if connection.promptForPassword {
+        var passwordOverride: String? = incomingPasswordOverride
+        if passwordOverride == nil, connection.promptForPassword, !pluginManager.hidesPassword(for: connection) {
             if let cached = activeSessions[connection.id]?.cachedPassword {
                 passwordOverride = cached
             } else {
@@ -109,17 +116,10 @@ extension DatabaseManager {
             try await driver.connect()
             try Task.checkCancellation()
 
-            let timeoutSeconds = AppSettingsManager.shared.general.queryTimeoutSeconds
-            do {
-                try await driver.applyQueryTimeout(timeoutSeconds)
-            } catch {
-                Self.logger.warning(
-                    "Query timeout not supported for \(connection.name): \(error.localizedDescription)"
-                )
-            }
-
-            await executeStartupCommands(
-                resolvedConnection.startupCommands, on: driver, connectionName: connection.name
+            await applyTimeoutAndStartupCommands(
+                on: driver,
+                startupCommands: resolvedConnection.startupCommands,
+                connectionName: connection.name
             )
 
             if let schemaDriver = driver as? SchemaSwitchable {

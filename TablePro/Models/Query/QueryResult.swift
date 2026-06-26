@@ -22,6 +22,8 @@ struct QueryResult {
     /// Optional status message from the plugin (e.g. server notices, warnings)
     var statusMessage: String?
 
+    var columnMeta: [ResultColumnMeta]?
+
     var isEmpty: Bool {
         rows.isEmpty
     }
@@ -42,6 +44,12 @@ struct QueryResult {
         executionTime: 0,
         error: nil
     )
+}
+
+struct ResultColumnMeta: Sendable {
+    let isPrimaryKey: Bool
+    let isNullable: Bool
+    let isAutoIncrement: Bool
 }
 
 /// Database error types
@@ -206,6 +214,29 @@ struct ForeignKeyInfo: Identifiable, Hashable {
         self.referencedSchema = referencedSchema
         self.onDelete = onDelete
         self.onUpdate = onUpdate
+    }
+}
+
+struct TriggerInfo: Identifiable, Hashable {
+    var id: String { name }
+    let name: String
+    let timing: String
+    let event: String
+    let statement: String
+    let enabled: Bool?
+
+    init(
+        name: String,
+        timing: String,
+        event: String,
+        statement: String,
+        enabled: Bool? = nil
+    ) {
+        self.name = name
+        self.timing = timing
+        self.event = event
+        self.statement = statement
+        self.enabled = enabled
     }
 }
 

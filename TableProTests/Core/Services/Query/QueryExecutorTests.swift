@@ -178,7 +178,7 @@ struct QueryExecutorTests {
                 referencedTable: "roles", referencedColumn: "id"
             )
         ]
-        let schema: SchemaResult = (columnInfo: columns, fkInfo: fks, approximateRowCount: 1_234)
+        let schema = FetchedTableSchema(columns: columns, foreignKeys: fks, approximateRowCount: 1_234)
 
         let parsed = QueryExecutor.parseSchemaMetadata(schema)
 
@@ -187,7 +187,7 @@ struct QueryExecutorTests {
         #expect(parsed.columnDefaults["name"] == .some("guest"))
         #expect(parsed.columnNullable["id"] == false)
         #expect(parsed.columnNullable["name"] == true)
-        #expect(parsed.columnForeignKeys["role_id"]?.referencedTable == "roles")
+        #expect(parsed.columnForeignKeys?["role_id"]?.referencedTable == "roles")
         #expect(parsed.approximateRowCount == 1_234)
     }
 
@@ -201,30 +201,77 @@ struct QueryExecutorTests {
                 defaultValue: nil, extra: nil, charset: nil, collation: nil, comment: nil
             )
         ]
-        let schema: SchemaResult = (columnInfo: columns, fkInfo: [], approximateRowCount: nil)
+        let schema = FetchedTableSchema(columns: columns, foreignKeys: [], approximateRowCount: nil)
 
         let parsed = QueryExecutor.parseSchemaMetadata(schema)
 
         #expect(parsed.columnEnumValues["status"] == ["open", "closed", "archived"])
     }
 
+
+    @Test("parseSchemaMetadata keeps a failed foreign key fetch distinguishable from zero foreign keys")
+    func parseSchemaMetadataNilForeignKeys() {
+        let schema = FetchedTableSchema(columns: [], foreignKeys: nil, approximateRowCount: nil)
+        let parsed = QueryExecutor.parseSchemaMetadata(schema)
+        #expect(parsed.columnForeignKeys == nil)
+    }
+
     @Test("parseSchemaMetadata returns empty containers when input is empty")
     func parseSchemaMetadataEmpty() {
-        let schema: SchemaResult = (columnInfo: [], fkInfo: [], approximateRowCount: nil)
+        let schema = FetchedTableSchema(columns: [], foreignKeys: [], approximateRowCount: nil)
         let parsed = QueryExecutor.parseSchemaMetadata(schema)
         #expect(parsed.primaryKeyColumns.isEmpty)
         #expect(parsed.columnDefaults.isEmpty)
         #expect(parsed.columnNullable.isEmpty)
-        #expect(parsed.columnForeignKeys.isEmpty)
+        #expect(parsed.columnForeignKeys?.isEmpty == true)
         #expect(parsed.columnEnumValues.isEmpty)
         #expect(parsed.approximateRowCount == nil)
     }
 
-    // TODO: integration test for `QueryExecutor.executeQuery` orchestration
-    // (parallel schema fetch, cancel-on-fetch-error, parameterised path).
-    // Requires either a `DatabaseDriver` mock registered with
-    // `DatabaseManager.shared` or a DI refactor of `QueryExecutor` to accept
-    // an injected driver. Static helpers above already cover SQL parsing,
-    // metadata parsing, parameter reconciliation, DDL detection, and row-cap
-    // policy.
+    // MARK: - Inline result-set metadata
+
+    @Test("inlineMetadata extracts primary keys and nullability from result flags")
+    func inlineMetadataExtractsFlags() throws {
+        let meta = [
+            ResultColumnMeta(isPrimaryKey: true, isNullable: false, isAutoIncrement: true),
+            ResultColumnMeta(isPrimaryKey: false, isNullable: true, isAutoIncrement: false)
+        ]
+        let parsed = try #require(QueryExecutor.inlineMetadata(from: meta, columns: ["id", "name"]))
+        #expect(parsed.primaryKeyColumns == ["id"])
+        #expect(parsed.columnNullable["id"] == false)
+        #expect(parsed.columnNullable["name"] == true)
+        #expect(parsed.columnDefaults.isEmpty)
+        #expect(parsed.columnForeignKeys == nil)
+        #expect(parsed.approximateRowCount == nil)
+    }
+
+    @Test("inlineMetadata reports a composite primary key in column order")
+    func inlineMetadataCompositePrimaryKey() throws {
+        let meta = [
+            ResultColumnMeta(isPrimaryKey: true, isNullable: false, isAutoIncrement: false),
+            ResultColumnMeta(isPrimaryKey: true, isNullable: false, isAutoIncrement: false),
+            ResultColumnMeta(isPrimaryKey: false, isNullable: true, isAutoIncrement: false)
+        ]
+        let parsed = try #require(QueryExecutor.inlineMetadata(from: meta, columns: ["order_id", "product_id", "qty"]))
+        #expect(parsed.primaryKeyColumns == ["order_id", "product_id"])
+    }
+
+    @Test("inlineMetadata returns nil when result metadata is absent or empty")
+    func inlineMetadataNilWhenAbsent() {
+        #expect(QueryExecutor.inlineMetadata(from: nil, columns: ["id"]) == nil)
+        #expect(QueryExecutor.inlineMetadata(from: [], columns: ["id"]) == nil)
+    }
+
+    @Test("inlineMetadata returns nil when metadata count does not match columns")
+    func inlineMetadataNilOnCountMismatch() {
+        let meta = [ResultColumnMeta(isPrimaryKey: true, isNullable: false, isAutoIncrement: false)]
+        #expect(QueryExecutor.inlineMetadata(from: meta, columns: ["id", "name"]) == nil)
+    }
+
+    // TODO: integration test for the execute -> Phase 1 render -> Phase 2 metadata
+    // flow in QueryExecutionCoordinator (rows render without awaiting schema; the
+    // schema task applies metadata and bumps metadataVersion afterwards). Requires
+    // a `DatabaseDriver` mock registered with `DatabaseManager.shared` or a DI
+    // refactor. Static helpers above cover SQL parsing, metadata parsing, inline
+    // result-set metadata, parameter reconciliation, DDL detection, and row-cap policy.
 }
