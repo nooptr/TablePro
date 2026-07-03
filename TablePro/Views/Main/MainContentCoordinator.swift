@@ -862,7 +862,7 @@ final class MainContentCoordinator {
 
     // MARK: - Query Execution
 
-    func runQuery(trigger: TableLoadTrigger = .userInitiated) {
+    func runQuery(trigger: TableLoadTrigger = .userInitiated, bypassRowLimit: Bool = false) {
         guard let (tab, index) = tabManager.selectedTabAndIndex,
               !tab.execution.isExecuting else { return }
 
@@ -921,7 +921,8 @@ final class MainContentCoordinator {
                 dispatchParameterizedStatements(
                     paramStatements,
                     parameters: reconciled,
-                    tabIndex: index
+                    tabIndex: index,
+                    bypassRowLimit: bypassRowLimit
                 )
                 return
             }
@@ -931,7 +932,7 @@ final class MainContentCoordinator {
         guard !statements.isEmpty else { return }
 
         tabManager.tabStructureVersion += 1
-        dispatchStatements(statements, tabIndex: index)
+        dispatchStatements(statements, tabIndex: index, bypassRowLimit: bypassRowLimit)
     }
 
     /// Execute table tab query directly.
@@ -1120,20 +1121,13 @@ final class MainContentCoordinator {
     internal func executeQueryInternal(
         _ sql: String,
         isAutoLoad: Bool = false,
-        trigger: TableLoadTrigger = .userInitiated
+        trigger: TableLoadTrigger = .userInitiated,
+        bypassRowLimit: Bool = false
     ) {
         guard let (selectedTab, index) = tabManager.selectedTabAndIndex,
               !selectedTab.execution.isExecuting else { return }
 
-        if currentQueryTask != nil {
-            currentQueryTask?.cancel()
-            do {
-                try services.databaseManager.driver(for: connectionId)?.cancelQuery()
-            } catch {
-                Self.logger.warning("cancelQuery failed: \(error.localizedDescription, privacy: .public)")
-            }
-            currentQueryTask = nil
-        }
+        cancelInFlightQueryTask()
         queryGeneration += 1
         let capturedGeneration = queryGeneration
 
@@ -1154,7 +1148,7 @@ final class MainContentCoordinator {
         let conn = connection
         let tabId = tabManager.tabs[index].id
 
-        let rowCap = resolveRowCap(sql: sql, tabType: tab.tabType)
+        let plan = resolveExecutionPlan(sql: sql, tabType: tab.tabType, bypassLimit: bypassRowLimit)
         let (tableName, isEditable) = resolveTableEditability(tab: tab, sql: sql)
 
         let needsMetadataFetch: Bool
@@ -1207,9 +1201,9 @@ final class MainContentCoordinator {
 
             do {
                 let fetchResult = try await queryExecutor.executeQuery(
-                    sql: sql,
+                    sql: plan.executedSQL,
                     parameters: nil,
-                    rowCap: rowCap
+                    rowCap: plan.rowCap
                 )
 
                 guard !Task.isCancelled else {
@@ -1295,10 +1289,21 @@ final class MainContentCoordinator {
                         pendingLoadTrigger = trigger
                         return
                     }
-                    handleQueryExecutionError(error, sql: sql, tabId: tabId, connection: conn, trigger: trigger)
+                    handleQueryExecutionError(error, sql: plan.executedSQL, tabId: tabId, connection: conn, trigger: trigger)
                 }
             }
         }
+    }
+
+    private func cancelInFlightQueryTask() {
+        guard currentQueryTask != nil else { return }
+        currentQueryTask?.cancel()
+        do {
+            try services.databaseManager.driver(for: connectionId)?.cancelQuery()
+        } catch {
+            Self.logger.warning("cancelQuery failed: \(error.localizedDescription, privacy: .public)")
+        }
+        currentQueryTask = nil
     }
 
     /// Reset execution state when a query is cancelled
@@ -1380,7 +1385,10 @@ final class MainContentCoordinator {
         if tab.tabType == .query {
             let tabId = tab.id
             let capturedSort = newState
-            let baseQuery = tab.pagination.baseQueryForMore ?? tab.content.query
+            let hasBoundParameters = tab.pagination.baseQueryParameterValues?.isEmpty == false
+            let baseQuery = hasBoundParameters
+                ? tab.content.query
+                : (tab.pagination.baseQueryForMore ?? tab.content.query)
             let capturedColumns = tableRows.columns
             confirmDiscardChangesIfNeeded(action: .sort) { [weak self] confirmed in
                 guard let self, confirmed else { return }

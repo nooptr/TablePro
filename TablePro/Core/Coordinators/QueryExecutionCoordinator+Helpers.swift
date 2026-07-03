@@ -57,7 +57,8 @@ extension QueryExecutionCoordinator {
         sql: String,
         connection conn: DatabaseConnection,
         isTruncated: Bool = false,
-        queryParameterValues: [QueryParameter]? = nil
+        queryParameterValues: [QueryParameter]? = nil,
+        historySQL: String? = nil
     ) {
         guard let idx = parent.tabManager.tabs.firstIndex(where: { $0.id == tabId }) else { return }
 
@@ -148,6 +149,8 @@ extension QueryExecutionCoordinator {
             rs.tableName = tab.tableContext.tableName
             rs.isEditable = tab.tableContext.isEditable
             rs.metadataVersion = tab.metadataVersion
+            rs.isTruncated = isTruncated
+            rs.baseQuery = sql
 
             let pinned = tab.display.resultSets.filter(\.isPinned)
             tab.display.resultSets = pinned + [rs]
@@ -191,7 +194,7 @@ extension QueryExecutionCoordinator {
         }
 
         QueryHistoryManager.shared.recordQuery(
-            query: sql,
+            query: historySQL ?? sql,
             connectionId: conn.id,
             databaseName: parent.activeDatabaseName,
             executionTime: executionTime,
